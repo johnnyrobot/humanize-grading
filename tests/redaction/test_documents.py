@@ -10,7 +10,7 @@ def test_markdown_is_read(tmp_path):
     path.write_text("Maya Lin wrote this.", encoding="utf-8")
     result = extract(path)
     assert result.text == "Maya Lin wrote this."
-    assert result.author == ""
+    assert result.metadata == ()
     assert result.error == ""
 
 
@@ -59,20 +59,123 @@ def test_a_docx_author_is_returned_not_dropped(tmp_path):
     result = extract(path)
 
     assert result.text == "Body text."
-    assert result.author == "Maya Lin"
+    assert "Maya Lin" in result.metadata
 
 
 def test_a_docx_with_no_author_returns_an_empty_author(tmp_path):
-    """python-docx's blank template pre-fills author as "python-docx"; clear it
-    explicitly to simulate a document that truly carries no author."""
+    """python-docx's blank template pre-fills author and comments; clear both
+    explicitly to simulate a document that truly carries no identity metadata."""
     docx = pytest.importorskip("docx")
     path = tmp_path / "paper.docx"
     document = docx.Document()
     document.add_paragraph("Body text.")
     document.core_properties.author = ""
+    document.core_properties.comments = ""
     document.save(str(path))
 
     result = extract(path)
 
-    assert result.author == ""
+    assert result.metadata == ()
     assert result.error == ""
+
+
+def test_docx_table_content_is_extracted(tmp_path):
+    """A table is body content. Dropping it grades an incomplete essay."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.add_paragraph("Body paragraph one.")
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "Policy"
+    table.cell(0, 1).text = "Effect"
+    table.cell(1, 0).text = "DMCA 1201"
+    table.cell(1, 1).text = "Chills repair"
+    document.save(str(path))
+
+    result = extract(path)
+
+    assert "Body paragraph one." in result.text
+    assert "Policy" in result.text
+    assert "Effect" in result.text
+    assert "DMCA 1201" in result.text
+    assert "Chills repair" in result.text
+    assert result.error == ""
+
+
+def test_a_table_only_docx_is_not_mistaken_for_empty(tmp_path):
+    """A submission that is entirely a table must not read as a blank one."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "Policy"
+    table.cell(0, 1).text = "Effect"
+    document.save(str(path))
+
+    result = extract(path)
+
+    assert "Policy" in result.text
+    assert "Effect" in result.text
+    assert result.empty_body is False
+    assert result.error == ""
+
+
+def test_a_truly_empty_docx_reports_an_empty_body(tmp_path):
+    """No paragraphs, no tables: a real blank submission, not a crash."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.save(str(path))
+
+    result = extract(path)
+
+    assert result.empty_body is True
+    assert result.error == ""
+
+
+def test_docx_headers_footers_and_properties_reach_metadata(tmp_path):
+    """Every identity-bearing string outside the body must reach metadata,
+    and none of it must leak into the graded text."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.add_paragraph("The body text stays on topic.")
+    document.core_properties.author = "Maya Lin"
+    document.core_properties.last_modified_by = "Jane Smith"
+    document.core_properties.title = "Essay by Maya Lin"
+    document.core_properties.comments = "Reviewed by Prof Chen"
+    section = document.sections[0]
+    section.header.paragraphs[0].text = "Header: Maya Lin, Section 3"
+    section.footer.paragraphs[0].text = "Footer: page prepared for Jane Smith"
+    document.save(str(path))
+
+    result = extract(path)
+
+    for value in (
+        "Maya Lin",
+        "Jane Smith",
+        "Essay by Maya Lin",
+        "Reviewed by Prof Chen",
+        "Header: Maya Lin, Section 3",
+        "Footer: page prepared for Jane Smith",
+    ):
+        assert value in result.metadata
+
+    assert "Header: Maya Lin, Section 3" not in result.text
+    assert "Footer: page prepared for Jane Smith" not in result.text
+
+
+def test_a_utf8_bom_is_stripped(tmp_path):
+    """A Windows-authored file's BOM must not corrupt the first character."""
+    path = tmp_path / "paper.md"
+    path.write_bytes(b"\xef\xbb\xbfMaya Lin wrote this.")
+    result = extract(path)
+    assert result.text == "Maya Lin wrote this."
+    assert result.text.startswith("Maya")
+
+
+def test_output_name_rejects_a_path_separator():
+    with pytest.raises(ValueError):
+        output_name("STUDENT_07", "../evil")
+    with pytest.raises(ValueError):
+        output_name("STUDENT_07", "/abs")
