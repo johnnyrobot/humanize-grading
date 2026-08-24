@@ -4,7 +4,14 @@ import json
 
 import pytest
 
-from scripts.redaction.pipeline import EXIT_CANDIDATES, EXIT_OK, EXIT_ROSTER, EXIT_UNREADABLE, run
+from scripts.redaction.pipeline import (
+    EXIT_CANDIDATES,
+    EXIT_DESTINATION_NOT_EMPTY,
+    EXIT_OK,
+    EXIT_ROSTER,
+    EXIT_UNREADABLE,
+    run,
+)
 from scripts.redaction.roster import RosterEntry
 
 
@@ -87,7 +94,10 @@ def test_reviewed_candidates_pass(tmp_path):
         "batch": "essay-1",
     }
     run(**common)
-    assert run(**common, reviewed=True).exit_code == EXIT_OK
+    # A second run into the same destination now needs force=True -- see
+    # test_a_non_empty_destination_is_refused -- this test is about
+    # `reviewed`, not staleness, so it opts back in explicitly.
+    assert run(**common, reviewed=True, force=True).exit_code == EXIT_OK
 
 
 def test_an_unreadable_file_fails_closed(tmp_path):
@@ -140,3 +150,103 @@ def test_the_docx_author_is_tokenized_not_dropped(tmp_path):
     assert len(written) == 1
     assert "Maya" not in written[0].read_text(encoding="utf-8")
     assert result.files[0].token == "STUDENT_01"
+
+
+def test_a_non_empty_destination_is_refused(tmp_path):
+    """A second run must never leave stale output mixed with current output."""
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Maya Lin argues that platforms curate.")
+    common = {
+        "source": source,
+        "destination": tmp_path / "out",
+        "map_path": tmp_path / "map.json",
+        "roster": [RosterEntry("Maya Lin")],
+        "batch": "essay-1",
+    }
+    run(**common)
+    before = sorted(p.name for p in (tmp_path / "out").iterdir())
+
+    result = run(**common)
+
+    assert result.exit_code == EXIT_DESTINATION_NOT_EMPTY
+    after = sorted(p.name for p in (tmp_path / "out").iterdir())
+    assert after == before
+
+
+def test_force_clears_stale_token_outputs(tmp_path):
+    """Three submissions, then one, with force: no stale file may survive."""
+    source = tmp_path / "in"
+    _write(source, "lin.md", "Maya Lin argues the network effect matters most.")
+    _write(source, "brooks.md", "Tyler Brooks argues regulation is the only lever.")
+    _write(source, "reed.md", "Jordan Reed argues decentralization solves nothing.")
+    destination = tmp_path / "out"
+    run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        roster=[
+            RosterEntry("Maya Lin"),
+            RosterEntry("Tyler Brooks"),
+            RosterEntry("Jordan Reed"),
+        ],
+        batch="essay-1",
+    )
+    assert sorted(p.name for p in destination.iterdir()) == [
+        "STUDENT_01.md",
+        "STUDENT_02.md",
+        "STUDENT_03.md",
+    ]
+
+    source2 = tmp_path / "in2"
+    _write(source2, "bennett.md", "Chloe Bennett argues infrastructure debt is underrated.")
+    result = run(
+        source=source2,
+        destination=destination,
+        map_path=tmp_path / "map2.json",
+        roster=[RosterEntry("Chloe Bennett")],
+        batch="essay-2",
+        force=True,
+    )
+
+    written = sorted(p.name for p in destination.iterdir())
+    assert written == ["STUDENT_01.md"]
+    content = (destination / "STUDENT_01.md").read_text(encoding="utf-8")
+    assert "infrastructure debt" in content
+    assert "network effect" not in content
+    assert result.exit_code == EXIT_OK
+
+
+def test_force_leaves_unrelated_files_alone(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Maya Lin argues that platforms curate.")
+    destination = tmp_path / "out"
+    destination.mkdir(parents=True)
+    (destination / "notes.txt").write_text("instructor notes", encoding="utf-8")
+
+    run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+        force=True,
+    )
+
+    assert (destination / "notes.txt").read_text(encoding="utf-8") == "instructor notes"
+
+
+def test_an_empty_destination_needs_no_force(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Maya Lin argues that platforms curate.")
+    destination = tmp_path / "out"
+    destination.mkdir(parents=True)  # exists, but empty
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_OK

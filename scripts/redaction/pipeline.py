@@ -1,13 +1,23 @@
 """Run every redaction layer over a batch and fail closed on any doubt.
 
-Silent partial success is the failure mode that matters here, so there is no
-override flag. A non-zero exit must stop the cloud path.
+Silent partial success is the failure mode that matters here. Exit codes:
+0 clean, 2 an unmatched roster entry, 3 unreviewed layer-4 candidates, 4 an
+unreadable file, 5 the destination directory is not empty. There is no
+override for 2, 3, or 4 -- fix the input and run again. Exit 5 exists only
+to stop a stale prior run's files from silently mixing into a new one:
+without it, a re-run after fixing a warning would leave last time's
+STUDENT_02.md sitting next to this time's STUDENT_01.md, indistinguishable
+from current output, and an instructor would grade a student who did not
+submit this batch. ``force=True`` (the CLI's --force) permits writing into
+a non-empty destination, and deletes only the prior run's token-named
+outputs first -- never anything else someone put there on purpose.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,8 +32,16 @@ EXIT_OK = 0
 EXIT_ROSTER = 2
 EXIT_CANDIDATES = 3
 EXIT_UNREADABLE = 4
+EXIT_DESTINATION_NOT_EMPTY = 5
 
 UNKNOWN_PREFIX = "UNKNOWN"
+
+# The only two prefixes run() ever gives a redacted file's token (see the
+# `entry.token` assignment below): a matched roster student, or an
+# unmatched submission. Only a file whose name has this shape could be a
+# token-named output from a prior run, so only these are ever candidates
+# for deletion under --force.
+_TOKEN_OUTPUT_PATTERN = re.compile(rf"^(?:STUDENT|{UNKNOWN_PREFIX})_\d+\..+$")
 
 
 @dataclass
@@ -47,6 +65,7 @@ class BatchResult:
     files: list[FileResult] = field(default_factory=list)
     unmatched_roster: list[RosterEntry] = field(default_factory=list)
     exit_code: int = EXIT_OK
+    message: str = ""
 
 
 def run(
@@ -59,6 +78,7 @@ def run(
     bare_names: bool = True,
     reviewed: bool = False,
     review_path: Path | None = None,
+    force: bool = False,
 ) -> BatchResult:
     """Redact every submission under source and write the map and review file.
 
@@ -78,10 +98,33 @@ def run(
     A blank submission (the container parsed fine but the body is empty) is
     skipped, not graded, and reported in the review file -- that is a fact
     the instructor must see, not a failure.
+
+    A non-empty destination is refused unless ``force`` is True, so a
+    second run can never leave a prior run's files sitting alongside this
+    run's -- current and stale output would otherwise be indistinguishable,
+    and the model would grade a student who did not submit this batch. With
+    ``force``, only files shaped like a prior run's token-named outputs
+    (STUDENT_NN.* or UNKNOWN_NN.*) are deleted before writing; anything else
+    already in destination is left alone.
     """
-    destination.mkdir(parents=True, exist_ok=True)
     if review_path is None:
         review_path = map_path.parent / "reviews" / f"{batch}.json"
+
+    if destination.exists() and any(destination.iterdir()):
+        if not force:
+            return BatchResult(
+                exit_code=EXIT_DESTINATION_NOT_EMPTY,
+                message=(
+                    f"{destination} is not empty. Empty it, choose a "
+                    "different destination, or pass --force to overwrite "
+                    "the prior run's token-named outputs."
+                ),
+            )
+        for entry in destination.iterdir():
+            if entry.is_file() and _TOKEN_OUTPUT_PATTERN.match(entry.name):
+                entry.unlink()
+
+    destination.mkdir(parents=True, exist_ok=True)
 
     tmap = TokenMap(batch)
     result = BatchResult()

@@ -5,9 +5,13 @@ Usage:
     python3 scripts/redact.py SOURCE --roster roster.csv --batch essay-3
 
 Exit codes: 0 clean, 2 unmatched roster entry, 3 unreviewed candidates,
-4 unreadable file. A non-zero exit must stop the cloud path. There is no
-override flag -- if this prints anything other than a clean exit, fix the
-input and run it again rather than forcing the cloud path open.
+4 unreadable file, 5 destination directory not empty. A non-zero exit must
+stop the cloud path. There is no override for 2, 3, or 4 -- if this prints
+anything other than a clean exit for one of those, fix the input and run it
+again rather than forcing the cloud path open. Exit 5 exists only to stop a
+stale prior run's files from silently mixing into a new one; pass --force
+to overwrite the prior run's token-named outputs (nothing else in the
+directory is touched).
 
 The review file (candidate names, self-identifying passages, bare-name
 substitutions, and any skipped-empty submission) is written next to the
@@ -23,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from redaction.pipeline import EXIT_OK, run  # noqa: E402
+from redaction.pipeline import EXIT_DESTINATION_NOT_EMPTY, EXIT_OK, run  # noqa: E402
 from redaction.roster import load_roster  # noqa: E402
 
 
@@ -46,6 +50,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Skip bare first and last names")
     parser.add_argument("--reviewed", action="store_true",
                         help="Confirm you read the review file")
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Allow writing into a non-empty --out, clearing its prior "
+        "token-named outputs first",
+    )
     args = parser.parse_args(argv)
 
     map_path = args.map or Path(".grading/maps") / f"{args.batch}.json"
@@ -61,7 +71,14 @@ def main(argv: list[str] | None = None) -> int:
         bare_names=not args.no_bare_names,
         reviewed=args.reviewed,
         review_path=review_path,
+        force=args.force,
     )
+
+    if result.exit_code == EXIT_DESTINATION_NOT_EMPTY:
+        print(result.message, file=sys.stderr)
+        print("\nRedaction did not complete cleanly. Do not send this to a "
+              "cloud model.", file=sys.stderr)
+        return result.exit_code
 
     print(f"Read {len(result.files)} files. Wrote {args.out}. Map at {map_path}.")
     for entry in result.files:
