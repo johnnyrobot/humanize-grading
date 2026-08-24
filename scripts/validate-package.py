@@ -47,10 +47,16 @@ if len(package_versions) != 1:
     )
 
 skill_files = {path.relative_to(ROOT) for path in ROOT.rglob("SKILL.md")}
-if SKILL_PATH.is_symlink() or skill_files != {Path("SKILL.md")}:
-    raise SystemExit("Keep one regular SKILL.md at the repo root")
-if PLUGIN.get("skills") != ["./"]:
-    raise SystemExit("Point the Claude plugin skill loader at the repo root")
+expected_skills = {Path("SKILL.md"), Path("skills/humanizer/SKILL.md")}
+if skill_files != expected_skills:
+    raise SystemExit(f"Expected exactly these skills: {sorted(expected_skills)}")
+for skill_file in sorted(expected_skills):
+    if (ROOT / skill_file).is_symlink():
+        raise SystemExit(f"Keep {skill_file} a regular file")
+    if len((ROOT / skill_file).read_text(encoding="utf-8").splitlines()) > 500:
+        raise SystemExit(f"Keep {skill_file} at 500 lines or fewer")
+if PLUGIN.get("skills") != ["./", "./skills/humanizer"]:
+    raise SystemExit("Point the plugin skill loader at both skills")
 
 plain_language_rules = (
     "## Writing style",
@@ -69,20 +75,15 @@ if missing_plain_language_rules:
         + ", ".join(missing_plain_language_rules)
     )
 
-pattern_numbers = [
-    int(number)
-    for number in re.findall(r"(?m)^### ([0-9]+)\. ", SKILL)
-]
+PATTERNS = (ROOT / "references" / "ai-patterns.md").read_text(encoding="utf-8")
+pattern_numbers = [int(n) for n in re.findall(r"(?m)^### ([0-9]+)\. ", PATTERNS)]
 if pattern_numbers != list(range(1, 36)):
-    raise SystemExit(f"Number SKILL.md patterns from 1 through 35: {pattern_numbers}")
+    raise SystemExit(f"Number the patterns 1 through 35: {pattern_numbers}")
 
 readme_numbers = {
     int(number) for number in re.findall(r"(?m)^\| ([0-9]+) \|", README)
 }
 if readme_numbers != set(range(1, 36)):
     raise SystemExit("List patterns 1 through 35 in the README table")
-
-if len(SKILL.splitlines()) > 500:
-    raise SystemExit("Keep SKILL.md at 500 lines or fewer")
 
 print(f"Humanizer package v{skill_version} is valid")

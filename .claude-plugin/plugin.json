@@ -1,7 +1,7 @@
 {
   "name": "humanizer",
-  "version": "2.11.2",
+  "version": "3.0.0",
   "description": "Rewrite AI-sounding text so it reads naturally without changing what it says.",
   "license": "MIT",
-  "skills": ["./"]
+  "skills": ["./", "./skills/humanizer"]
 }
