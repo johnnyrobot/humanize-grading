@@ -19,9 +19,19 @@ DEFAULT_ID = re.compile(
     r"|\bstudent\s+([A-Za-z]{1,2}-?\d{6,9})\b",
     re.IGNORECASE,
 )
+
+RESERVED_PATH = (
+    r"(?:rules|tos|terms|privacy|policies|about|help|home|search|explore|settings|legal"
+    r"|support|security|blog|careers|press|developers?|docs|i|intent|share|hashtag"
+    r"|notifications|messages|login|signup|safety|community|guidelines|en)"
+)
+
 PROFILE_URL = re.compile(
-    r"(?<![\w/.])(?:https?://)?(?:www\.)?"
-    r"(?:linkedin\.com/in/|github\.com/|x\.com/|twitter\.com/|facebook\.com/|instagram\.com/)[\w.-]+"
+    r"(?<![\w/.])(?:https?://)?(?:www\.)?(?:"
+    r"linkedin\.com/in/[\w.-]+"
+    r"|github\.com/(?!" + RESERVED_PATH + r"\b)[\w.-]+(?![\w.-]*/)"
+    r"|(?:x|twitter|facebook|instagram)\.com/(?!" + RESERVED_PATH + r"\b)[\w.-]+"
+    r")"
 )
 
 _ORDER = (

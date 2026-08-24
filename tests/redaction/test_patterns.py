@@ -142,3 +142,35 @@ def test_a_profile_domain_inside_another_url_is_not_redacted():
     text, count = redact_structured("See https://archive.org/x.com/y for details.", tmap, "p1.md")
     assert text == "See https://archive.org/x.com/y for details."
     assert count == 0
+
+
+def test_a_cited_platform_rules_page_is_not_a_profile():
+    """Platform rules pages are subject matter, not personal profiles."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("See x.com/rules for the platform's policy", tmap, "p1.md")
+    assert text == "See x.com/rules for the platform's policy"
+    assert count == 0
+
+
+def test_a_cited_terms_of_service_page_is_not_a_profile():
+    """Terms of service pages are subject matter, not personal profiles."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("Citing twitter.com/tos as the source", tmap, "p1.md")
+    assert text == "Citing twitter.com/tos as the source"
+    assert count == 0
+
+
+def test_a_github_repository_is_not_a_profile():
+    """GitHub repositories with multiple path segments must not be caught as profiles."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("(see github.com/torvalds/linux for the repo)", tmap, "p1.md")
+    assert text == "(see github.com/torvalds/linux for the repo)"
+    assert count == 0
+
+
+def test_a_github_user_profile_is_still_redacted():
+    """GitHub single-segment handles must still be caught as profiles."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("github.com/mayalin", tmap, "p1.md")
+    assert text == "URL_01"
+    assert count == 1
