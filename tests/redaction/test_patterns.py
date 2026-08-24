@@ -1,5 +1,7 @@
 """Layer 2 must catch structured PII without touching subject matter."""
 
+import time
+
 from scripts.redaction.patterns import redact_structured
 from scripts.redaction.tokens import TokenMap
 
@@ -210,14 +212,22 @@ def test_a_github_profile_with_a_trailing_slash_is_redacted():
 
 
 def test_the_github_lookahead_does_not_backtrack_quadratically():
-    """The github alternative must not exhibit catastrophic backtracking.
+    """A long handle followed by a trailing slash must redact, and fast.
 
-    An earlier lookahead, `(?![\\w.-]*/)`, re-scanned the tail on every
-    backtrack of the greedy handle, making long non-matching runs O(n^2).
-    A possessive quantifier closes that hole. This asserts the call
-    completes at all -- not a wall-clock threshold, so it is not flaky on
-    a loaded machine.
+    The earlier lookahead, `(?![\\w.-]*/)`, re-scanned the tail on every
+    backtrack of the greedy handle. That made this input O(n^2) AND made it
+    fail to match at all. The possessive quantifier fixes both, so the
+    count assertion below binds without relying on the clock. The timing
+    guard is a generous backstop: the quadratic form took 0.533s here,
+    the possessive form takes about 0.0002s.
     """
     tmap = TokenMap("essay-1")
     text = "github.com/" + "a" * 20000 + "/"
-    redact_structured(text, tmap, "p1.md")
+
+    start = time.perf_counter()
+    result, count = redact_structured(text, tmap, "p1.md")
+    elapsed = time.perf_counter() - start
+
+    assert count == 1
+    assert result.startswith("URL_01/")
+    assert elapsed < 0.5
