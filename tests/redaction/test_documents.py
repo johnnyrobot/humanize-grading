@@ -179,3 +179,81 @@ def test_output_name_rejects_a_path_separator():
         output_name("STUDENT_07", "../evil")
     with pytest.raises(ValueError):
         output_name("STUDENT_07", "/abs")
+
+
+def test_merged_table_cells_are_not_duplicated(tmp_path):
+    """python-docx hands back the same cell for every grid position a merge
+    spans; a merged header must render once, not once per spanned column."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    table = document.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "A"
+    table.cell(0, 1).text = "B"
+    table.cell(0, 0).merge(table.cell(0, 1))
+    table.cell(1, 0).text = "C"
+    table.cell(1, 1).text = "D"
+    document.save(str(path))
+
+    result = extract(path)
+
+    assert result.text == "A B\nC | D"
+    assert result.text.count("A B") == 1
+
+
+def test_document_order_is_preserved_across_paragraphs_and_tables(tmp_path):
+    """A table between two paragraphs must not trail both of them: an essay
+    that says "as the table below shows" has to read in the order it was
+    written."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.add_paragraph("FIRST paragraph.")
+    table = document.add_table(rows=1, cols=2)
+    table.cell(0, 0).text = "TBL-a"
+    table.cell(0, 1).text = "TBL-b"
+    document.add_paragraph("LAST paragraph.")
+    document.save(str(path))
+
+    result = extract(path)
+
+    first = result.text.index("FIRST paragraph.")
+    table_pos = result.text.index("TBL-a")
+    last = result.text.index("LAST paragraph.")
+    assert first < table_pos < last
+
+
+def test_nested_table_content_is_extracted(tmp_path):
+    """A table nested inside another table's cell must not vanish."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    table = document.add_table(rows=1, cols=1)
+    outer_cell = table.cell(0, 0)
+    outer_cell.paragraphs[0].text = "OUTER"
+    inner_table = outer_cell.add_table(rows=1, cols=2)
+    inner_table.cell(0, 0).text = "IN-a"
+    inner_table.cell(0, 1).text = "IN-b"
+    document.save(str(path))
+
+    result = extract(path)
+
+    assert "IN-a" in result.text
+    assert "IN-b" in result.text
+
+
+def test_metadata_is_deduplicated_and_drops_library_defaults(tmp_path):
+    """The same name often sits in both author and last_modified_by, and a
+    fresh docx pre-fills comments with a python-docx default -- neither
+    should reach the caller as if it were two different people."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.add_paragraph("Body text.")
+    document.core_properties.author = "Maya Lin"
+    document.core_properties.last_modified_by = "Maya Lin"
+    document.save(str(path))
+
+    result = extract(path)
+
+    assert result.metadata == ("Maya Lin",)
