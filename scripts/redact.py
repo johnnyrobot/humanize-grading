@@ -1,0 +1,87 @@
+#!/usr/bin/env python3
+"""Redact student submissions before any of them reach a cloud model.
+
+Usage:
+    python3 scripts/redact.py SOURCE --roster roster.csv --batch essay-3
+
+Exit codes: 0 clean, 2 unmatched roster entry, 3 unreviewed candidates,
+4 unreadable file. A non-zero exit must stop the cloud path. There is no
+override flag -- if this prints anything other than a clean exit, fix the
+input and run it again rather than forcing the cloud path open.
+
+The review file (candidate names, self-identifying passages, bare-name
+substitutions, and any skipped-empty submission) is written next to the
+map, not into the redacted output folder: it holds real names, and the
+whole point of --out is that nothing in it does.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from redaction.pipeline import EXIT_OK, run  # noqa: E402
+from redaction.roster import load_roster  # noqa: E402
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("source", type=Path, help="Folder of raw submissions")
+    parser.add_argument("--roster", type=Path, required=True, help="Roster CSV")
+    parser.add_argument("--batch", required=True, help="Batch name, such as essay-3")
+    parser.add_argument("--out", type=Path, default=Path("redacted"))
+    parser.add_argument("--map", type=Path, default=None)
+    parser.add_argument(
+        "--review",
+        type=Path,
+        default=None,
+        help="Where to write the review file. Defaults next to --map, never --out.",
+    )
+    parser.add_argument("--instructor", action="append", default=[],
+                        help="A name that must never be redacted. Repeatable.")
+    parser.add_argument("--no-bare-names", action="store_true",
+                        help="Skip bare first and last names")
+    parser.add_argument("--reviewed", action="store_true",
+                        help="Confirm you read the review file")
+    args = parser.parse_args(argv)
+
+    map_path = args.map or Path(".grading/maps") / f"{args.batch}.json"
+    review_path = args.review or map_path.parent / "reviews" / f"{args.batch}.json"
+
+    result = run(
+        source=args.source,
+        destination=args.out,
+        map_path=map_path,
+        roster=load_roster(args.roster),
+        batch=args.batch,
+        protected=tuple(args.instructor),
+        bare_names=not args.no_bare_names,
+        reviewed=args.reviewed,
+        review_path=review_path,
+    )
+
+    print(f"Read {len(result.files)} files. Wrote {args.out}. Map at {map_path}.")
+    for entry in result.files:
+        if entry.error:
+            print(f"  ERROR {entry.source.name}: {entry.error}")
+        elif entry.skipped_empty:
+            print(f"  SKIPPED (empty submission) {entry.source.name}")
+    for entry in result.unmatched_roster:
+        print(f"  UNMATCHED roster entry never found: {entry.name}")
+    flagged = sum(len(f.candidates) for f in result.files)
+    warned = sum(len(f.warnings) for f in result.files)
+    bare = sum(len(f.bare_hits) for f in result.files)
+    print(f"  {flagged} names to review, {warned} self-identifying passages, "
+          f"{bare} bare-name substitutions. See {review_path}.")
+
+    if result.exit_code != EXIT_OK:
+        print("\nRedaction did not complete cleanly. Do not send this to a "
+              "cloud model.", file=sys.stderr)
+    return result.exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
