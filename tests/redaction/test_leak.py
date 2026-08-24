@@ -68,7 +68,6 @@ def _seeded_source(phil210, tmp_path):
 
 def _redact(source, phil210, tmp_path, name, instructor):
     destination = tmp_path / name
-    map_path = tmp_path / name / "map.json"
     result = run(
         source=source,
         destination=destination,
@@ -171,7 +170,7 @@ def test_a_non_empty_destination_is_refused(phil210, tmp_path, instructor):
     assert sorted(p.name for p in destination.iterdir()) == before
 
 
-def test_two_students_sharing_a_surname_are_not_confused(tmp_path):
+def test_a_students_feedback_is_not_misattributed(tmp_path):
     """One student's feedback must never come back addressed to another.
 
     A bare surname used to be replaced while still inside another student's
