@@ -64,3 +64,17 @@ def test_saved_shape_is_one_entity_per_token(tmp_path):
         "value": "Maya Lin",
         "file": "paper_1.md",
     }
+
+
+def test_tokens_past_ninety_nine_stay_unique_and_well_formed():
+    """:02d pads to a minimum of two digits, so the 100th token is STUDENT_100.
+
+    That is intended. The downstream token regex is \\d{2,}, so three-digit
+    tokens match, and no token can match inside another at a word boundary.
+    """
+    tmap = TokenMap("essay-1")
+    tokens = [tmap.allocate("STUDENT", f"Person {i}", "p.md") for i in range(101)]
+
+    assert tokens[98] == "STUDENT_99"
+    assert tokens[99] == "STUDENT_100"
+    assert len(set(tokens)) == 101
