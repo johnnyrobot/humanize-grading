@@ -20,7 +20,7 @@ PHONE = re.compile(r"(?<![\w.])(?:\+1[ -]?)?\(?\d{3}\)?[ .-]?\d{3}[ .-]?\d{4}(?!
 # a backstop for a non-roster person, which is rare. So this pattern
 # requires an explicit STUDENT cue (or "sid") rather than a bare "id".
 DEFAULT_ID = re.compile(
-    r"(?:\bstudent(?:\s+(?:id|number|no\.?))?(?:\s+(?:is|no\.?|number))?|\bsid)"
+    r"(?:\bstudent(?:'s|’s)?(?:\s+(?:id|number|no\.?))?(?:\s+(?:is|no\.?|number))?|\bsid)"
     r"[\s*_#:\-]{0,6}"
     r"([A-Za-z]{0,2}-?\d{6,9})\b",
     re.IGNORECASE,
@@ -62,6 +62,23 @@ def _replacement_span(match: re.Match[str]) -> tuple[int, int]:
     return match.start(0), match.end(0)
 
 
+def _sweep_known_ids(text: str, tmap: TokenMap) -> tuple[str, int]:
+    """Replace later bare repeats of an ID already established by a cued match.
+
+    A cued match is what proves a value is a student ID. Once proven, every
+    other occurrence of that exact value in the same document is the same ID,
+    so it needs no cue of its own. Values never cued are never swept, which is
+    why "Docket ID 12345678" stays untouched.
+    """
+    total = 0
+    for token, entity in list(tmap.tokens().items()):
+        if entity.kind != "ID":
+            continue
+        text, count = re.subn(rf"\b{re.escape(entity.value)}\b", token, text)
+        total += count
+    return text, total
+
+
 def redact_structured(
     text: str,
     tmap: TokenMap,
@@ -90,4 +107,7 @@ def redact_structured(
 
     for kind, pattern in _ORDER:
         text = substitute(kind, pattern, text)
-    return substitute("ID", id_pattern, text), total
+    text = substitute("ID", id_pattern, text)
+    text, swept = _sweep_known_ids(text, tmap)
+    total += swept
+    return text, total

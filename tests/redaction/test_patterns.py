@@ -231,3 +231,51 @@ def test_the_github_lookahead_does_not_backtrack_quadratically():
     assert count == 1
     assert result.startswith("URL_01/")
     assert elapsed < 0.5
+
+
+def test_a_possessive_student_cue_is_caught():
+    """'student's' must still carry the cue even though a bare 'student' does not
+    have whitespace right after it in this phrasing.
+    """
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("the student's ID: 1000431", tmap, "p1.md")
+    assert text == "the student's ID: ID_01"
+    assert count == 1
+
+    # Word processors autocorrect a straight apostrophe to a curly one.
+    tmap2 = TokenMap("essay-2")
+    text2, count2 = redact_structured("the student’s ID: 1000431", tmap2, "p1.md")
+    assert text2 == "the student’s ID: ID_01"
+    assert count2 == 1
+
+
+def test_a_repeated_id_is_caught_on_its_second_bare_mention():
+    """Once a value is proven to be a student ID by a cued match, a later bare
+    repeat of that same value must not leak in plaintext.
+    """
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured(
+        "Student X9998887 wrote it, with ID X9998887 again", tmap, "p1.md"
+    )
+    assert text == "Student ID_01 wrote it, with ID ID_01 again"
+    assert count == 2
+    assert "X9998887" not in text
+
+
+def test_an_uncued_identifier_is_never_swept():
+    """The sweep must only apply to values a cued match already established as
+    student IDs -- an uncued value like a docket number must never be swept in,
+    even when a real student ID happens to share the document.
+    """
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured(
+        "Student S1000431 submitted. Docket ID 12345678 was filed. ID S1000431 again.",
+        tmap,
+        "p1.md",
+    )
+    assert text == (
+        "Student ID_01 submitted. Docket ID 12345678 was filed. ID ID_01 again."
+    )
+    assert count == 2
+    assert "12345678" in text
+    assert "S1000431" not in text
