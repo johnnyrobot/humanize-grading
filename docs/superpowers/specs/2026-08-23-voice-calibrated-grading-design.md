@@ -28,6 +28,13 @@ The following are out of scope and must not be built:
 
 - Detecting AI-written student work. AI detection is unreliable and produces
   false accusations, so this skill does not judge authorship.
+
+  This is not the same as scoring prose. The PHIL/POLISCI 210 rubric names
+  "heavy reliance on AI buzzwords (*tapestry*, *delve*, *pivotal*,
+  *testament*)" as an Unacceptable marker under criterion 4. Scoring that is
+  assessing prose against a stated criterion, and it is in scope. Concluding
+  who or what wrote the essay is out of scope. The skill must report pattern
+  density as evidence for criterion 4 and must never infer authorship from it.
 - LMS API integration. The instructor pastes the finished feedback.
 - A user interface.
 - Shared or multi-instructor profiles.
@@ -279,11 +286,44 @@ Every condition below refuses rather than guesses.
 | Unmapped token at rehydrate | Fail the run. |
 | Empty or corrupt submission | Skip it, report it, continue the batch. |
 
+## Reference corpus
+
+A synthetic corpus exists at `~/Desktop/grading_mock_papers`. Copy it into
+`tests/fixtures/phil210/`. It must not be invented from scratch.
+
+| Item | Use |
+| --- | --- |
+| `grading_rubric.md` | PHIL/POLISCI 210, four criteria at 25 points each |
+| `graded/paper_1..5` | Calibration set. Four calibrate, one is the holdout. |
+| `ungraded/paper_6..10` | Grading test set |
+| Papers 3, 7, 10 | Deliberate AI slop. Must exercise criterion 4. |
+
+The corpus is synthetic. Its students and its instructor, Dr. Marcus Vance, are
+fictional, so the corpus is safe to commit and safe to publish. It still carries
+realistic names, dates, and course codes, so it doubles as the redaction fixture.
+
+The rubric specifies its own feedback protocol: inline bracketed annotations, a
+Bottom Line, What Worked, What to Work On, and a `— Dr. Vance` sign-off.
+`references/rubric-format.md` must therefore support a feedback-protocol section,
+and calibration must take structure from the rubric where the rubric states it,
+rather than inferring structure that is already written down.
+
+## Structured output
+
+The grading engine must write a machine-readable record beside each Markdown
+draft: `drafts/<batch>/STUDENT_07.json`, holding per-criterion scores,
+justification quotes with offsets, the total, and the pattern-density evidence
+for criterion 4.
+
+Markdown is for the instructor. JSON is what makes the batch consistency pass
+and any later comparison possible without reparsing prose. Adding it now is
+cheap; retrofitting it is not.
+
 ## Testing
 
 The leak test is the one that matters. Everything else supports it.
 
-- **Leak test:** a fixture submission seeded with about 20 known PII instances
+- **Leak test:** the PHIL 210 fixtures seeded with about 20 known PII instances
   across all four layers, plus a roster. Assert that zero survive into
   `redacted/`.
 - **Round trip:** `redact` then `rehydrate` reproduces the original text exactly.
