@@ -12,18 +12,19 @@ token). Each bare token is then keyed on the bare text itself, not the
 full name, so rehydrating a bare hit restores the original word instead of
 expanding it back into a full name that was never there.
 
-An initial form ("M. Smith") built from two different roster entries
-("Mary Anne Smith" and "Marcus Smith") is textually identical for both.
-Binding it to either student's token would misattribute the other's
-mention, so it is never claimed by an entry -- it gets its own token,
-keyed on the literal ambiguous text, the same way a bare name does.
+An initial form ("M. Smith") is keyed on its own literal text too, for the
+same reason: two different entries ("Mary Anne Smith" and "Marcus Smith")
+can generate the identical initial form, and binding it to either one's
+token would misattribute the other's mention. Keying it on the literal
+text sidesteps the question of which entry it belongs to -- ambiguous or
+not, "M. Smith" always rehydrates back to "M. Smith", never to a full name
+the student never wrote.
 """
 
 from __future__ import annotations
 
 import csv
 import re
-from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -74,41 +75,33 @@ def load_roster(path: Path) -> list[RosterEntry]:
 
 
 def full_name_variants(name: str) -> list[str]:
-    """Return the written forms of a full name, natural form first.
+    """Return the full written forms of a name, natural form first.
 
     The natural form ("Marcus Thorne") goes first, since that is how prose
     actually writes a name. The comma form ("Thorne, Marcus") goes second:
     trying it first, as a length sort would, lets it span a comma in
     ordinary prose — such as two names listed together — and eat text that
-    belongs to someone else. The initial form ("M. Thorne") goes last.
+    belongs to someone else.
+
+    The initial form ("M. Thorne") is not one of these: it is handled
+    separately, keyed on its own literal text -- see initial_form and
+    redact_roster.
     """
     parts = name.split()
     variants = [name]
     if len(parts) >= 2:
         comma_form = f"{parts[-1]}, {' '.join(parts[:-1])}"
-        initial_form = f"{parts[0][0]}. {parts[-1]}"
-        for variant in (comma_form, initial_form):
-            if variant not in variants:
-                variants.append(variant)
+        if comma_form not in variants:
+            variants.append(comma_form)
     return variants
 
 
-def _ambiguous_initials(roster: list[RosterEntry]) -> set[str]:
-    """Return every initial form more than one roster entry would generate.
-
-    "M. Smith" from "Mary Anne Smith" and "M. Smith" from "Marcus Smith" are
-    textually identical but name two different people. Binding either
-    entry's token to that form would misattribute the other's mention, so
-    redact_roster skips it in both entries' passes and instead tokenizes it
-    once, keyed on the literal ambiguous text -- the same device bare names
-    use to stay lossless without claiming a single owner.
-    """
-    counts: Counter[str] = Counter()
-    for entry in roster:
-        parts = entry.name.split()
-        if len(parts) >= 2:
-            counts[f"{parts[0][0]}. {parts[-1]}"] += 1
-    return {form for form, count in counts.items() if count > 1}
+def initial_form(name: str) -> str | None:
+    """Return a name's initial form ("M. Thorne"), or None for a one-word name."""
+    parts = name.split()
+    if len(parts) < 2:
+        return None
+    return f"{parts[0][0]}. {parts[-1]}"
 
 
 def bare_name_variants(name: str) -> list[str]:
@@ -140,23 +133,14 @@ def redact_roster(
     """Replace roster identities in text and report what changed."""
     result = RosterResult(text=text)
     full_name_present: dict[str, bool] = {}
-    ambiguous_initials = _ambiguous_initials(roster)
 
     # Pass 1: full names, emails, and student IDs for every entry, before
     # the protected-name shield or any bare name is touched. A student's
     # full name is PII even when a protected name (e.g. an instructor who
     # shares a surname with a student) is one of its substrings, so it must
     # be tokenized before the shield can hide that substring from view.
-    #
-    # An initial form shared by more than one roster entry (see
-    # _ambiguous_initials) is skipped here, by every entry that would
-    # generate it -- neither can safely claim it as their own token. It is
-    # resolved once, below, keyed on the literal text instead.
     for entry in roster:
-        full_forms = [
-            form for form in full_name_variants(entry.name)
-            if form not in ambiguous_initials
-        ]
+        full_forms = full_name_variants(entry.name)
         present = any(
             re.search(rf"\b{re.escape(form)}\b", result.text) for form in full_forms
         )
@@ -182,16 +166,22 @@ def redact_roster(
             if count:
                 result.matched.add(entry.name)
 
-    # An ambiguous initial form left untouched by pass 1 is still PII -- it
-    # just does not confirm which entry it belongs to, so it is not added to
-    # `matched` and does not gate that entry's bare-name pass. It gets its
-    # own token, keyed on the literal form, so rehydrating restores "M.
-    # Smith" exactly rather than expanding it into a full name that was
-    # never in the text.
-    for form in sorted(ambiguous_initials, key=len, reverse=True):
+    # Pass 1b: initial forms ("M. Smith"), for every entry, keyed on their
+    # own literal text -- never bound to a particular entry's token. Two
+    # entries can generate the identical initial form; whichever ran first
+    # would otherwise misattribute the other's mention on rehydrate. Keying
+    # on the literal text sidesteps that question entirely -- ambiguous or
+    # not, an initial form rehydrates back to exactly what the student
+    # wrote, not an expanded full name they never wrote. This never touches
+    # `matched`: attribution runs on full-name position (see pipeline.py),
+    # not the initial form.
+    for entry in roster:
+        form = initial_form(entry.name)
+        if form is None:
+            continue
         if re.search(rf"\b{re.escape(form)}\b", result.text):
-            ambiguous_token = tmap.allocate("STUDENT", form, source_file)
-            result.text, _ = _replace(result.text, form, ambiguous_token)
+            form_token = tmap.allocate("STUDENT", form, source_file)
+            result.text, _ = _replace(result.text, form, form_token)
 
     # Shield protected names (e.g. the instructor's) from the bare-name
     # pass. This runs after pass 1, not before it, so a student's full name

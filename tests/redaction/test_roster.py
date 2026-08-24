@@ -201,14 +201,22 @@ def test_an_ambiguous_initial_is_not_bound_to_one_student():
     assert restored == original
 
 
-def test_an_unambiguous_initial_still_binds_to_its_student():
-    """A single matching roster entry must still claim its own initial form."""
+def test_an_unambiguous_initial_round_trips_exactly():
+    """Even a single matching entry's initial form must round-trip as written.
+
+    "M. Lin" is not "Maya Lin" -- binding it to Maya's own token would
+    restore her full name where the student actually wrote initials.
+    """
     tmap = TokenMap("essay-1")
     roster = [RosterEntry("Maya Lin")]
-    result = redact_roster("Maya Lin wrote. M. Lin revised.", roster, tmap, "p1.md")
+    original = "Maya Lin wrote. M. Lin revised."
+    result = redact_roster(original, roster, tmap, "p1.md")
 
-    assert result.text == "STUDENT_01 wrote. STUDENT_01 revised."
-    assert tmap.value_for("STUDENT_01") == "Maya Lin"
+    assert "M. Lin" not in result.text
+
+    restored, unmapped = rehydrate_text(result.text, tmap)
+    assert unmapped == []
+    assert restored == original
 
 
 def test_roster_loads_from_csv(phil210):
