@@ -1,0 +1,11 @@
+# Per-user grading state. Holds student names and graded work.
+# Must never be committed.
+.grading/
+submissions/
+redacted/
+final/
+*.roster.csv
+
+.DS_Store
+__pycache__/
+*.pyc
