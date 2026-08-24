@@ -80,3 +80,31 @@ def test_two_people_sharing_a_first_name_are_both_flagged():
         "My sister Rosa filed one complaint. My friend Rosa filed another."
     )
     assert [c.name for c in found] == ["Rosa", "Rosa"]
+
+
+def test_an_abbreviated_title_is_not_split_across_sentences():
+    """"Dr." must not read as a sentence end that strands the name after it."""
+    found = find_candidates("Prof. Alvarez disagreed with the ruling.")
+    assert [c.name for c in found] == ["Alvarez"]
+
+    found = find_candidates("Mr. Alvarez filed the complaint.")
+    assert [c.name for c in found] == ["Alvarez"]
+
+
+def test_ordinary_sentences_still_split():
+    text = (
+        "My brother Daniel drove me to the hearing.\n"
+        "Professor Alvarez disagreed with the ruling.\n"
+        "Priya told me the permit never arrived."
+    )
+    found = find_candidates(text)
+    assert [c.name for c in found] == ["Daniel", "Alvarez", "Priya"]
+    assert [c.line for c in found] == [1, 2, 3]
+
+
+def test_protecting_a_full_name_does_not_suppress_an_unrelated_first_name():
+    found = find_candidates(
+        "Dr. Vance graded it. My cousin Marcus told me about it.",
+        protected=("Marcus Vance",),
+    )
+    assert [c.name for c in found] == ["Marcus"]

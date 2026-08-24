@@ -56,6 +56,51 @@ FIRST_PERSON = re.compile(r"\b(?:I|my|me|we|our)\b", re.IGNORECASE)
 CITATION = re.compile(r"([A-Z][a-z]+)\s*(?:et al\.)?\s*\(\d{4}\)")
 SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
 
+# An abbreviated title's period looks like a sentence end to SENTENCE, which
+# would cut "Dr." away from the name right after it and silently defeat
+# TITLE. Masking that period before splitting, then restoring it in each
+# yielded sentence, keeps "Dr. Alvarez" together without a name list of
+# every title in existence.
+ABBREVIATION = re.compile(r"\b(Prof|Dr|Mr|Mrs|Ms|Sr|Jr|St)\.")
+_DOT = "\x00DOT\x00"
+
+
+def _mask_abbreviations(text: str) -> str:
+    """Hide an abbreviated title's period so SENTENCE does not split on it."""
+    return ABBREVIATION.sub(lambda m: m.group(1) + _DOT, text)
+
+
+def _protected_forms(protected: tuple[str, ...]) -> list[str]:
+    """List each protected full name plus its surname, longest first.
+
+    Longest first means "Marcus Vance" is masked whole before its surname
+    form is tried, so masking "Vance" out of "Dr. Vance" can never also eat
+    the "Marcus" half of an unrelated "my cousin Marcus" -- only "Marcus
+    Vance" together, or "Vance" alone, is ever a protected form.
+    """
+    forms = []
+    for name in protected:
+        forms.append(name)
+        parts = name.split()
+        if len(parts) > 1:
+            forms.append(parts[-1])
+    return sorted(set(forms), key=lambda s: (-len(s), s))
+
+
+def _mask(text: str, protected: tuple[str, ...]) -> str:
+    """Hide protected names, then abbreviation periods, before any pattern runs.
+
+    Masking a protected name here, rather than filtering a matched candidate
+    by name afterward, means a pattern can never capture even one word of
+    it -- the same shield roster.py uses for the instructor. Unlike
+    roster.py, nothing here restores the protected name afterward: this
+    layer never returns text, only Candidate records built from whatever is
+    left unmasked.
+    """
+    for index, form in enumerate(_protected_forms(protected)):
+        text = re.sub(rf"\b{re.escape(form)}\b", f"\x00SHIELD{index}\x00", text)
+    return _mask_abbreviations(text)
+
 
 @dataclass(frozen=True)
 class Candidate:
@@ -71,22 +116,15 @@ def _cited_names(sentence: str) -> set[str]:
     return {match.group(1) for match in CITATION.finditer(sentence)}
 
 
-def _protected_words(protected: tuple[str, ...]) -> set[str]:
-    """Split each protected full name into its words.
+def _context_at(sentence: str, start: int, end: int) -> str:
+    """Return the text around one match, clamped to its own sentence.
 
-    "Marcus Vance" protects "Marcus" and "Vance" individually, since a
-    pattern may capture only one word of a multi-word name.
+    A "sentence" (per SENTENCE below) never contains a newline, so no
+    newline cleanup is needed here.
     """
-    words: set[str] = set()
-    for full_name in protected:
-        words.update(full_name.split())
-    return words
-
-
-def _context_at(text: str, start: int, end: int) -> str:
     lo = max(0, start - CONTEXT_WIDTH)
     hi = end + CONTEXT_WIDTH
-    return text[lo:hi].replace("\n", " ").strip()
+    return sentence[lo:hi].strip()
 
 
 def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidate]:
@@ -97,14 +135,28 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
     A name is deduplicated only within its own sentence: the same first name
     used by two different people in two different sentences is flagged
     twice, on purpose. ``protected`` lists full names, such as the
-    instructor's, that must never be flagged even when they match.
+    instructor's, that are masked out before any pattern runs, so neither
+    the full name nor its surname alone can ever be flagged -- but an
+    unrelated first name that merely matches part of a protected name, like
+    "my cousin Marcus" against protected name "Marcus Vance", still is.
+
+    Sentence splitting runs on a copy with protected names and abbreviation
+    periods both masked out, so a title's period never fools SENTENCE into
+    cutting "Dr." away from the name after it. The line number for each
+    candidate is computed by counting newlines in that same masked copy, up
+    to the masked offset where its sentence starts -- masking changes
+    string length but not which newlines precede a given point, so the
+    count still lands on the right line even though the raw offset itself
+    no longer maps directly back into the original text.
     """
-    protected_words = _protected_words(protected)
+    masked = _mask(text, protected)
     found: list[Candidate] = []
 
-    for sentence_match in SENTENCE.finditer(text):
-        sentence = sentence_match.group(0)
-        offset = sentence_match.start()
+    for sentence_match in SENTENCE.finditer(masked):
+        if not sentence_match.group(0).strip():
+            continue
+        line = masked.count("\n", 0, sentence_match.start()) + 1
+        sentence = sentence_match.group(0).replace(_DOT, ".")
         cited = _cited_names(sentence)
 
         matches = []
@@ -116,12 +168,10 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
         seen_in_sentence: set[str] = set()
         for match in sorted(matches, key=lambda m: m.start()):
             name = match.group(1)
-            if name in cited or name in protected_words or name in seen_in_sentence:
+            if name in cited or name in seen_in_sentence:
                 continue
             seen_in_sentence.add(name)
-            start = offset + match.start()
-            end = offset + match.end()
-            line = text.count("\n", 0, start) + 1
-            found.append(Candidate(name, line, _context_at(text, start, end)))
+            context = _context_at(sentence, match.start(), match.end())
+            found.append(Candidate(name, line, context))
 
     return sorted(found, key=lambda c: (c.line, c.name))
