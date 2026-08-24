@@ -101,7 +101,12 @@ def test_unspaced_and_unformatted_phone_numbers_are_replaced():
 
 
 def test_a_parenthesised_phone_number_is_fully_consumed():
-    """Parentheses around phone numbers must be fully consumed, not orphaned."""
+    """The leading paren must be inside the match, not orphaned beside the token.
+
+    An earlier pattern anchored on \\b before the optional paren, which cannot
+    match between a space and "(", so the paren was left behind as "(PHONE_01".
+    """
     tmap = TokenMap("essay-1")
     text, _ = redact_structured("Call (415) 555-0142 now.", tmap, "p1.md")
     assert text == "Call PHONE_01 now."
+    assert "(" not in text
