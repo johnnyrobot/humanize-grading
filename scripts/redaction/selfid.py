@@ -13,7 +13,11 @@ from dataclasses import dataclass
 
 FIRST_PERSON = re.compile(r"\b(?:I|I'm|I've|my|me|mine)\b", re.IGNORECASE)
 
-MARKERS = {
+# Each of these alone is specific enough to raise a warning: a policy essay
+# does not casually mention a parent, an employer, a deportation hearing, or
+# a disability. YEAR below is different -- see its comment -- and is kept
+# out of this dict on purpose.
+STRONG_MARKERS = {
     "family": re.compile(
         r"\b(?:mother|father|mom|dad|grandmother|grandfather|brother|sister|"
         r"aunt|uncle|cousin|son|daughter|wife|husband|partner)\b",
@@ -22,11 +26,29 @@ MARKERS = {
     "employer": re.compile(
         r"\b(?:worked|work|interned|employed|job)\s+(?:at|for)\s+[A-Z][\w&.\- ]{2,}",
     ),
-    "year": re.compile(r"\b(?:19|20)\d{2}\b"),
     "hometown": re.compile(
         r"\b(?:grew up in|hometown|moved to|born in|raised in)\b", re.IGNORECASE
     ),
+    "status": re.compile(
+        r"\b(?:undocumented|asylum|deportation|deported|green card|visa|"
+        r"naturaliz\w+|refugee|immigrated)\b",
+        re.IGNORECASE,
+    ),
+    "health": re.compile(
+        r"\b(?:disability|disabled|diagnosed|chronic illness|my treatment|"
+        r"wheelchair)\b",
+        re.IGNORECASE,
+    ),
+    "military": re.compile(
+        r"\b(?:served in|deployed to|my unit|veteran|enlisted)\b", re.IGNORECASE
+    ),
+    "firstgen": re.compile(r"\bfirst\s+in\s+my\s+family\b", re.IGNORECASE),
 }
+
+# A year is common in ordinary academic prose -- a statute, a court case, a
+# study -- so it must never raise a warning by itself. It only enriches a
+# warning a strong marker already raised, e.g. "family" + "year" together.
+YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
 
 SENTENCE = re.compile(r"[^.!?\n]+[.!?]?")
 
@@ -56,6 +78,12 @@ class SelfIdWarning:
 def find_self_identifying(text: str) -> list[SelfIdWarning]:
     """Return sentences where first-person writing meets personal markers.
 
+    A sentence needs at least one strong marker to warn at all -- a bare
+    year never triggers a warning by itself, only enriches one a strong
+    marker already raised, because policy essays cite statute and case
+    years constantly and would otherwise flag nearly every first-person
+    paragraph.
+
     Sentence splitting runs on a copy with abbreviation periods masked out,
     so a title like "Dr." never fools SENTENCE into ending a sentence early.
     The line number is computed by counting newlines in that same masked
@@ -71,10 +99,12 @@ def find_self_identifying(text: str) -> list[SelfIdWarning]:
             continue
 
         reasons = tuple(
-            name for name, pattern in MARKERS.items() if pattern.search(sentence)
+            name for name, pattern in STRONG_MARKERS.items() if pattern.search(sentence)
         )
         if not reasons:
             continue
+        if YEAR.search(sentence):
+            reasons = reasons + ("year",)
 
         line = masked.count("\n", 0, match.start()) + 1
         warnings.append(SelfIdWarning(line, sentence, reasons))
