@@ -24,7 +24,7 @@ from pathlib import Path
 from .candidates import Candidate, find_candidates
 from .documents import extract, output_name
 from .patterns import redact_structured
-from .roster import BareHit, RosterEntry, redact_roster
+from .roster import BareHit, RosterEntry, full_name_variants, redact_roster
 from .selfid import SelfIdWarning, find_self_identifying
 from .tokens import TokenMap
 
@@ -44,6 +44,30 @@ UNKNOWN_PREFIX = "UNKNOWN"
 _TOKEN_OUTPUT_PATTERN = re.compile(rf"^(?:STUDENT|{UNKNOWN_PREFIX})_\d+\..+$")
 
 
+def _named_students(
+    text: str, roster: list[RosterEntry]
+) -> list[tuple[int, RosterEntry]]:
+    """Return every roster entry named in text, earliest occurrence first.
+
+    A file's author is named first -- typically in a header -- while a
+    classmate the author writes about is cited later in the body. Ranking
+    by where a name FIRST appears, rather than by roster row order or
+    allocation order, is what makes attribution independent of both: the
+    same paper attributes to the same author no matter how the roster CSV
+    happens to be sorted.
+    """
+    found = []
+    for entry in roster:
+        offset = None
+        for form in full_name_variants(entry.name):
+            match = re.search(rf"\b{re.escape(form)}\b", text)
+            if match and (offset is None or match.start() < offset):
+                offset = match.start()
+        if offset is not None:
+            found.append((offset, entry))
+    return sorted(found, key=lambda pair: pair[0])
+
+
 @dataclass
 class FileResult:
     """What happened to one submission."""
@@ -56,6 +80,7 @@ class FileResult:
     bare_hits: list[BareHit] = field(default_factory=list)
     error: str = ""
     skipped_empty: bool = False
+    named_students: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -106,6 +131,15 @@ def run(
     ``force``, only files shaped like a prior run's token-named outputs
     (STUDENT_NN.* or UNKNOWN_NN.*) are deleted before writing; anything else
     already in destination is left alone.
+
+    A file's output name is attributed to whichever roster student's full
+    name appears EARLIEST in the file, not to whichever roster row happens
+    to come first in the CSV: the author is named in a header, a classmate
+    the author writes about is cited later in the body. When more than one
+    roster student is named in the same file, that is reported under
+    ``ambiguous_authorship`` in the review file, listing every student
+    named and the token that was chosen -- position is a good heuristic,
+    not a guarantee, and it never changes the exit code.
     """
     if review_path is None:
         review_path = map_path.parent / "reviews" / f"{batch}.json"
@@ -155,6 +189,12 @@ def run(
         for value in extracted.metadata:
             text = f"{value}\n{text}"
 
+        # Attribution must be decided against the RAW text, before any name
+        # becomes a token and before roster order can influence anything --
+        # see _named_students.
+        named = _named_students(text, roster)
+        entry.named_students = [e.name for _, e in named]
+
         roster_result = redact_roster(
             text, roster, tmap, path.name, protected=protected, bare_names=bare_names
         )
@@ -166,13 +206,21 @@ def run(
         entry.candidates = find_candidates(text, protected=protected)
         entry.warnings = find_self_identifying(text)
 
-        tokens = [
-            token
+        file_student_tokens = {
+            e.value.casefold(): token
             for token, e in tmap.tokens().items()
             if e.kind == "STUDENT" and e.file == path.name
-        ]
-        if tokens:
-            entry.token = tokens[0]
+        }
+        author = named[0][1] if named else None
+        if author is not None and author.name.casefold() in file_student_tokens:
+            entry.token = file_student_tokens[author.name.casefold()]
+        elif file_student_tokens:
+            # Defensive fallback: a roster student's full name is confirmed
+            # present in this file (redact_roster matched it), but the
+            # position scan above did not resolve to one of them -- keep
+            # the file attributed to *a* matched student rather than
+            # falling through to UNKNOWN.
+            entry.token = next(iter(file_student_tokens.values()))
         else:
             unknown_count += 1
             entry.token = f"{UNKNOWN_PREFIX}_{unknown_count:02d}"
@@ -224,6 +272,19 @@ def _write_review(review_path: Path, result: BatchResult) -> None:
             for h in f.bare_hits
         ],
         "skipped_empty": [f.source.name for f in result.files if f.skipped_empty],
+        # A file naming more than one roster student had to have its
+        # authorship decided by position -- a good heuristic, not a
+        # guarantee -- so every such case is surfaced for a human to check,
+        # without changing the exit code: citing a classmate is legitimate.
+        "ambiguous_authorship": [
+            {
+                "file": f.output.name if f.output else f.source.name,
+                "token": f.token,
+                "named": f.named_students,
+            }
+            for f in result.files
+            if len(f.named_students) > 1
+        ],
     }
     review_path.parent.mkdir(parents=True, exist_ok=True)
     review_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")

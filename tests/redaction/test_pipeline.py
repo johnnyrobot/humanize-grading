@@ -13,6 +13,7 @@ from scripts.redaction.pipeline import (
     run,
 )
 from scripts.redaction.roster import RosterEntry
+from scripts.redaction.tokens import TokenMap
 
 
 def _write(directory, name, body):
@@ -250,3 +251,71 @@ def test_an_empty_destination_needs_no_force(tmp_path):
     )
 
     assert result.exit_code == EXIT_OK
+
+
+def test_authorship_does_not_depend_on_roster_order(tmp_path):
+    """The author is whoever is named first in the file, not CSV row order."""
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Student: Zoe Chen. My classmate Amy Adams disagreed.")
+
+    for i, roster in enumerate(
+        [
+            [RosterEntry("Amy Adams"), RosterEntry("Zoe Chen")],
+            [RosterEntry("Zoe Chen"), RosterEntry("Amy Adams")],
+        ]
+    ):
+        map_path = tmp_path / f"map-{i}.json"
+        result = run(
+            source=source,
+            destination=tmp_path / f"out-{i}",
+            map_path=map_path,
+            roster=roster,
+            batch="essay-1",
+        )
+        tmap = TokenMap.load(map_path)
+        zoe_token = next(
+            token
+            for token, e in tmap.tokens().items()
+            if e.kind == "STUDENT" and e.value == "Zoe Chen"
+        )
+        assert result.files[0].token == zoe_token, f"roster order {i} attributed wrong"
+
+
+def test_a_file_naming_two_students_is_reported_as_ambiguous(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Student: Zoe Chen. My classmate Amy Adams disagreed.")
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Amy Adams"), RosterEntry("Zoe Chen")],
+        batch="essay-1",
+    )
+    review = json.loads(
+        (tmp_path / "reviews" / "essay-1.json").read_text(encoding="utf-8")
+    )
+    [ambiguous] = review["ambiguous_authorship"]
+    assert set(ambiguous["named"]) == {"Amy Adams", "Zoe Chen"}
+    assert ambiguous["token"] == result.files[0].token
+    assert result.exit_code == EXIT_OK
+
+
+def test_skipped_empty_is_reported(tmp_path):
+    """A blank submission is skipped and reported, never silently graded."""
+    source = tmp_path / "in"
+    _write(source, "blank.md", "   \n\n  ")
+    _write(source, "real.md", "Maya Lin argues that platforms curate.")
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+    )
+    assert result.exit_code == EXIT_OK
+    written = [p.name for p in (tmp_path / "out").iterdir()]
+    assert written == ["STUDENT_01.md"]
+    review = json.loads(
+        (tmp_path / "reviews" / "essay-1.json").read_text(encoding="utf-8")
+    )
+    assert review["skipped_empty"] == ["blank.md"]
