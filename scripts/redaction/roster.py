@@ -11,12 +11,19 @@ still waiting in line (Anna Chen and Samantha Chen collapsing into one
 token). Each bare token is then keyed on the bare text itself, not the
 full name, so rehydrating a bare hit restores the original word instead of
 expanding it back into a full name that was never there.
+
+An initial form ("M. Smith") built from two different roster entries
+("Mary Anne Smith" and "Marcus Smith") is textually identical for both.
+Binding it to either student's token would misattribute the other's
+mention, so it is never claimed by an entry -- it gets its own token,
+keyed on the literal ambiguous text, the same way a bare name does.
 """
 
 from __future__ import annotations
 
 import csv
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -86,6 +93,24 @@ def full_name_variants(name: str) -> list[str]:
     return variants
 
 
+def _ambiguous_initials(roster: list[RosterEntry]) -> set[str]:
+    """Return every initial form more than one roster entry would generate.
+
+    "M. Smith" from "Mary Anne Smith" and "M. Smith" from "Marcus Smith" are
+    textually identical but name two different people. Binding either
+    entry's token to that form would misattribute the other's mention, so
+    redact_roster skips it in both entries' passes and instead tokenizes it
+    once, keyed on the literal ambiguous text -- the same device bare names
+    use to stay lossless without claiming a single owner.
+    """
+    counts: Counter[str] = Counter()
+    for entry in roster:
+        parts = entry.name.split()
+        if len(parts) >= 2:
+            counts[f"{parts[0][0]}. {parts[-1]}"] += 1
+    return {form for form, count in counts.items() if count > 1}
+
+
 def bare_name_variants(name: str) -> list[str]:
     """Return the first and last name on their own, longest first."""
     parts = name.split()
@@ -115,14 +140,23 @@ def redact_roster(
     """Replace roster identities in text and report what changed."""
     result = RosterResult(text=text)
     full_name_present: dict[str, bool] = {}
+    ambiguous_initials = _ambiguous_initials(roster)
 
     # Pass 1: full names, emails, and student IDs for every entry, before
     # the protected-name shield or any bare name is touched. A student's
     # full name is PII even when a protected name (e.g. an instructor who
     # shares a surname with a student) is one of its substrings, so it must
     # be tokenized before the shield can hide that substring from view.
+    #
+    # An initial form shared by more than one roster entry (see
+    # _ambiguous_initials) is skipped here, by every entry that would
+    # generate it -- neither can safely claim it as their own token. It is
+    # resolved once, below, keyed on the literal text instead.
     for entry in roster:
-        full_forms = full_name_variants(entry.name)
+        full_forms = [
+            form for form in full_name_variants(entry.name)
+            if form not in ambiguous_initials
+        ]
         present = any(
             re.search(rf"\b{re.escape(form)}\b", result.text) for form in full_forms
         )
@@ -147,6 +181,17 @@ def redact_roster(
             result.text, count = _replace(result.text, entry.student_id, id_token)
             if count:
                 result.matched.add(entry.name)
+
+    # An ambiguous initial form left untouched by pass 1 is still PII -- it
+    # just does not confirm which entry it belongs to, so it is not added to
+    # `matched` and does not gate that entry's bare-name pass. It gets its
+    # own token, keyed on the literal form, so rehydrating restores "M.
+    # Smith" exactly rather than expanding it into a full name that was
+    # never in the text.
+    for form in sorted(ambiguous_initials, key=len, reverse=True):
+        if re.search(rf"\b{re.escape(form)}\b", result.text):
+            ambiguous_token = tmap.allocate("STUDENT", form, source_file)
+            result.text, _ = _replace(result.text, form, ambiguous_token)
 
     # Shield protected names (e.g. the instructor's) from the bare-name
     # pass. This runs after pass 1, not before it, so a student's full name

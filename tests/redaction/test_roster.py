@@ -1,5 +1,8 @@
 """Layer 1 must catch roster identities without eating subject matter."""
 
+import re
+
+from scripts.redaction.rehydrate import rehydrate_text
 from scripts.redaction.roster import RosterEntry, load_roster, redact_roster
 from scripts.redaction.tokens import TokenMap
 
@@ -178,6 +181,34 @@ def test_a_comma_after_a_student_name_does_not_defeat_the_instructor_shield():
         protected=("Marcus Vance",),
     )
     assert result.text == "Dr. Marcus Vance graded STUDENT_01, Marcus Vance said."
+
+
+def test_an_ambiguous_initial_is_not_bound_to_one_student():
+    """"M. Smith" fits two roster entries; neither may claim it as their own."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Mary Anne Smith"), RosterEntry("Marcus Smith")]
+    original = (
+        "Mary Anne Smith and Marcus Smith wrote. M. Smith later revised "
+        "the section."
+    )
+    result = redact_roster(original, roster, tmap, "p1.md")
+
+    tokens_used = set(re.findall(r"STUDENT_\d+", result.text))
+    assert len(tokens_used) == 3, "the ambiguous mention must not reuse either student's token"
+
+    restored, unmapped = rehydrate_text(result.text, tmap)
+    assert unmapped == []
+    assert restored == original
+
+
+def test_an_unambiguous_initial_still_binds_to_its_student():
+    """A single matching roster entry must still claim its own initial form."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Maya Lin")]
+    result = redact_roster("Maya Lin wrote. M. Lin revised.", roster, tmap, "p1.md")
+
+    assert result.text == "STUDENT_01 wrote. STUDENT_01 revised."
+    assert tmap.value_for("STUDENT_01") == "Maya Lin"
 
 
 def test_roster_loads_from_csv(phil210):
