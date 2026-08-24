@@ -1,0 +1,11 @@
+{
+  "name": "humanizer",
+  "owner": { "name": "blader" },
+  "plugins": [
+    {
+      "name": "humanizer",
+      "source": "./",
+      "description": "Rewrite AI-sounding text so it reads naturally without changing what it says."
+    }
+  ]
+}
