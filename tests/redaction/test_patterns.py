@@ -98,3 +98,10 @@ def test_unspaced_and_unformatted_phone_numbers_are_replaced():
     text2, count2 = redact_structured("Call 4155550142 now.", tmap2, "p1.md")
     assert text2 == "Call PHONE_01 now."
     assert count2 == 1
+
+
+def test_a_parenthesised_phone_number_is_fully_consumed():
+    """Parentheses around phone numbers must be fully consumed, not orphaned."""
+    tmap = TokenMap("essay-1")
+    text, _ = redact_structured("Call (415) 555-0142 now.", tmap, "p1.md")
+    assert text == "Call PHONE_01 now."
