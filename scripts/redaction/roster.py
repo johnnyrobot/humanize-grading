@@ -67,13 +67,23 @@ def load_roster(path: Path) -> list[RosterEntry]:
 
 
 def full_name_variants(name: str) -> list[str]:
-    """Return the written forms of a full name, longest first."""
+    """Return the written forms of a full name, natural form first.
+
+    The natural form ("Marcus Thorne") goes first, since that is how prose
+    actually writes a name. The comma form ("Thorne, Marcus") goes second:
+    trying it first, as a length sort would, lets it span a comma in
+    ordinary prose — such as two names listed together — and eat text that
+    belongs to someone else. The initial form ("M. Thorne") goes last.
+    """
     parts = name.split()
-    variants = {name}
+    variants = [name]
     if len(parts) >= 2:
-        variants.add(f"{parts[-1]}, {' '.join(parts[:-1])}")
-        variants.add(f"{parts[0][0]}. {parts[-1]}")
-    return sorted(variants, key=lambda s: (-len(s), s))
+        comma_form = f"{parts[-1]}, {' '.join(parts[:-1])}"
+        initial_form = f"{parts[0][0]}. {parts[-1]}"
+        for variant in (comma_form, initial_form):
+            if variant not in variants:
+                variants.append(variant)
+    return variants
 
 
 def bare_name_variants(name: str) -> list[str]:

@@ -155,6 +155,31 @@ def test_every_bare_name_occurrence_is_reported():
     assert result.text.count("STUDENT_02") == 3
 
 
+def test_a_comma_list_of_two_students_does_not_scramble_their_tokens():
+    """The comma-list variant must not span a comma between two different names."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Marcus Thorne"), RosterEntry("Marcus Webb")]
+    result = redact_roster(
+        "Marcus Thorne, Marcus Webb co-authored this.", roster, tmap, "p1.md"
+    )
+    assert result.text == "STUDENT_01, STUDENT_02 co-authored this."
+    assert "Webb" not in result.text
+
+
+def test_a_comma_after_a_student_name_does_not_defeat_the_instructor_shield():
+    """A comma right after a student's name must not eat the next mention of the instructor."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Marcus Thorne")]
+    result = redact_roster(
+        "Dr. Marcus Vance graded Marcus Thorne, Marcus Vance said.",
+        roster,
+        tmap,
+        "p1.md",
+        protected=("Marcus Vance",),
+    )
+    assert result.text == "Dr. Marcus Vance graded STUDENT_01, Marcus Vance said."
+
+
 def test_roster_loads_from_csv(phil210):
     roster = load_roster(phil210 / "roster.csv")
     assert len(roster) == 10
