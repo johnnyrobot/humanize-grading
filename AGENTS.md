@@ -4,7 +4,7 @@ This file explains how to change Humanizer without breaking its package or promp
 
 ## What this repo contains
 
-Humanizer is an agent skill written in Markdown. `SKILL.md` is the prompt that agents read. The repo has no build step.
+This repo holds two agent skills and the reference they share, all written in Markdown. The grading skill lives at the repo root in `SKILL.md`. The Humanizer skill lives at `skills/humanizer/SKILL.md`. Both skills read `references/ai-patterns.md` for the 35 patterns. `scripts/validate-package.py` checks all three. The repo has no build step.
 
 Keep the skill portable. Do not write instructions that limit it to one or two agent tools.
 
@@ -14,7 +14,7 @@ Keep the skill portable. Do not write instructions that limit it to one or two a
 - `skills/humanizer/SKILL.md` is the Humanizer skill. It stays usable on its own.
 - `references/ai-patterns.md` holds the 35 patterns. Both skills read it. Edit patterns only here.
 - `README.md` explains installation, use, patterns, and version history.
-- `.claude-plugin/plugin.json` describes the Claude plugin and points its skill loader at the root `SKILL.md`.
+- `.claude-plugin/plugin.json` describes the Claude plugin and points its skill loader at both `./` (the grader) and `./skills/humanizer` (Humanizer).
 - `.claude-plugin/marketplace.json` lets users add this repo as a Claude marketplace.
 - `scripts/validate-package.py` checks package files and shared values.
 
