@@ -11,6 +11,12 @@ surely as a header would. The replacement is the literal `[STUDENT]`, which
 deliberately does NOT match rehydrate.py's token pattern -- a `STUDENT_01`
 leaking out of a profile would be reattached to whichever student holds that
 token in the CURRENT batch, which is a misattribution, not a redaction.
+
+Brackets are trusted as instructor markup because the rubric's own feedback
+protocol defines them that way, so a bracketed span in the essay stays an
+annotation unless it looks like a citation -- an author-year reference or a
+page marker -- in which case it is the student's own bibliography, not
+something the instructor wrote.
 """
 
 from __future__ import annotations
@@ -31,6 +37,16 @@ _LABEL = re.compile(r"^\*\*(.+?)\*\*\s*:?\s*(.*)$")
 _BULLET = re.compile(r"^\*\s+(.+)$")
 _SIGN_OFF = re.compile(r"^\s*[—–-]{1,2}\s*(.+?)\s*$")
 _ANNOTATION = re.compile(r"\[([^\[\]]{10,})\]")
+
+# A bracketed span that is a bibliographic citation is the student's writing,
+# not the instructor's. Brackets are the rubric's marker for instructor
+# annotations, so the span stays an annotation unless it looks like a citation:
+# an author-year reference, or a page marker.
+_CITATION_SPAN = re.compile(
+    r"^\s*[A-Z][\w'-]*(?:\s+(?:et\s+al\.?|and|&)\s+[A-Z][\w'-]*)*,?\s*(?:19|20)\d{2}\b"
+    r"|\bpp?\.\s*\d",
+    re.IGNORECASE,
+)
 
 
 class SampleError(Exception):
@@ -163,7 +179,7 @@ def _parse_feedback(feedback: str) -> dict[str, object]:
 
     def section(name: str) -> str:
         for key, value in prose.items():
-            if key.lower().lstrip("the ").startswith(name):
+            if key.lower().removeprefix("the ").startswith(name):
                 return " ".join(value).strip()
         return ""
 
@@ -188,16 +204,12 @@ def _parse_feedback(feedback: str) -> dict[str, object]:
 def load_sample(path: Path) -> GradedSample:
     """Read one graded sample."""
     text = path.read_text(encoding="utf-8")
-    if not _FEEDBACK_HEADING.search(text) and "Instructor Feedback" not in text:
-        raise SampleError(
-            f"{path.name} has no instructor feedback section. Add a "
-            "'### Instructor Feedback & Grading' heading."
-        )
     header_block, essay, feedback = _split_sections(text)
     parsed = _parse_feedback(feedback)
     annotations = tuple(
         Annotation(text=match.group(1).strip(), offset=match.start())
         for match in _ANNOTATION.finditer(essay)
+        if not _CITATION_SPAN.search(match.group(1))
     )
     return GradedSample(
         path=path,
@@ -225,6 +237,12 @@ def scrub_names(
     Full names go first so "Maya Lin" never becomes "[STUDENT] Lin". Bare
     first and last names follow. A name that is not on the roster is left
     alone -- a cited scholar is subject matter, not a student.
+
+    Unlike Plan 1's redact_roster, a bare name here is replaced whether or
+    not that student's full name also appears in the text. A profile that
+    reaches the cloud has no roster to check co-occurrence against, so this
+    trades a false positive on a coincidental bare-name match for never
+    missing a real one.
     """
     found: list[str] = []
     scrubbed = text

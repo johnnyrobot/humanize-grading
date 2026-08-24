@@ -42,6 +42,31 @@ def test_it_reads_every_inline_annotation(phil210):
     assert all(annotation.offset >= 0 for annotation in sample.annotations)
 
 
+def test_a_citation_bracket_is_not_treated_as_an_annotation(tmp_path):
+    path = tmp_path / "citation.md"
+    path.write_text(
+        "### Student Submission\n\n"
+        "The argument follows Habermas closely "
+        "[Smith 2020, pp. 45-46] in this essay.\n\n"
+        "### Instructor Feedback & Grading\n\n"
+        "**Grade**: 90/100 (A-)\n\n"
+        "**The Bottom Line**:\nSolid work overall.\n\n"
+        "— Dr. Vance\n",
+        encoding="utf-8",
+    )
+    sample = load_sample(path)
+    assert sample.annotations == ()
+    assert "Smith 2020" not in sample.comments_only()
+
+
+def test_the_citation_filter_does_not_drop_real_annotations(phil210):
+    total = sum(
+        len(load_sample(path).annotations)
+        for path in sorted((phil210 / "graded").iterdir())
+    )
+    assert total == 21
+
+
 def test_it_reads_the_three_feedback_sections(phil210):
     sample = load_sample(phil210 / PAPER_1)
     assert sample.bottom_line.startswith("Maya, this is an exceptionally")
@@ -67,6 +92,9 @@ def test_comments_only_holds_no_student_prose(phil210):
     assert "Jürgen Habermas envisioned an idealized forum" not in comments
     assert "Keep up the rigorous work." in comments
     assert "Good theoretical anchor" in comments
+    assert "Your use of Gillespie" in comments
+    assert "Watch out for throat-clearing" in comments
+    assert "— Dr. Vance" in comments
 
 
 def test_scrub_replaces_a_full_roster_name(phil210):
@@ -113,3 +141,14 @@ def test_a_sample_with_no_feedback_section_is_refused(tmp_path):
     path.write_text("### Student Submission\n\nJust an essay.\n", encoding="utf-8")
     with pytest.raises(SampleError, match="feedback"):
         load_sample(path)
+
+
+def test_a_lowercase_feedback_heading_still_parses(tmp_path):
+    path = tmp_path / "lowercase.md"
+    path.write_text(
+        "### Student Submission\n\nAn essay with no annotations.\n\n"
+        "### instructor feedback & grading\n\n**Grade**: 88/100 (B+)\n",
+        encoding="utf-8",
+    )
+    sample = load_sample(path)
+    assert sample.score == 88
