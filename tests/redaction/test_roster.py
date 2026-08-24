@@ -68,8 +68,9 @@ def test_bare_name_is_replaced_and_reported_when_the_full_name_is_present():
         tmap,
         "p1.md",
     )
-    assert result.text == "STUDENT_01 wrote this. The STUDENT_01 civilization collapsed."
+    assert result.text == "STUDENT_01 wrote this. The STUDENT_02 civilization collapsed."
     assert [hit.name for hit in result.bare_hits] == ["Maya"]
+    assert result.bare_hits[0].token == "STUDENT_02"
     assert "civilization" in result.bare_hits[0].context
 
 
@@ -84,6 +85,74 @@ def test_bare_names_can_be_turned_off():
         bare_names=False,
     )
     assert result.text == "STUDENT_01 wrote this. The Maya civilization collapsed."
+
+
+def test_two_students_sharing_a_surname_get_separate_tokens():
+    """A bare surname must not merge two different students into one token."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Anna Chen"), RosterEntry("Samantha Chen")]
+    result = redact_roster(
+        "Anna Chen and Samantha Chen argued. Chen later withdrew.",
+        roster,
+        tmap,
+        "p1.md",
+    )
+    assert result.text == "STUDENT_01 and STUDENT_02 argued. STUDENT_03 later withdrew."
+    assert "Samantha STUDENT" not in result.text
+    assert len({"STUDENT_01", "STUDENT_02", "STUDENT_03"}) == 3
+
+
+def test_a_students_full_name_is_not_eaten_by_another_students_bare_name():
+    """One student's bare last name must not devour the next student's full name."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Maya Lin"), RosterEntry("Lin Wei")]
+    result = redact_roster("Maya Lin and Lin Wei co-wrote it.", roster, tmap, "p1.md")
+    assert result.text == "STUDENT_01 and STUDENT_02 co-wrote it."
+
+
+def test_bare_name_substitution_round_trips_exactly():
+    """A bare hit must rehydrate back to the exact word it replaced."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Maya Lin")]
+    original = "Maya Lin wrote this. The Maya civilization collapsed."
+    result = redact_roster(original, roster, tmap, "p1.md")
+
+    rehydrated = result.text
+    for token in tmap.tokens():
+        rehydrated = rehydrated.replace(token, tmap.value_for(token))
+
+    assert rehydrated == original
+
+
+def test_a_protected_name_inside_a_student_name_still_redacts_the_student():
+    """An instructor sharing a surname with a student must not shield the student."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Samantha Chen")]
+    result = redact_roster(
+        "Dr. Chen returned Samantha Chen's paper.",
+        roster,
+        tmap,
+        "p1.md",
+        protected=("Chen",),
+    )
+    assert "Samantha Chen" not in result.text
+    assert "Dr. Chen" in result.text
+    assert result.matched == {"Samantha Chen"}
+
+
+def test_every_bare_name_occurrence_is_reported():
+    """Every bare-name substitution must get its own hit, not just the first."""
+    tmap = TokenMap("essay-1")
+    roster = [RosterEntry("Maya Lin")]
+    result = redact_roster(
+        "Maya Lin wrote this. The Maya Empire was vast. Later, Maya art "
+        "flourished. Maya's exhibit closed too.",
+        roster,
+        tmap,
+        "p1.md",
+    )
+    assert len(result.bare_hits) == 3
+    assert result.text.count("STUDENT_02") == 3
 
 
 def test_roster_loads_from_csv(phil210):
