@@ -160,9 +160,7 @@ def test_docx_headers_footers_and_properties_reach_metadata(tmp_path):
         "Footer: page prepared for Jane Smith",
     ):
         assert value in result.metadata
-
-    assert "Header: Maya Lin, Section 3" not in result.text
-    assert "Footer: page prepared for Jane Smith" not in result.text
+        assert value not in result.text
 
 
 def test_a_utf8_bom_is_stripped(tmp_path):
