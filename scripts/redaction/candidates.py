@@ -4,9 +4,12 @@ This layer never edits text. It reports names for the instructor to review,
 because guessing wrong in either direction is costly: a missed name leaks, and
 a wrongly redacted scholar destroys gradeability.
 
-Citation and first-person scope are both judged per sentence, not per
-document. A citation in one paragraph must not suppress a different, private
-person of the same surname elsewhere in the essay.
+A strong signal -- a relation word, a title, "told me" -- stays scoped to its
+own sentence: a citation in one paragraph must not suppress a different,
+private person of the same surname elsewhere in the essay. A weak signal -- a
+bare possessive, a quote verb -- is common academic prose about a cited
+scholar too, so it alone is suppressed document-wide for anyone also cited
+with a year anywhere in the text.
 
 An optional model-based pass runs when spacy or presidio is installed. Without
 one, the heuristics below still produce flags. A flag must never be dropped.
@@ -42,14 +45,23 @@ CONTACT = r"(?:spoke\s+with|talked\s+to|interviewed|met\s+with)\s+"
 QUOTE = r"[\"”],?\s+" + NAME + r"\s+(?:said|explained|recalled|testified|told)"
 POSSESSIVE = NAME + r"'s\b"
 
-PERSONAL = (
+# STRONG patterns name a specific relationship, title, or act of speaking
+# directly to the writer -- evidence unlikely to describe a cited scholar.
+# WEAK patterns (a possessive, a quote verb) are common in ordinary academic
+# prose about a scholar too ("I find Gillespie's framing persuasive"), so
+# they alone are suppressed document-wide for anyone also cited with a year
+# anywhere in the text. A strong pattern is never suppressed that way: it
+# stays scoped to its own sentence, so a citation elsewhere in the document
+# can never blind it to a different, private person of the same name (see
+# find_candidates).
+STRONG_PATTERNS = (
     re.compile(REL_MY + NAME),
     re.compile(REL_OUR + NAME),
     re.compile(TITLE + NAME),
     re.compile(NAME + SPEECH),
     re.compile(CONTACT + NAME),
-    re.compile(QUOTE),
 )
+WEAK_PATTERNS = (re.compile(QUOTE),)
 POSSESSIVE_PATTERN = re.compile(POSSESSIVE)
 
 FIRST_PERSON = re.compile(r"\b(?:I|my|me|we|our)\b", re.IGNORECASE)
@@ -131,14 +143,20 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
     """Return names appearing in personal contexts, skipping citations.
 
     Citations and possessive scope are judged sentence by sentence, so a
-    citation in one sentence cannot suppress a same-named person elsewhere.
-    A name is deduplicated only within its own sentence: the same first name
-    used by two different people in two different sentences is flagged
-    twice, on purpose. ``protected`` lists full names, such as the
-    instructor's, that are masked out before any pattern runs, so neither
-    the full name nor its surname alone can ever be flagged -- but an
-    unrelated first name that merely matches part of a protected name, like
-    "my cousin Marcus" against protected name "Marcus Vance", still is.
+    citation in one sentence cannot suppress a same-named person elsewhere
+    -- for a STRONG pattern (a relation word, a title, "told me", an
+    interview-contact verb). A WEAK pattern (a possessive, a quote verb) is
+    also dropped when its name is cited with a year ANYWHERE in the
+    document, because "I find Gillespie's framing persuasive" is ordinary
+    academic prose, not evidence of a private relationship, the moment
+    "Gillespie (2014)" appears anywhere else in the same essay. A name is
+    deduplicated only within its own sentence: the same first name used by
+    two different people in two different sentences is flagged twice, on
+    purpose. ``protected`` lists full names, such as the instructor's, that
+    are masked out before any pattern runs, so neither the full name nor
+    its surname alone can ever be flagged -- but an unrelated first name
+    that merely matches part of a protected name, like "my cousin Marcus"
+    against protected name "Marcus Vance", still is.
 
     Sentence splitting runs on a copy with protected names and abbreviation
     periods both masked out, so a title's period never fools SENTENCE into
@@ -149,6 +167,7 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
     count still lands on the right line even though the raw offset itself
     no longer maps directly back into the original text.
     """
+    scholars = _cited_names(text)
     masked = _mask(text, protected)
     found: list[Candidate] = []
 
@@ -160,15 +179,19 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
         cited = _cited_names(sentence)
 
         matches = []
-        for pattern in PERSONAL:
-            matches.extend(pattern.finditer(sentence))
+        for pattern in STRONG_PATTERNS:
+            matches.extend((m, False) for m in pattern.finditer(sentence))
+        for pattern in WEAK_PATTERNS:
+            matches.extend((m, True) for m in pattern.finditer(sentence))
         if FIRST_PERSON.search(sentence):
-            matches.extend(POSSESSIVE_PATTERN.finditer(sentence))
+            matches.extend((m, True) for m in POSSESSIVE_PATTERN.finditer(sentence))
 
         seen_in_sentence: set[str] = set()
-        for match in sorted(matches, key=lambda m: m.start()):
+        for match, weak in sorted(matches, key=lambda pair: pair[0].start()):
             name = match.group(1)
             if name in cited or name in seen_in_sentence:
+                continue
+            if weak and name in scholars:
                 continue
             seen_in_sentence.add(name)
             context = _context_at(sentence, match.start(), match.end())

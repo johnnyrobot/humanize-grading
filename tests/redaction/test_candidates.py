@@ -108,3 +108,28 @@ def test_protecting_a_full_name_does_not_suppress_an_unrelated_first_name():
         protected=("Marcus Vance",),
     )
     assert [c.name for c in found] == ["Marcus"]
+
+
+def test_a_cited_scholars_possessive_is_not_flagged():
+    """The citation and the possessive sit in different sentences."""
+    found = find_candidates(
+        "Gillespie (2014) frames algorithms as editorial. "
+        "I find Gillespie's framing persuasive."
+    )
+    assert found == []
+
+
+def test_an_uncited_possessive_is_still_flagged():
+    found = find_candidates("Elena's testimony changed my view.")
+    assert [c.name for c in found] == ["Elena"]
+
+
+def test_a_cited_scholar_does_not_suppress_a_strong_signal():
+    """A relation word is strong evidence and must survive document-wide
+    scholar suppression -- this is the guard against re-introducing the
+    Brady bug from an earlier round."""
+    found = find_candidates(
+        "Brady (2017) measured outrage. "
+        "My cousin Brady told me about the eviction."
+    )
+    assert [c.name for c in found] == ["Brady"]
