@@ -120,12 +120,18 @@ def test_a_markdown_bold_id_header_is_caught():
     assert count == 1
 
 
-def test_an_id_hash_colon_header_is_caught():
-    """ID headers with hash-colon notation must be caught."""
+def test_a_docket_id_reference_is_not_a_student_id():
+    """A bare 'id' cue is not evidence of a person.
+
+    "Docket ID 12345678" is ordinary language in a policy essay, not a
+    student identifier. Layer 1 (roster.py) already catches every roster
+    student's ID by exact match; layer 2 requires an explicit STUDENT cue
+    so it does not over-redact subject matter like docket/case/bug IDs.
+    """
     tmap = TokenMap("essay-1")
-    text, count = redact_structured("ID#: X9998887", tmap, "p1.md")
-    assert text == "ID#: ID_01"
-    assert count == 1
+    text, count = redact_structured("Docket ID 12345678 was filed", tmap, "p1.md")
+    assert text == "Docket ID 12345678 was filed"
+    assert count == 0
 
 
 def test_a_version_string_is_not_a_phone_number():
@@ -174,3 +180,44 @@ def test_a_github_user_profile_is_still_redacted():
     text, count = redact_structured("github.com/mayalin", tmap, "p1.md")
     assert text == "URL_01"
     assert count == 1
+
+
+def test_a_custom_single_group_id_pattern_works():
+    """A caller-supplied id_pattern with a different group count must not raise.
+
+    redact_structured's substitution used to hardcode reading groups 1 and 2,
+    so any custom id_pattern with a single capture group raised
+    ``IndexError: no such group``. The substitution must be agnostic to how
+    many capture groups the pattern has.
+    """
+    import re
+
+    custom_pattern = re.compile(r"\bcustomer\s+#(\d{4,8})\b", re.IGNORECASE)
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured(
+        "Customer #4821 called in.", tmap, "p1.md", id_pattern=custom_pattern
+    )
+    assert text == "Customer #ID_01 called in."
+    assert count == 1
+
+
+def test_a_github_profile_with_a_trailing_slash_is_redacted():
+    """A trailing slash (common from browser-bar copy-paste) must not hide a profile."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("see github.com/mayalin/ for more", tmap, "p1.md")
+    assert count == 1
+    assert "mayalin" not in text
+
+
+def test_the_github_lookahead_does_not_backtrack_quadratically():
+    """The github alternative must not exhibit catastrophic backtracking.
+
+    An earlier lookahead, `(?![\\w.-]*/)`, re-scanned the tail on every
+    backtrack of the greedy handle, making long non-matching runs O(n^2).
+    A possessive quantifier closes that hole. This asserts the call
+    completes at all -- not a wall-clock threshold, so it is not flaky on
+    a loaded machine.
+    """
+    tmap = TokenMap("essay-1")
+    text = "github.com/" + "a" * 20000 + "/"
+    redact_structured(text, tmap, "p1.md")
