@@ -110,3 +110,35 @@ def test_a_parenthesised_phone_number_is_fully_consumed():
     text, _ = redact_structured("Call (415) 555-0142 now.", tmap, "p1.md")
     assert text == "Call PHONE_01 now."
     assert "(" not in text
+
+
+def test_a_markdown_bold_id_header_is_caught():
+    """Markdown bold student ID headers must be caught, header text preserved."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("**Student ID**: X9998887", tmap, "p1.md")
+    assert text == "**Student ID**: ID_01"
+    assert count == 1
+
+
+def test_an_id_hash_colon_header_is_caught():
+    """ID headers with hash-colon notation must be caught."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("ID#: X9998887", tmap, "p1.md")
+    assert text == "ID#: ID_01"
+    assert count == 1
+
+
+def test_a_version_string_is_not_a_phone_number():
+    """Version strings like 'v1.415.555.0142' must not be caught as phone numbers."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("v1.415.555.0142 is the version.", tmap, "p1.md")
+    assert text == "v1.415.555.0142 is the version."
+    assert count == 0
+
+
+def test_a_profile_domain_inside_another_url_is_not_redacted():
+    """Archived URLs like 'https://archive.org/x.com/y' must not be caught."""
+    tmap = TokenMap("essay-1")
+    text, count = redact_structured("See https://archive.org/x.com/y for details.", tmap, "p1.md")
+    assert text == "See https://archive.org/x.com/y for details."
+    assert count == 0
