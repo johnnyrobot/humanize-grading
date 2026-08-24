@@ -18,9 +18,18 @@ def test_speech_attribution_is_flagged():
     assert [c.name for c in found] == ["Priya"]
 
 
-def test_a_citation_is_not_flagged():
-    """Gillespie (2014) is subject matter."""
-    assert find_candidates("As Gillespie (2014) notes, algorithms curate.") == []
+def test_a_cited_name_in_a_personal_context_is_skipped():
+    """Gillespie (2014) is subject matter, even addressed with a title."""
+    found = find_candidates("Professor Gillespie (2014) argues that algorithms curate.")
+    assert found == []
+
+
+def test_a_citation_does_not_suppress_a_different_person_elsewhere():
+    """A cited Brady must not blind the layer to a different, private Brady."""
+    found = find_candidates(
+        "Brady (2017) measured outrage. My cousin Brady told me about it."
+    )
+    assert [c.name for c in found] == ["Brady"]
 
 
 def test_a_theorist_in_prose_is_not_flagged():
@@ -40,3 +49,34 @@ def test_the_candidate_carries_line_and_context():
     found = find_candidates(text)
     assert found[0].line == 2
     assert "filed the complaint" in found[0].context
+
+
+def test_an_interview_subject_is_flagged():
+    found = find_candidates("I spoke with Elena about her eviction.")
+    assert [c.name for c in found] == ["Elena"]
+
+
+def test_an_apposition_after_a_relation_word_is_flagged():
+    found = find_candidates("My landlord, Elena Vasquez, refused.")
+    assert [c.name for c in found] == ["Elena"]
+
+
+def test_a_possessive_with_first_person_is_flagged():
+    found = find_candidates("Elena's testimony changed my view.")
+    assert [c.name for c in found] == ["Elena"]
+
+
+def test_a_quote_attribution_is_flagged():
+    found = find_candidates('"The permit never came," Elena said.')
+    assert [c.name for c in found] == ["Elena"]
+
+
+def test_a_scholar_addressing_the_reader_is_not_flagged():
+    assert find_candidates("Habermas told us that the public sphere eroded.") == []
+
+
+def test_two_people_sharing_a_first_name_are_both_flagged():
+    found = find_candidates(
+        "My sister Rosa filed one complaint. My friend Rosa filed another."
+    )
+    assert [c.name for c in found] == ["Rosa", "Rosa"]
