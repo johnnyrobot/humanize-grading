@@ -65,6 +65,21 @@ class StatusReport:
     entries: tuple[BatchEntry, ...]
     blocking_findings: tuple[BlockingFinding, ...]
 
+    def legacy_state(self, entry: BatchEntry) -> str:
+        """Return the mixed state expected by callers that have not migrated."""
+        codes = {
+            finding.code
+            for finding in self.blocking_findings
+            if finding.token == entry.token
+        }
+        if "orphaned-artifact" in codes:
+            return ORPHAN
+        if "incomplete-pair" in codes:
+            return INCOMPLETE
+        if entry.progress is not None:
+            return entry.progress.value
+        return ORPHAN
+
 
 @dataclass(frozen=True)
 class GradingBatch:
@@ -146,7 +161,7 @@ class GradingBatch:
 
 @dataclass(frozen=True)
 class Item:
-    """One submission and how far the batch has got with it."""
+    """One token's artifacts in the legacy survey shape."""
 
     token: str
     source: Path | None
@@ -172,32 +187,20 @@ def _artifact_paths(
 
 
 def survey(redacted: Path, drafts: Path) -> list[Item]:
-    """Return one item per submission and per orphaned draft, in token order."""
+    """Return the legacy mixed state for each token's artifacts, in token order."""
     report = GradingBatch.open(
         BatchPaths(batch="", redacted=redacted, drafts=drafts)
     ).status()
-    codes_by_token: dict[str, set[str]] = {}
-    for finding in report.blocking_findings:
-        codes_by_token.setdefault(finding.token, set()).add(finding.code)
 
     items = []
     for entry in report.entries:
-        codes = codes_by_token.get(entry.token, set())
-        if "orphaned-artifact" in codes:
-            state = ORPHAN
-        elif "incomplete-pair" in codes:
-            state = INCOMPLETE
-        elif entry.progress is not None:
-            state = entry.progress.value
-        else:
-            state = ORPHAN
         items.append(
             Item(
                 token=entry.token,
                 source=entry.source,
                 draft=entry.draft,
                 record=entry.record,
-                state=state,
+                state=report.legacy_state(entry),
             )
         )
     return items

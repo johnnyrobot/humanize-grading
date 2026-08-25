@@ -165,15 +165,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"Nothing under {args.redacted}. Run redact.py first.")
         return EXIT_OK
 
-    states = {
-        item.token: item.progress.value if item.progress is not None else ORPHAN
-        for item in report.entries
-    }
-    for finding in report.blocking_findings:
-        if finding.code == "incomplete-pair":
-            states[finding.token] = INCOMPLETE
-        elif finding.code == "orphaned-artifact":
-            states[finding.token] = ORPHAN
+    states = {item.token: report.legacy_state(item) for item in report.entries}
 
     width = max(len(item.token) for item in report.entries)
     for item in report.entries:
