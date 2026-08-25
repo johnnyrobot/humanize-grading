@@ -39,8 +39,8 @@ class BatchPaths:
 
 
 @dataclass(frozen=True)
-class SubmissionStatus:
-    """One redacted submission and its current grading progress."""
+class BatchEntry:
+    """One token's artifacts and current grading progress."""
 
     token: str
     progress: Progress | None
@@ -62,7 +62,7 @@ class BlockingFinding:
 class StatusReport:
     """Current progress and blocking findings for a grading batch."""
 
-    submissions: tuple[SubmissionStatus, ...]
+    entries: tuple[BatchEntry, ...]
     blocking_findings: tuple[BlockingFinding, ...]
 
 
@@ -77,23 +77,26 @@ class GradingBatch:
         return cls(paths)
 
     def status(self) -> StatusReport:
-        sources = _tokens(self.paths.redacted, (".md", ".txt", ".docx"))
-        drafts = _tokens(self.paths.drafts, (".md",))
-        records = _tokens(self.paths.drafts, (".json",))
-        submissions: list[SubmissionStatus] = []
+        sources = _artifact_paths(self.paths.redacted, (".md", ".txt", ".docx"))
+        drafts = _artifact_paths(self.paths.drafts, (".md",))
+        records = _artifact_paths(self.paths.drafts, (".json",))
+        entries: list[BatchEntry] = []
         findings: list[BlockingFinding] = []
         for token in sorted(set(sources) | set(drafts) | set(records)):
-            source = sources.get(token)
-            draft = drafts.get(token)
-            record = records.get(token)
-            if source is None:
+            source_paths = sources.get(token, ())
+            draft_paths = drafts.get(token, ())
+            record_paths = records.get(token, ())
+            source = source_paths[0] if len(source_paths) == 1 else None
+            draft = draft_paths[0] if len(draft_paths) == 1 else None
+            record = record_paths[0] if len(record_paths) == 1 else None
+            if not source_paths:
                 progress = None
             elif draft is not None and record is not None:
                 progress = Progress.DRAFTED
             else:
                 progress = Progress.PENDING
-            submissions.append(
-                SubmissionStatus(
+            entries.append(
+                BatchEntry(
                     token=token,
                     progress=progress,
                     source=source,
@@ -101,7 +104,7 @@ class GradingBatch:
                     record=record,
                 )
             )
-            if source is None:
+            if not source_paths:
                 findings.append(
                     BlockingFinding(
                         code="orphaned-artifact",
@@ -112,19 +115,31 @@ class GradingBatch:
                         token=token,
                     )
                 )
-            elif (draft is None) != (record is None):
-                findings.append(
-                    BlockingFinding(
-                        code="incomplete-pair",
-                        message=(
-                            "The submission needs both draft feedback and a grade "
-                            "record before it is drafted."
-                        ),
-                        token=token,
+            else:
+                if len(source_paths) > 1:
+                    findings.append(
+                        BlockingFinding(
+                            code="duplicate-redacted-submission",
+                            message=(
+                                "More than one redacted submission uses this token. "
+                                "Keep exactly one before grading."
+                            ),
+                            token=token,
+                        )
                     )
-                )
+                if (draft is None) != (record is None):
+                    findings.append(
+                        BlockingFinding(
+                            code="incomplete-pair",
+                            message=(
+                                "The submission needs both draft feedback and a grade "
+                                "record before it is drafted."
+                            ),
+                            token=token,
+                        )
+                    )
         return StatusReport(
-            submissions=tuple(submissions),
+            entries=tuple(entries),
             blocking_findings=tuple(findings),
         )
 
@@ -140,39 +155,50 @@ class Item:
     state: str
 
 
-def _tokens(directory: Path, suffixes: tuple[str, ...]) -> dict[str, Path]:
+def _artifact_paths(
+    directory: Path, suffixes: tuple[str, ...]
+) -> dict[str, tuple[Path, ...]]:
     if not directory.is_dir():
         return {}
-    return {
-        path.stem: path
-        for path in sorted(directory.iterdir())
-        if path.is_file()
-        and path.suffix in suffixes
-        and not path.name.startswith("_")
-    }
+    found: dict[str, list[Path]] = {}
+    for path in sorted(directory.iterdir()):
+        if (
+            path.is_file()
+            and path.suffix in suffixes
+            and not path.name.startswith("_")
+        ):
+            found.setdefault(path.stem, []).append(path)
+    return {token: tuple(paths) for token, paths in found.items()}
 
 
 def survey(redacted: Path, drafts: Path) -> list[Item]:
     """Return one item per submission and per orphaned draft, in token order."""
-    sources = _tokens(redacted, (".md", ".txt", ".docx"))
-    written = _tokens(drafts, (".md",))
-    records = _tokens(drafts, (".json",))
+    report = GradingBatch.open(
+        BatchPaths(batch="", redacted=redacted, drafts=drafts)
+    ).status()
+    codes_by_token: dict[str, set[str]] = {}
+    for finding in report.blocking_findings:
+        codes_by_token.setdefault(finding.token, set()).add(finding.code)
 
-    items: list[Item] = []
-    for token in sorted(set(sources) | set(written) | set(records)):
-        source = sources.get(token)
-        draft = written.get(token)
-        record = records.get(token)
-        if source is None:
+    items = []
+    for entry in report.entries:
+        codes = codes_by_token.get(entry.token, set())
+        if "orphaned-artifact" in codes:
             state = ORPHAN
-        elif draft is not None and record is not None:
-            state = DRAFTED
-        elif draft is None and record is None:
-            state = PENDING
-        else:
+        elif "incomplete-pair" in codes:
             state = INCOMPLETE
+        elif entry.progress is not None:
+            state = entry.progress.value
+        else:
+            state = ORPHAN
         items.append(
-            Item(token=token, source=source, draft=draft, record=record, state=state)
+            Item(
+                token=entry.token,
+                source=entry.source,
+                draft=entry.draft,
+                record=entry.record,
+                state=state,
+            )
         )
     return items
 

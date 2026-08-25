@@ -161,13 +161,13 @@ def _cmd_status(args: argparse.Namespace) -> int:
             drafts=_drafts_dir(args),
         )
     ).status()
-    if not report.submissions:
+    if not report.entries:
         print(f"Nothing under {args.redacted}. Run redact.py first.")
         return EXIT_OK
 
     states = {
         item.token: item.progress.value if item.progress is not None else ORPHAN
-        for item in report.submissions
+        for item in report.entries
     }
     for finding in report.blocking_findings:
         if finding.code == "incomplete-pair":
@@ -175,8 +175,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         elif finding.code == "orphaned-artifact":
             states[finding.token] = ORPHAN
 
-    width = max(len(item.token) for item in report.submissions)
-    for item in report.submissions:
+    width = max(len(item.token) for item in report.entries)
+    for item in report.entries:
         print(f"  {item.token.ljust(width)}  {states[item.token]}")
     counts = {
         state: sum(1 for current in states.values() if current == state)
@@ -189,8 +189,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
     )
     if counts[ORPHAN]:
         print(
-            "An orphaned draft has no redacted source. It is usually a prior "
-            "run's output. Move it out before grading.",
+            "An orphaned artifact has no redacted submission. It is usually a "
+            "prior run's output. Move it out before grading.",
             file=sys.stderr,
         )
     if counts[INCOMPLETE]:
@@ -199,6 +199,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
             "Regrade it.",
             file=sys.stderr,
         )
+    for finding in report.blocking_findings:
+        if finding.code not in {"incomplete-pair", "orphaned-artifact"}:
+            print(
+                f"  ERROR {finding.code} [{finding.token}]: {finding.message}",
+                file=sys.stderr,
+            )
     return EXIT_OK
 
 

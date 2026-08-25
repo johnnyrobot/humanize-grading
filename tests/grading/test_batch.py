@@ -32,7 +32,7 @@ def test_grading_batch_reports_a_redacted_submission_as_pending(tmp_path):
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).status()
 
-    assert [(item.token, item.progress) for item in report.submissions] == [
+    assert [(item.token, item.progress) for item in report.entries] == [
         ("STUDENT_01", Progress.PENDING)
     ]
     assert report.blocking_findings == ()
@@ -48,7 +48,7 @@ def test_grading_batch_reports_a_complete_pair_as_drafted(tmp_path):
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).status()
 
-    assert report.submissions[0].progress is Progress.DRAFTED
+    assert report.entries[0].progress is Progress.DRAFTED
     assert report.blocking_findings == ()
 
 
@@ -65,7 +65,7 @@ def test_grading_batch_reports_each_incomplete_pair_without_changing_progress(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).status()
 
-    assert [item.progress for item in report.submissions] == [
+    assert [item.progress for item in report.entries] == [
         Progress.PENDING,
         Progress.PENDING,
     ]
@@ -90,13 +90,30 @@ def test_grading_batch_reports_each_artifact_without_a_submission_as_orphaned(
         )
     ).status()
 
-    assert [(item.token, item.progress) for item in report.submissions] == [
+    assert [(item.token, item.progress) for item in report.entries] == [
         ("STUDENT_08", None),
         ("STUDENT_09", None),
     ]
     assert [(finding.token, finding.code) for finding in report.blocking_findings] == [
         ("STUDENT_08", "orphaned-artifact"),
         ("STUDENT_09", "orphaned-artifact"),
+    ]
+
+
+def test_grading_batch_blocks_duplicate_redacted_submissions_for_one_token(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    (redacted / "STUDENT_01.md").write_text("essay one", encoding="utf-8")
+    (redacted / "STUDENT_01.txt").write_text("essay two", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [(entry.token, entry.progress, entry.source) for entry in report.entries] == [
+        ("STUDENT_01", Progress.PENDING, None)
+    ]
+    assert [(finding.token, finding.code) for finding in report.blocking_findings] == [
+        ("STUDENT_01", "duplicate-redacted-submission")
     ]
 
 
@@ -227,7 +244,26 @@ def test_the_status_subcommand_reports_progress_and_every_blocking_condition(tmp
     assert "STUDENT_09  orphan" in result.stdout
     assert "1 pending, 1 drafted, 1 incomplete, 1 orphaned" in result.stdout
     assert "An incomplete submission" in result.stderr
-    assert "An orphaned draft" in result.stderr
+    assert "An orphaned artifact" in result.stderr
+
+
+def test_the_status_subcommand_prints_duplicate_submission_findings(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    (redacted / "STUDENT_01.md").write_text("essay one", encoding="utf-8")
+    (redacted / "STUDENT_01.txt").write_text("essay two", encoding="utf-8")
+
+    result = _run(
+        "status",
+        "--batch",
+        "essay-2",
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+    )
+
+    assert result.returncode == 0
+    assert "duplicate-redacted-submission [STUDENT_01]" in result.stderr
 
 
 def test_the_density_subcommand_reports_a_count(phil210):
