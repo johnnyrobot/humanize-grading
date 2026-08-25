@@ -22,7 +22,6 @@ from scripts.grading.batch import (
     RenderResult,
     VerificationInputs,
 )
-from scripts.grading.consistency import review
 from scripts.grading.density import PATTERNS_PATH, load_terms, scan
 from scripts.grading.records import CriterionScore, GradeRecord, Justification, locate
 from scripts.grading.rubric import load_rubric
@@ -155,13 +154,11 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     assert before.entries, "redaction produced no files"
     assert before.counts()["pending"] == len(before.entries)
 
-    records = []
     for entry in before.entries:
         assert entry.source is not None
         record, feedback = _grade(entry.token, entry.source, rubric, terms)
         record.save(drafts / f"{entry.token}.json")
         (drafts / f"{entry.token}.md").write_text(feedback, encoding="utf-8")
-        records.append(record)
 
     after = batch.status()
     assert after.counts()["drafted"] == len(after.entries)
@@ -179,8 +176,9 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
         entry.progress is Progress.VERIFIED for entry in batch.status().entries
     )
 
-    flags = review(records, {r.token: FEEDBACK_TEMPLATE for r in records})
-    assert any(flag.kind == "reused-sentence" for flag in flags), (
+    consistency = batch.consistency()
+    assert consistency.blocking_findings == ()
+    assert any(flag.kind == "reused-sentence" for flag in consistency.flags), (
         "identical feedback across the batch must be flagged"
     )
 
@@ -224,7 +222,7 @@ def test_no_student_name_reaches_a_draft(graded_batch, phil210):
         # rubric's own protocol requires, and that is not a leak.
         for name in names:
             assert not re.search(rf"\b{re.escape(name)}\b", blob), (
-                f"{name} reached a draft for {item.token}"
+                f"{name} reached a draft for {entry.token}"
             )
 
 

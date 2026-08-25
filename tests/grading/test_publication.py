@@ -65,6 +65,22 @@ def _add_second_draft(redacted: Path, drafts: Path) -> None:
     record.save(drafts / "STUDENT_02.json")
 
 
+def _verified_fixture(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    verified = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    ).verified_batch
+    assert verified is not None
+    return redacted, drafts, verified
+
+
 def test_only_persisted_verification_returns_verified_batch(tmp_path, phil210):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     batch = GradingBatch.open(
@@ -270,18 +286,7 @@ def test_first_publication_refuses_nonempty_destination(tmp_path, phil210):
 
 
 def test_safe_force_replaces_unchanged_recognized_publication(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
-        )
-    ).verified_batch
-    assert verified is not None
+    _, _, verified = _verified_fixture(tmp_path, phil210)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
 
@@ -317,18 +322,7 @@ def test_safe_force_replaces_unchanged_recognized_publication(tmp_path, phil210)
 def test_safe_force_refuses_unrecognized_or_changed_publication(
     tmp_path, phil210, change, expected_code
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
-        )
-    ).verified_batch
-    assert verified is not None
+    _, _, verified = _verified_fixture(tmp_path, phil210)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     marker_path = target / "_publication.json"
@@ -363,18 +357,7 @@ def test_safe_force_refuses_unrecognized_or_changed_publication(
 def test_safe_force_restores_prior_publication_when_install_rename_fails(
     tmp_path, phil210, monkeypatch
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
-        )
-    ).verified_batch
-    assert verified is not None
+    _, _, verified = _verified_fixture(tmp_path, phil210)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     before = {path.name: path.read_bytes() for path in target.iterdir()}
@@ -403,18 +386,7 @@ def test_safe_force_restores_prior_publication_when_install_rename_fails(
 def test_safe_force_recovers_interrupted_backup_states(
     tmp_path, phil210, state
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
-        )
-    ).verified_batch
-    assert verified is not None
+    _, _, verified = _verified_fixture(tmp_path, phil210)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     backup = tmp_path / ".final.backup"
@@ -437,23 +409,26 @@ def test_safe_force_recovers_interrupted_backup_states(
 
 
 def test_safe_force_removes_recognized_abandoned_staging(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
-        )
-    ).verified_batch
-    assert verified is not None
+    _, _, verified = _verified_fixture(tmp_path, phil210)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     abandoned = tmp_path / ".final-interrupted"
     abandoned.mkdir()
     (abandoned / "STUDENT_01.md").write_text("partial", encoding="utf-8")
+    publication = json.loads(
+        (target / "_publication.json").read_text(encoding="utf-8")
+    )
+    (abandoned / "_transaction.json").write_text(
+        json.dumps(
+            {
+                "schema": "grading-batch-publication-transaction/1",
+                "batch": "essay-2",
+                "receipt_sha256": publication["receipt_sha256"],
+                "target": "final",
+            }
+        ),
+        encoding="utf-8",
+    )
 
     report = verified.publish(
         target,
@@ -466,6 +441,46 @@ def test_safe_force_removes_recognized_abandoned_staging(tmp_path, phil210):
     assert "Maya Updated" in (target / "STUDENT_01.md").read_text(
         encoding="utf-8"
     )
+
+
+def test_safe_force_refuses_unrecognized_staging_directory(tmp_path, phil210):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    unrelated = tmp_path / ".final-personal"
+    unrelated.mkdir()
+    personal = unrelated / "STUDENT_01.md"
+    personal.write_text("personal notes", encoding="utf-8")
+    renderer = FakeRenderer(identity="Maya Updated")
+
+    report = verified.publish(target, renderer, force=True)
+
+    assert [finding.code for finding in report.findings] == [
+        "publication-recovery-required"
+    ]
+    assert renderer.rendered == []
+    assert personal.read_text(encoding="utf-8") == "personal notes"
+
+
+def test_receipt_failure_returns_before_recovery_changes_filesystem(
+    tmp_path, phil210
+):
+    _, drafts, verified = _verified_fixture(tmp_path, phil210)
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    backup = tmp_path / ".final.backup"
+    shutil.copytree(target, backup)
+    (drafts / "STUDENT_01.md").write_text("changed", encoding="utf-8")
+    renderer = FakeRenderer(identity="Maya Updated")
+
+    report = verified.publish(target, renderer, force=True)
+
+    assert "stale-verification-receipt" in {
+        finding.code for finding in report.findings
+    }
+    assert backup.is_dir()
+    assert target.is_dir()
+    assert renderer.rendered == []
 
 
 def test_publish_aggregates_renderer_failures_and_keeps_destination_untouched(

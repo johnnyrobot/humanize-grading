@@ -42,6 +42,8 @@ RECEIPT_NAME = "_verification.json"
 RECEIPT_SCHEMA = "grading-batch-verification/1"
 PUBLICATION_NAME = "_publication.json"
 PUBLICATION_SCHEMA = "grading-batch-publication/1"
+TRANSACTION_NAME = "_transaction.json"
+TRANSACTION_SCHEMA = "grading-batch-publication-transaction/1"
 _PARTICIPANT_ROLES = {"draft", "grade-record", "redacted-submission"}
 _COURSE_EVIDENCE_ROLES = {"calibration-profile", "pattern-reference", "rubric"}
 _RECEIPT_ROLES = _PARTICIPANT_ROLES | _COURSE_EVIDENCE_ROLES
@@ -300,16 +302,26 @@ class VerifiedBatch:
                     token="",
                 )
             )
-        if force:
-            findings.extend(
-                _recover_publication_transaction(
-                    target,
-                    renderer,
-                    self._paths.batch,
-                    current_digest,
-                    status,
-                )
+        if findings:
+            return PublicationReport(
+                destination=target,
+                progress=Progress.VERIFIED,
+                findings=tuple(findings),
             )
+        if force:
+            recovery_findings = _recover_publication_transaction(
+                target,
+                renderer,
+                self._paths.batch,
+                current_digest,
+                status,
+            )
+            if recovery_findings:
+                return PublicationReport(
+                    destination=target,
+                    progress=Progress.VERIFIED,
+                    findings=recovery_findings,
+                )
         target_has_content = target.exists() and (
             not target.is_dir() or any(target.iterdir())
         )
@@ -345,6 +357,20 @@ class VerifiedBatch:
         target.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(
             tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent)
+        )
+        (staging / TRANSACTION_NAME).write_text(
+            json.dumps(
+                {
+                    "schema": TRANSACTION_SCHEMA,
+                    "batch": self._paths.batch,
+                    "receipt_sha256": current_digest,
+                    "target": target.name,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         outputs: list[dict[str, str]] = []
         try:
@@ -390,6 +416,7 @@ class VerifiedBatch:
                     findings=tuple(findings),
                 )
             outputs.sort(key=lambda item: item["path"])
+            (staging / TRANSACTION_NAME).unlink()
             (staging / PUBLICATION_NAME).write_text(
                 json.dumps(
                     {
@@ -1016,9 +1043,34 @@ def _recover_publication_transaction(
 
     expected_names = {
         entry.draft.name for entry in status.entries if entry.draft is not None
-    } | {PUBLICATION_NAME}
+    } | {PUBLICATION_NAME, TRANSACTION_NAME}
     for staging in sorted(target.parent.glob(f".{target.name}-*")):
         if not staging.is_dir():
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    f"Unrecognized publication staging path: {staging.name}",
+                ),
+            )
+        transaction = staging / TRANSACTION_NAME
+        try:
+            transaction_payload = json.loads(
+                transaction.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as error:
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    f"Unrecognized publication staging path: {staging.name}: {error}",
+                ),
+            )
+        if (
+            not isinstance(transaction_payload, dict)
+            or transaction_payload.get("schema") != TRANSACTION_SCHEMA
+            or transaction_payload.get("batch") != batch
+            or transaction_payload.get("receipt_sha256") != receipt_digest
+            or transaction_payload.get("target") != target.name
+        ):
             return (
                 _publication_finding(
                     "publication-recovery-required",
