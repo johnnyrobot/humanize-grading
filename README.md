@@ -4,6 +4,42 @@
 
 Humanizer rewrites AI-sounding text so it reads like a person wrote it, without changing what it says. Because it is just Markdown, it works with any agent that supports skills.
 
+## Two skills in one package
+
+This repo ships two skills. **Humanizer** rewrites AI-sounding text. **Grader**
+scores student work against an instructor's rubric and drafts feedback in that
+instructor's voice, using Humanizer's 35 patterns as its finishing pass.
+
+Grader keeps student identity out of a cloud model's context. It redacts names,
+IDs, emails, filenames, and document metadata to stable tokens on your machine,
+grades the redacted copy, and reattaches real names locally at the end.
+
+```
+/grade calibrate --course phil210      # learn the instructor's standards
+/grade submissions/essay-3 --course phil210
+```
+
+Read `references/redaction.md` before sending anything to a cloud model.
+Pseudonymization is not anonymization, and your institution's policy decides
+whether student work may leave your machine.
+
+### The optional hook
+
+Grader's read rules are instructions in `SKILL.md`, and a model can violate an
+instruction. `hooks/block-raw-reads.json` is a `PreToolUse` hook that denies
+reads of `submissions/`, the token map, and the roster. It is the difference
+between a rule and a guarantee.
+
+It is opt-in. Merge it into `.claude/settings.json` yourself:
+
+```bash
+cat hooks/block-raw-reads.json   # then merge the "hooks" key into your settings
+```
+
+It is Claude Code specific, and Grader works without it. Its Bash check matches
+command strings, so it stops accidents and instruction drift, not a determined
+bypass.
+
 ## How it works
 
 Humanizer uses 35 patterns from Wikipedia's ["Signs of AI writing"](https://en.wikipedia.org/wiki/Wikipedia:Signs_of_AI_writing), maintained by WikiProject AI Cleanup. It makes a first pass without treating the original structure as fixed. Then it checks the draft against those patterns and the original claims before rewriting whatever still needs work.
@@ -154,6 +190,7 @@ Humanizer follows the sample's rhythm, word choice, punctuation, and deliberate 
 <details>
 <summary>Show release notes</summary>
 
+- **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.
 - **3.0.0** — Grader becomes the package. Humanizer moves to `skills/humanizer/` and the 35 patterns move to `references/ai-patterns.md`.
 - **2.11.2** - Removed the plugin symlink and separate Claude Desktop package. Current Claude Code loads the root `SKILL.md` directly, so GitHub's source ZIP now works in Claude Desktop. No change to the 35 patterns.
 - **2.11.1** - Added a Claude Desktop-ready release package with one regular `humanizer/SKILL.md` file. GitHub's source archive still keeps the plugin symlink (fixes #224). No change to the 35 patterns.

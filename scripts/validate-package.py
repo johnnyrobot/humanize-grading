@@ -53,8 +53,11 @@ if skill_files != expected_skills:
 for skill_file in sorted(expected_skills):
     if (ROOT / skill_file).is_symlink():
         raise SystemExit(f"Keep {skill_file} a regular file")
-    if len((ROOT / skill_file).read_text(encoding="utf-8").splitlines()) > 500:
+    skill_text = (ROOT / skill_file).read_text(encoding="utf-8")
+    if len(skill_text.splitlines()) > 500:
         raise SystemExit(f"Keep {skill_file} at 500 lines or fewer")
+    if f'version: "{skill_version}"' not in skill_text:
+        raise SystemExit(f"Use the package version {skill_version} in {skill_file}")
 if PLUGIN.get("skills") != ["./", "./skills/humanizer"]:
     raise SystemExit("Point the plugin skill loader at both skills")
 
@@ -85,5 +88,45 @@ readme_numbers = {
 }
 if readme_numbers != set(range(1, 36)):
     raise SystemExit("List patterns 1 through 35 in the README table")
+
+required_references = {
+    "ai-patterns.md",
+    "calibration.md",
+    "redaction.md",
+    "rubric-format.md",
+}
+present_references = {path.name for path in (ROOT / "references").glob("*.md")}
+missing_references = sorted(required_references - present_references)
+if missing_references:
+    raise SystemExit(
+        "Add the missing reference files: " + ", ".join(missing_references)
+    )
+
+hard_rules = (
+    "Read only from `redacted/`.",
+    "Accept file paths. Never accept pasted student work.",
+    "Never echo the map file.",
+    "Refuse to grade without a profile.",
+)
+missing_rules = [rule for rule in hard_rules if rule not in SKILL]
+if missing_rules:
+    raise SystemExit(
+        "Keep the four hard rules in SKILL.md: " + "; ".join(missing_rules)
+    )
+
+if (ROOT / "hooks" / "hooks.json").exists():
+    raise SystemExit(
+        "Do not name the hook hooks/hooks.json. A plugin loads that name "
+        "automatically, and this hook must stay opt-in."
+    )
+hook_path = ROOT / "hooks" / "block-raw-reads.json"
+if not hook_path.is_file():
+    raise SystemExit("Ship hooks/block-raw-reads.json")
+hook = json.loads(hook_path.read_text(encoding="utf-8"))
+hook_entries = hook.get("hooks", {}).get("PreToolUse", [])
+if not hook_entries or "Bash" not in hook_entries[0].get("matcher", ""):
+    raise SystemExit("The hook must match Bash as well as the file tools")
+if "block-raw-reads" not in README:
+    raise SystemExit("Document the optional hook in README.md")
 
 print(f"Humanizer package v{skill_version} is valid")

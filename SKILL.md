@@ -6,7 +6,7 @@ description: |
   Redacts student identity before any work reaches a cloud model.
 license: MIT
 metadata:
-  version: "3.0.0"
+  version: "3.1.0"
 ---
 
 # Grader
