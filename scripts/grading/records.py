@@ -49,6 +49,13 @@ def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+# A quote may span a line WRAP -- a model reflows text, and it is still the
+# same passage. It may never span a blank line: the tail of one paragraph
+# stitched to the head of the next is two passages, and certifying it as one
+# would let a fabricated quote pass as evidence.
+_PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+
+
 def locate(
     quote: str, source: str, occurrence: int | None = None
 ) -> tuple[int, int, int]:
@@ -64,8 +71,18 @@ def locate(
             f"Quote is too short to be evidence. Use at least "
             f"{MIN_QUOTE_WORDS} words: {quote!r}"
         )
-    pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
-    matches = list(pattern.finditer(source))
+    # Anchor only where the boundary character is alphanumeric, so a quote
+    # ending in "." still matches while "one cat" no longer matches inside
+    # "one category".
+    body = r"\s+".join(re.escape(word) for word in words)
+    prefix = r"\b" if words[0][:1].isalnum() else ""
+    suffix = r"\b" if words[-1][-1:].isalnum() else ""
+    pattern = re.compile(prefix + body + suffix)
+    matches = [
+        match
+        for match in pattern.finditer(source)
+        if not _PARAGRAPH_BREAK.search(match.group(0))
+    ]
     if not matches:
         raise RecordError(f"Quote is not in the source: {quote!r}")
     if len(matches) > 1 and occurrence is None:
@@ -73,8 +90,12 @@ def locate(
             f"Quote appears {len(matches)} times. Lengthen it, or set "
             f'"occurrence": {quote!r}'
         )
+    if occurrence is not None and occurrence < 1:
+        raise RecordError(
+            f"Occurrence must be 1 or greater, not {occurrence}: {quote!r}"
+        )
     index = (occurrence or 1) - 1
-    if index < 0 or index >= len(matches):
+    if index >= len(matches):
         raise RecordError(
             f"Quote appears {len(matches)} times, so occurrence "
             f"{occurrence} does not exist: {quote!r}"
@@ -150,10 +171,15 @@ class CriterionScore:
         for name in ("number", "name", "points_possible", "level", "assessable"):
             if name not in payload:
                 raise RecordError(f"A criterion is missing {name!r}.")
+        try:
+            number = int(payload["number"])
+            points_possible = int(payload["points_possible"])
+        except (TypeError, ValueError) as error:
+            raise RecordError(f"Cannot convert criterion fields to int: {error}") from error
         return cls(
-            number=int(payload["number"]),
+            number=number,
             name=str(payload["name"]),
-            points_possible=int(payload["points_possible"]),
+            points_possible=points_possible,
             score=payload.get("score"),
             level=str(payload["level"]),
             assessable=bool(payload["assessable"]),
@@ -216,6 +242,11 @@ class GradeRecord:
         missing = [name for name in _REQUIRED if name not in payload]
         if missing:
             raise RecordError(f"The record is missing: {', '.join(missing)}")
+        try:
+            total = int(payload["total"])
+            total_possible = int(payload["total_possible"])
+        except (TypeError, ValueError) as error:
+            raise RecordError(f"Cannot convert total fields to int: {error}") from error
         return cls(
             schema=str(payload["schema"]),
             batch=str(payload["batch"]),
@@ -227,8 +258,8 @@ class GradeRecord:
             criteria=tuple(
                 CriterionScore.from_dict(item) for item in payload["criteria"]
             ),
-            total=int(payload["total"]),
-            total_possible=int(payload["total_possible"]),
+            total=total,
+            total_possible=total_possible,
             letter=str(payload["letter"]),
             pattern_density=dict(payload["pattern_density"]),
             status=str(payload["status"]),

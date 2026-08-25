@@ -141,3 +141,49 @@ def test_a_record_that_is_not_json_is_refused(tmp_path):
 
 def test_every_record_starts_as_a_draft():
     assert _record().status == "draft"
+
+
+PARAGRAPHS = (
+    "The author never once considers the counterargument raised in class.\n\n"
+    "Renewable subsidies distort investment decisions across the grid.\n"
+)
+
+
+def test_a_quote_spliced_across_a_paragraph_break_is_refused():
+    with pytest.raises(RecordError, match="not in the source"):
+        locate("raised in class. Renewable subsidies distort", PARAGRAPHS, None)
+
+
+def test_a_quote_inside_one_paragraph_still_matches():
+    offset, line, length = locate(
+        "considers the counterargument raised in class", PARAGRAPHS, None
+    )
+    assert PARAGRAPHS[offset : offset + length].startswith("considers the")
+
+
+def test_a_quote_may_not_match_a_word_fragment():
+    with pytest.raises(RecordError, match="not in the source"):
+        locate("never once considers the counter", PARAGRAPHS, None)
+
+
+def test_occurrence_zero_is_refused():
+    with pytest.raises(RecordError, match="1 or greater"):
+        locate("The author never once considers", PARAGRAPHS, 0)
+
+
+def test_a_criterion_missing_a_field_is_refused(tmp_path):
+    payload = _record().as_dict()
+    del payload["criteria"][0]["points_possible"]
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RecordError, match="points_possible"):
+        GradeRecord.load(path)
+
+
+def test_a_justification_missing_its_quote_is_refused(tmp_path):
+    payload = _record().as_dict()
+    payload["criteria"][0]["justifications"][0].pop("quote")
+    path = tmp_path / "bad.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(RecordError, match="quote"):
+        GradeRecord.load(path)
