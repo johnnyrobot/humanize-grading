@@ -21,7 +21,7 @@ Keep the skill portable. Do not write instructions that limit it to one or two a
 - `references/ai-patterns.md` holds the 35 patterns. Both skills read it. Edit patterns only here.
 - `references/redaction.md`, `references/calibration.md`, and `references/rubric-format.md` explain what redaction covers, how calibration runs, and what a rubric must contain.
 - `scripts/redaction/` holds the five redaction layers. Read `docs/superpowers/decisions-redaction-foundation.md` before changing any of them.
-- `scripts/grading/` holds the rubric parser, sample parser, density counter, record format, profile loader, verifier, batch survey, and consistency pass.
+- `scripts/grading/` holds the rubric parser, sample parser, density counter, record format, profile loader, verifier, grading-batch lifecycle, and consistency pass.
 - `scripts/redact.py`, `scripts/rehydrate.py`, `scripts/calibrate.py`, and `scripts/grade.py` are the four command-line entry points.
 - `hooks/block-raw-reads.json` is the optional `PreToolUse` hook. It must stay opt-in, so it must never be renamed `hooks/hooks.json`.
 - `README.md` explains installation, use, patterns, and version history.

@@ -3,17 +3,7 @@
 import subprocess
 import sys
 
-from scripts.grading.batch import (
-    DRAFTED,
-    INCOMPLETE,
-    ORPHAN,
-    PENDING,
-    BatchPaths,
-    GradingBatch,
-    Progress,
-    summary,
-    survey,
-)
+from scripts.grading.batch import BatchPaths, GradingBatch, Progress
 
 
 def _batch(tmp_path):
@@ -100,6 +90,57 @@ def test_grading_batch_reports_each_artifact_without_a_submission_as_orphaned(
     ]
 
 
+def test_status_report_owns_display_states_and_counts(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    for token in ("STUDENT_01", "STUDENT_02", "STUDENT_03"):
+        (redacted / f"{token}.md").write_text("essay", encoding="utf-8")
+    (drafts / "STUDENT_02.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_02.json").write_text("{}", encoding="utf-8")
+    (drafts / "STUDENT_03.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_09.json").write_text("{}", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [report.display_state(entry) for entry in report.entries] == [
+        "pending",
+        "drafted",
+        "incomplete",
+        "orphan",
+    ]
+    assert report.counts() == {
+        "pending": 1,
+        "drafted": 1,
+        "verified": 0,
+        "incomplete": 1,
+        "orphan": 1,
+    }
+
+
+def test_grading_batch_inventory_is_sorted_and_ignores_reserved_files(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    (redacted / "_review.json").write_text("{}", encoding="utf-8")
+    for token in ("UNKNOWN_03", "STUDENT_02", "STUDENT_01"):
+        (redacted / f"{token}.md").write_text("essay", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(
+            batch="essay-2",
+            redacted=redacted,
+            drafts=tmp_path / "absent",
+        )
+    ).status()
+
+    assert [entry.token for entry in report.entries] == [
+        "STUDENT_01",
+        "STUDENT_02",
+        "UNKNOWN_03",
+    ]
+    assert all(entry.progress is Progress.PENDING for entry in report.entries)
+
+
 def test_grading_batch_blocks_duplicate_redacted_submissions_for_one_token(tmp_path):
     redacted, drafts = _batch(tmp_path)
     (redacted / "STUDENT_01.md").write_text("essay one", encoding="utf-8")
@@ -115,86 +156,6 @@ def test_grading_batch_blocks_duplicate_redacted_submissions_for_one_token(tmp_p
     assert [(finding.token, finding.code) for finding in report.blocking_findings] == [
         ("STUDENT_01", "duplicate-redacted-submission")
     ]
-
-
-def test_a_file_with_no_draft_is_pending(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    items = survey(redacted, drafts)
-    assert [(item.token, item.state) for item in items] == [("STUDENT_01", PENDING)]
-
-
-def test_a_file_with_both_a_draft_and_a_record_is_done(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
-    (drafts / "STUDENT_01.json").write_text("{}", encoding="utf-8")
-    assert survey(redacted, drafts)[0].state == DRAFTED
-
-
-def test_a_draft_without_its_record_is_incomplete(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
-    assert survey(redacted, drafts)[0].state == INCOMPLETE
-
-
-def test_a_record_without_its_draft_is_incomplete(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    (drafts / "STUDENT_01.json").write_text("{}", encoding="utf-8")
-    assert survey(redacted, drafts)[0].state == INCOMPLETE
-
-
-def test_a_draft_with_no_redacted_source_is_an_orphan(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (drafts / "STUDENT_09.md").write_text("feedback", encoding="utf-8")
-    (drafts / "STUDENT_09.json").write_text("{}", encoding="utf-8")
-    items = survey(redacted, drafts)
-    assert items[0].state == ORPHAN
-    assert items[0].source is None
-
-
-def test_an_unknown_token_prefix_is_still_surveyed(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "UNKNOWN_01.md").write_text("essay", encoding="utf-8")
-    assert survey(redacted, drafts)[0].token == "UNKNOWN_01"
-
-
-def test_the_review_file_is_never_treated_as_a_submission(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "_review.json").write_text("{}", encoding="utf-8")
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    assert [item.token for item in survey(redacted, drafts)] == ["STUDENT_01"]
-
-
-def test_items_come_back_in_token_order(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    for token in ["STUDENT_03", "STUDENT_01", "STUDENT_02"]:
-        (redacted / f"{token}.md").write_text("essay", encoding="utf-8")
-    assert [item.token for item in survey(redacted, drafts)] == [
-        "STUDENT_01",
-        "STUDENT_02",
-        "STUDENT_03",
-    ]
-
-
-def test_the_summary_counts_each_state(tmp_path):
-    redacted, drafts = _batch(tmp_path)
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    (redacted / "STUDENT_02.md").write_text("essay", encoding="utf-8")
-    (drafts / "STUDENT_02.md").write_text("feedback", encoding="utf-8")
-    (drafts / "STUDENT_02.json").write_text("{}", encoding="utf-8")
-    counts = summary(survey(redacted, drafts))
-    assert counts[PENDING] == 1
-    assert counts[DRAFTED] == 1
-
-
-def test_a_missing_drafts_directory_reports_everything_as_pending(tmp_path):
-    redacted = tmp_path / "redacted"
-    redacted.mkdir()
-    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
-    assert survey(redacted, tmp_path / "absent")[0].state == PENDING
 
 
 def _run(*args):

@@ -38,10 +38,6 @@ class Progress(str, Enum):
     REHYDRATED = "rehydrated"
 
 
-PENDING = Progress.PENDING.value
-DRAFTED = Progress.DRAFTED.value
-INCOMPLETE = "incomplete"
-ORPHAN = "orphan"
 RECEIPT_NAME = "_verification.json"
 RECEIPT_SCHEMA = "grading-batch-verification/1"
 PUBLICATION_NAME = "_publication.json"
@@ -107,22 +103,33 @@ class StatusReport:
     entries: tuple[BatchEntry, ...]
     blocking_findings: tuple[BlockingFinding, ...]
 
-    def legacy_state(self, entry: BatchEntry) -> str:
-        """Return the mixed state expected by callers that have not migrated."""
+    def display_state(self, entry: BatchEntry) -> str:
+        """Return one concise state for status output."""
         codes = {
             finding.code
             for finding in self.blocking_findings
             if finding.token == entry.token
         }
         if "orphaned-artifact" in codes:
-            return ORPHAN
+            return "orphan"
         if "incomplete-pair" in codes:
-            return INCOMPLETE
-        if entry.progress is Progress.VERIFIED:
-            return DRAFTED
+            return "incomplete"
         if entry.progress is not None:
             return entry.progress.value
-        return ORPHAN
+        return "orphan"
+
+    def counts(self) -> dict[str, int]:
+        """Count entries by their status display state."""
+        counts = {
+            "pending": 0,
+            "drafted": 0,
+            "verified": 0,
+            "incomplete": 0,
+            "orphan": 0,
+        }
+        for entry in self.entries:
+            counts[self.display_state(entry)] += 1
+        return counts
 
 
 @dataclass(frozen=True)
@@ -849,17 +856,6 @@ class GradingBatch:
         )
 
 
-@dataclass(frozen=True)
-class Item:
-    """One token's artifacts in the legacy survey shape."""
-
-    token: str
-    source: Path | None
-    draft: Path | None
-    record: Path | None
-    state: str
-
-
 def _artifact_paths(
     directory: Path, suffixes: tuple[str, ...]
 ) -> dict[str, tuple[Path, ...]]:
@@ -1465,31 +1461,3 @@ def _batch_identity_findings(
         for mismatched, code, message in checks
         if mismatched
     ]
-
-
-def survey(redacted: Path, drafts: Path) -> list[Item]:
-    """Return the legacy mixed state for each token's artifacts, in token order."""
-    report = GradingBatch.open(
-        BatchPaths(batch="", redacted=redacted, drafts=drafts)
-    ).status()
-
-    items = []
-    for entry in report.entries:
-        items.append(
-            Item(
-                token=entry.token,
-                source=entry.source,
-                draft=entry.draft,
-                record=entry.record,
-                state=report.legacy_state(entry),
-            )
-        )
-    return items
-
-
-def summary(items: list[Item]) -> dict[str, int]:
-    """Count how many legacy survey items sit in each state."""
-    counts = {PENDING: 0, DRAFTED: 0, INCOMPLETE: 0, ORPHAN: 0}
-    for item in items:
-        counts[item.state] += 1
-    return counts

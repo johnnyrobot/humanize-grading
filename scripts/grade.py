@@ -27,11 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.grading.density import PATTERNS_PATH, load_terms  # noqa: E402
 from scripts.grading.batch import (  # noqa: E402
-    INCOMPLETE,
-    ORPHAN,
     BatchPaths,
     GradingBatch,
-    Progress,
     VerificationFailure,
     VerificationInputs,
 )
@@ -170,41 +167,24 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"Nothing under {args.redacted}. Run redact.py first.")
         return EXIT_OK
 
-    states = {
-        item.token: (
-            Progress.VERIFIED.value
-            if item.progress is Progress.VERIFIED
-            else report.legacy_state(item)
-        )
-        for item in report.entries
-    }
+    states = {item.token: report.display_state(item) for item in report.entries}
 
     width = max(len(item.token) for item in report.entries)
     for item in report.entries:
         print(f"  {item.token.ljust(width)}  {states[item.token]}")
-    counts = {
-        state: sum(1 for current in states.values() if current == state)
-        for state in (
-            Progress.PENDING.value,
-            Progress.DRAFTED.value,
-            Progress.VERIFIED.value,
-            INCOMPLETE,
-            ORPHAN,
-        )
-    }
+    counts = report.counts()
     print(
-        f"\n{counts[Progress.PENDING.value]} pending, "
-        f"{counts[Progress.DRAFTED.value]} drafted, "
-        f"{counts[INCOMPLETE]} incomplete, {counts[ORPHAN]} orphaned, "
-        f"{counts[Progress.VERIFIED.value]} verified."
+        f"\n{counts['pending']} pending, {counts['drafted']} drafted, "
+        f"{counts['incomplete']} incomplete, {counts['orphan']} orphaned, "
+        f"{counts['verified']} verified."
     )
-    if counts[ORPHAN]:
+    if counts["orphan"]:
         print(
             "An orphaned artifact has no redacted submission. It is usually a "
             "prior run's output. Move it out before grading.",
             file=sys.stderr,
         )
-    if counts[INCOMPLETE]:
+    if counts["incomplete"]:
         print(
             "An incomplete submission has a draft or a record but not both. "
             "Regrade it.",

@@ -10,19 +10,17 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
 
 from scripts.grading.batch import (
-    DRAFTED,
-    PENDING,
     BatchPaths,
     GradingBatch,
     Progress,
+    RenderResult,
     VerificationInputs,
-    summary,
-    survey,
 )
 from scripts.grading.consistency import review
 from scripts.grading.density import PATTERNS_PATH, load_terms, scan
@@ -150,23 +148,23 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     rubric = load_rubric(phil210 / "grading_rubric.md")
     terms = load_terms(PATTERNS_PATH)
 
-    before = survey(redacted, drafts)
-    assert before, "redaction produced no files"
-    assert summary(before)[PENDING] == len(before)
-
-    records = []
-    for item in before:
-        record, feedback = _grade(item.token, item.source, rubric, terms)
-        record.save(drafts / f"{item.token}.json")
-        (drafts / f"{item.token}.md").write_text(feedback, encoding="utf-8")
-        records.append(record)
-
-    after = survey(redacted, drafts)
-    assert summary(after)[DRAFTED] == len(after)
-
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
+    before = batch.status()
+    assert before.entries, "redaction produced no files"
+    assert before.counts()["pending"] == len(before.entries)
+
+    records = []
+    for entry in before.entries:
+        assert entry.source is not None
+        record, feedback = _grade(entry.token, entry.source, rubric, terms)
+        record.save(drafts / f"{entry.token}.json")
+        (drafts / f"{entry.token}.md").write_text(feedback, encoding="utf-8")
+        records.append(record)
+
+    after = batch.status()
+    assert after.counts()["drafted"] == len(after.entries)
     verification = batch.verify(
         VerificationInputs(
             course="phil210",
@@ -209,8 +207,16 @@ def test_no_student_name_reaches_a_draft(graded_batch, phil210):
         for entry in load_roster(phil210 / "roster.csv")
         for part in entry.name.split()
     }
-    for item in survey(redacted, tmp_path / "absent"):
-        record, feedback = _grade(item.token, item.source, rubric, terms)
+    batch = GradingBatch.open(
+        BatchPaths(
+            batch="essay-2",
+            redacted=redacted,
+            drafts=tmp_path / "absent",
+        )
+    )
+    for entry in batch.status().entries:
+        assert entry.source is not None
+        record, feedback = _grade(entry.token, entry.source, rubric, terms)
         blob = feedback + "".join(
             j.quote for c in record.criteria for j in c.justifications
         )
@@ -226,13 +232,20 @@ def test_the_batch_resumes_instead_of_regrading(graded_batch):
     tmp_path, redacted = graded_batch
     drafts = tmp_path / "drafts2"
     drafts.mkdir()
-    items = survey(redacted, drafts)
-    first = items[0]
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    entries = batch.status().entries
+    first = entries[0]
     (drafts / f"{first.token}.md").write_text("feedback", encoding="utf-8")
     (drafts / f"{first.token}.json").write_text("{}", encoding="utf-8")
-    pending = [item.token for item in survey(redacted, drafts) if item.state == PENDING]
+    pending = [
+        entry.token
+        for entry in batch.status().entries
+        if entry.progress is Progress.PENDING
+    ]
     assert first.token not in pending
-    assert len(pending) == len(items) - 1
+    assert len(pending) == len(entries) - 1
 
 
 def test_the_grading_scripts_never_open_the_map():
@@ -243,3 +256,4 @@ def test_the_grading_scripts_never_open_the_map():
         assert "maps/" not in text, f"{path} must not reference the map directory"
     grade_cli = Path("scripts/grade.py").read_text(encoding="utf-8")
     assert "TokenMap" not in grade_cli
+    assert "text" not in {field.name for field in fields(RenderResult)}
