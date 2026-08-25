@@ -195,7 +195,7 @@ Humanizer follows the sample's rhythm, word choice, punctuation, and deliberate 
 <details>
 <summary>Show release notes</summary>
 
-- **Next release** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory.
+- **Next release** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes or safely replaces rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.
 - **3.0.0** — Grader becomes the package. Humanizer moves to `skills/humanizer/` and the 35 patterns move to `references/ai-patterns.md`.
 - **2.11.2** - Removed the plugin symlink and separate Claude Desktop package. Current Claude Code loads the root `SKILL.md` directly, so GitHub's source ZIP now works in Claude Desktop. No change to the 35 patterns.

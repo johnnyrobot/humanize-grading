@@ -217,6 +217,11 @@ then restores identities through the local token map. It prepares every draft in
 staging before publishing anything. A missing, stale, or malformed receipt, a
 token with no mapping, or a rendering failure leaves the destination unchanged.
 Successful publication includes the identity-free `_publication.json` marker.
+Pass `--force` only to replace an unchanged publication recognized by that marker.
+Safe force stages the complete replacement, moves the prior publication to a
+backup, installs the replacement, and restores or recovers the backup on failure.
+The destination may be briefly absent during that portable directory swap, but
+it is never exposed as a partly populated new grading batch.
 
 Every rehydrated feedback file is a draft pending the instructor's sign-off. Say
 so. The identity-free publication marker is not feedback.

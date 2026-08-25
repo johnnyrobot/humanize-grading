@@ -48,12 +48,21 @@ class TokenMapRenderer:
             unmapped_tokens=tuple(unmapped),
         )
 
+    def hash_output(self, path: Path) -> str:
+        """Hash rehydrated output without returning its identity-bearing text."""
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("drafts", type=Path, help="Folder of tokenized drafts")
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("final"))
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Replace only an unchanged publication from this grading batch",
+    )
     args = parser.parse_args(argv)
 
     resumed = VerifiedBatch.resume(args.drafts)
@@ -67,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
         print(f"  ERROR map-unreadable: {error}", file=sys.stderr)
         return 5
-    report = resumed.verified_batch.publish(args.out, renderer)
+    report = resumed.verified_batch.publish(args.out, renderer, force=args.force)
     if report.findings:
         for finding in report.findings:
             where = f" [{finding.token}]" if finding.token else ""

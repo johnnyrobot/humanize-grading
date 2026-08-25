@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -27,10 +28,12 @@ class FakeRenderer:
         self,
         batch: str = "essay-2",
         *,
+        identity: str = "Maya Lin",
         unmapped: dict[str, tuple[str, ...]] | None = None,
         errors: dict[str, str] | None = None,
     ) -> None:
         self.batch = batch
+        self.identity = identity
         self.rendered: list[str] = []
         self.unmapped = unmapped or {}
         self.errors = errors or {}
@@ -39,12 +42,15 @@ class FakeRenderer:
         self.rendered.append(source.name)
         if source.name in self.errors:
             return RenderResult(error=self.errors[source.name])
-        text = "Maya Lin\n\n" + source.read_text(encoding="utf-8")
+        text = self.identity + "\n\n" + source.read_text(encoding="utf-8")
         destination.write_text(text, encoding="utf-8")
         return RenderResult(
             sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
             unmapped_tokens=self.unmapped.get(source.name, ()),
         )
+
+    def hash_output(self, path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _add_second_draft(redacted: Path, drafts: Path) -> None:
@@ -263,6 +269,205 @@ def test_first_publication_refuses_nonempty_destination(tmp_path, phil210):
     assert existing.read_text(encoding="utf-8") == "keep me"
 
 
+def test_safe_force_replaces_unchanged_recognized_publication(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    verified = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    ).verified_batch
+    assert verified is not None
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert report.findings == ()
+    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(
+        encoding="utf-8"
+    )
+    assert "Maya Lin" not in (target / "STUDENT_01.md").read_text(
+        encoding="utf-8"
+    )
+    assert not (tmp_path / ".final.backup").exists()
+    assert list(tmp_path.glob(".final-*")) == []
+
+
+@pytest.mark.parametrize(
+    ("change", "expected_code"),
+    [
+        ("missing-marker", "unrecognized-publication"),
+        ("unknown-marker", "unrecognized-publication"),
+        ("other-batch", "publication-batch-mismatch"),
+        ("stale-receipt", "stale-publication"),
+        ("modified-output", "publication-files-changed"),
+        ("missing-output", "publication-files-changed"),
+        ("extra-file", "publication-files-changed"),
+    ],
+)
+def test_safe_force_refuses_unrecognized_or_changed_publication(
+    tmp_path, phil210, change, expected_code
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    verified = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    ).verified_batch
+    assert verified is not None
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    marker_path = target / "_publication.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    if change == "missing-marker":
+        marker_path.unlink()
+    elif change == "unknown-marker":
+        marker["schema"] = "grading-batch-publication/99"
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    elif change == "other-batch":
+        marker["batch"] = "essay-9"
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    elif change == "stale-receipt":
+        marker["receipt_sha256"] = "0" * 64
+        marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    elif change == "modified-output":
+        (target / "STUDENT_01.md").write_text("edited", encoding="utf-8")
+    elif change == "missing-output":
+        (target / "STUDENT_01.md").unlink()
+    else:
+        (target / "notes.txt").write_text("unrelated", encoding="utf-8")
+    before = {path.name: path.read_bytes() for path in target.iterdir()}
+    renderer = FakeRenderer(identity="Maya Updated")
+
+    report = verified.publish(target, renderer, force=True)
+
+    assert [finding.code for finding in report.findings] == [expected_code]
+    assert renderer.rendered == []
+    assert {path.name: path.read_bytes() for path in target.iterdir()} == before
+
+
+def test_safe_force_restores_prior_publication_when_install_rename_fails(
+    tmp_path, phil210, monkeypatch
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    verified = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    ).verified_batch
+    assert verified is not None
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    before = {path.name: path.read_bytes() for path in target.iterdir()}
+    original_replace = Path.replace
+
+    def fail_staging_install(path, destination):
+        if path.name.startswith(".final-") and Path(destination) == target:
+            raise OSError("simulated install failure")
+        return original_replace(path, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_staging_install)
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert [finding.code for finding in report.findings] == ["publication-failed"]
+    assert {path.name: path.read_bytes() for path in target.iterdir()} == before
+    assert not (tmp_path / ".final.backup").exists()
+    assert list(tmp_path.glob(".final-*")) == []
+
+
+@pytest.mark.parametrize("state", ["target-missing", "target-and-backup"])
+def test_safe_force_recovers_interrupted_backup_states(
+    tmp_path, phil210, state
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    verified = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    ).verified_batch
+    assert verified is not None
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    backup = tmp_path / ".final.backup"
+    if state == "target-missing":
+        target.replace(backup)
+    else:
+        shutil.copytree(target, backup)
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert report.findings == ()
+    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(
+        encoding="utf-8"
+    )
+    assert not backup.exists()
+
+
+def test_safe_force_removes_recognized_abandoned_staging(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    verified = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    ).verified_batch
+    assert verified is not None
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    abandoned = tmp_path / ".final-interrupted"
+    abandoned.mkdir()
+    (abandoned / "STUDENT_01.md").write_text("partial", encoding="utf-8")
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert report.findings == ()
+    assert not abandoned.exists()
+    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_publish_aggregates_renderer_failures_and_keeps_destination_untouched(
     tmp_path, phil210
 ):
@@ -345,6 +550,43 @@ def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
     assert "Every rehydrated feedback file is a DRAFT" in result.stdout
     assert "Maya Lin" in (target / "STUDENT_01.md").read_text(encoding="utf-8")
     assert not (target / "STUDENT_01.json").exists()
+    assert (target / "_publication.json").is_file()
+
+
+def test_rehydrate_cli_safe_force_replaces_recognized_publication(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+    token_map = TokenMap("essay-2")
+    map_path = tmp_path / "maps" / "essay-2.json"
+    token_map.save(map_path)
+    target = tmp_path / "final"
+    command = [
+        sys.executable,
+        "scripts/rehydrate.py",
+        str(drafts),
+        "--map",
+        str(map_path),
+        "--out",
+        str(target),
+    ]
+    subprocess.run(command, capture_output=True, text=True, check=True)
+
+    result = subprocess.run(
+        command + ["--force"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
     assert (target / "_publication.json").is_file()
 
 

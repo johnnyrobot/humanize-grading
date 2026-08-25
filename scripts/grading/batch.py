@@ -168,6 +168,8 @@ class RehydrationRenderer(Protocol):
 
     def render(self, source: Path, destination: Path) -> RenderResult: ...
 
+    def hash_output(self, path: Path) -> str: ...
+
 
 @dataclass(frozen=True)
 class PublicationReport:
@@ -252,7 +254,11 @@ class VerifiedBatch:
         )
 
     def publish(
-        self, target: Path, renderer: RehydrationRenderer
+        self,
+        target: Path,
+        renderer: RehydrationRenderer,
+        *,
+        force: bool = False,
     ) -> PublicationReport:
         receipt = self._paths.drafts / RECEIPT_NAME
         status = GradingBatch.open(self._paths).status(require_verified=True)
@@ -287,17 +293,41 @@ class VerifiedBatch:
                     token="",
                 )
             )
-        if target.exists() and (not target.is_dir() or any(target.iterdir())):
-            findings.append(
-                BlockingFinding(
-                    code="destination-not-empty",
-                    message=(
-                        "The publication destination is not empty. Move it before "
-                        "publishing this grading batch."
-                    ),
-                    token="",
+        if force:
+            findings.extend(
+                _recover_publication_transaction(
+                    target,
+                    renderer,
+                    self._paths.batch,
+                    current_digest,
+                    status,
                 )
             )
+        target_has_content = target.exists() and (
+            not target.is_dir() or any(target.iterdir())
+        )
+        if target_has_content:
+            if force:
+                findings.extend(
+                    _validate_existing_publication(
+                        target,
+                        renderer,
+                        self._paths.batch,
+                        current_digest,
+                        status,
+                    )
+                )
+            else:
+                findings.append(
+                    BlockingFinding(
+                        code="destination-not-empty",
+                        message=(
+                            "The publication destination is not empty. Pass --force "
+                            "only for an unchanged publication from this grading batch."
+                        ),
+                        token="",
+                    )
+                )
         if findings:
             return PublicationReport(
                 destination=target,
@@ -367,9 +397,29 @@ class VerifiedBatch:
                 + "\n",
                 encoding="utf-8",
             )
-            if target.is_dir():
-                target.rmdir()
-            staging.replace(target)
+            if target_has_content:
+                backup = _publication_backup(target)
+                target.replace(backup)
+                try:
+                    staging.replace(target)
+                except OSError as error:
+                    backup.replace(target)
+                    return PublicationReport(
+                        destination=target,
+                        progress=Progress.VERIFIED,
+                        findings=(
+                            BlockingFinding(
+                                code="publication-failed",
+                                message=f"Could not replace the publication: {error}",
+                                token="",
+                            ),
+                        ),
+                    )
+                shutil.rmtree(backup)
+            else:
+                if target.is_dir():
+                    target.rmdir()
+                staging.replace(target)
             return PublicationReport(
                 destination=target,
                 progress=Progress.REHYDRATED,
@@ -885,6 +935,181 @@ def _paths_from_receipt(drafts: Path, receipt: Path) -> BatchPaths:
         redacted=parents.pop(),
         drafts=drafts.resolve(),
     )
+
+
+def _publication_backup(target: Path) -> Path:
+    return target.with_name(f".{target.name}.backup")
+
+
+def _recover_publication_transaction(
+    target: Path,
+    renderer: RehydrationRenderer,
+    batch: str,
+    receipt_digest: str,
+    status: StatusReport,
+) -> tuple[BlockingFinding, ...]:
+    backup = _publication_backup(target)
+    if backup.exists():
+        if not backup.is_dir():
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    "The publication backup is not a directory. Move it manually.",
+                ),
+            )
+        backup_findings = _validate_existing_publication(
+            backup, renderer, batch, receipt_digest, status
+        )
+        if backup_findings:
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    "The publication backup is not recognized. Move it manually.",
+                ),
+            )
+        if target.exists():
+            target_findings = _validate_existing_publication(
+                target, renderer, batch, receipt_digest, status
+            )
+            if target_findings:
+                return (
+                    _publication_finding(
+                        "publication-recovery-required",
+                        "Both publication and backup exist. Move one manually.",
+                    ),
+                )
+            shutil.rmtree(backup)
+        else:
+            backup.replace(target)
+
+    expected_names = {
+        entry.draft.name for entry in status.entries if entry.draft is not None
+    } | {PUBLICATION_NAME}
+    for staging in sorted(target.parent.glob(f".{target.name}-*")):
+        if not staging.is_dir():
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    f"Unrecognized publication staging path: {staging.name}",
+                ),
+            )
+        entries = list(staging.iterdir())
+        if any(not path.is_file() for path in entries) or {
+            path.name for path in entries
+        } - expected_names:
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    f"Unrecognized files remain in publication staging: {staging.name}",
+                ),
+            )
+        shutil.rmtree(staging)
+    return ()
+
+
+def _validate_existing_publication(
+    target: Path,
+    renderer: RehydrationRenderer,
+    batch: str,
+    receipt_digest: str,
+    status: StatusReport,
+) -> tuple[BlockingFinding, ...]:
+    marker = target / PUBLICATION_NAME
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        return (_publication_finding("unrecognized-publication", str(error)),)
+    if not isinstance(payload, dict) or payload.get("schema") != PUBLICATION_SCHEMA:
+        return (
+            _publication_finding(
+                "unrecognized-publication",
+                "The destination has no recognized publication marker.",
+            ),
+        )
+    if payload.get("batch") != batch:
+        return (
+            _publication_finding(
+                "publication-batch-mismatch",
+                "The destination belongs to a different grading batch.",
+            ),
+        )
+    if payload.get("receipt_sha256") != receipt_digest:
+        return (
+            _publication_finding(
+                "stale-publication",
+                "The destination was published from a different verification receipt.",
+            ),
+        )
+    outputs = payload.get("outputs")
+    if not isinstance(outputs, list):
+        return (
+            _publication_finding(
+                "unrecognized-publication",
+                "The publication marker has no output list.",
+            ),
+        )
+    expected_names = {
+        entry.draft.name for entry in status.entries if entry.draft is not None
+    }
+    marker_outputs: dict[str, str] = {}
+    for output in outputs:
+        if not isinstance(output, dict):
+            return (
+                _publication_finding(
+                    "unrecognized-publication",
+                    "The publication marker has a malformed output entry.",
+                ),
+            )
+        name = output.get("path")
+        digest = output.get("sha256")
+        if (
+            not isinstance(name, str)
+            or not name
+            or Path(name).name != name
+            or not isinstance(digest, str)
+            or len(digest) != 64
+            or name in marker_outputs
+        ):
+            return (
+                _publication_finding(
+                    "unrecognized-publication",
+                    "The publication marker has a malformed output entry.",
+                ),
+            )
+        marker_outputs[name] = digest
+    if set(marker_outputs) != expected_names:
+        return (
+            _publication_finding(
+                "publication-files-changed",
+                "The publication marker does not list the expected feedback files.",
+            ),
+        )
+    actual_names = {path.name for path in target.iterdir()}
+    if actual_names != expected_names | {PUBLICATION_NAME}:
+        return (
+            _publication_finding(
+                "publication-files-changed",
+                "The destination has missing, renamed, or unrelated files.",
+            ),
+        )
+    try:
+        for name, digest in marker_outputs.items():
+            if renderer.hash_output(target / name) != digest:
+                return (
+                    _publication_finding(
+                        "publication-files-changed",
+                        f"The published feedback changed: {name}",
+                    ),
+                )
+    except (OSError, UnicodeError, ValueError) as error:
+        return (
+            _publication_finding("publication-files-changed", str(error)),
+        )
+    return ()
+
+
+def _publication_finding(code: str, message: str) -> BlockingFinding:
+    return BlockingFinding(code=code, message=message, token="")
 
 
 def _with_verification_instruction(message: str) -> str:
