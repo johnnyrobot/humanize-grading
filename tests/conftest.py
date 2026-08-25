@@ -17,3 +17,9 @@ def phil210() -> Path:
 def instructor() -> str:
     """Return the instructor name, which must never be redacted."""
     return "Marcus Vance"
+
+
+@pytest.fixture
+def profile() -> Path:
+    """Return the hand-written reference profile for PHIL 210."""
+    return FIXTURES / "profile_phil210.md"
