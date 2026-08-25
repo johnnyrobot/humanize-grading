@@ -6,6 +6,8 @@ The model does the judgement. This does the checking.
 Subcommands:
     profile      Confirm a course has a profile and that its rubric has not drifted.
     verify       Check every draft in a batch. Write the quote offsets.
+    status       Show which submissions still need a draft.
+    density      Count watched AI terms in one file.
 
 Exit codes: 0 clean, 10 no profile, 11 the rubric drifted since calibration,
 12 a draft failed verification, 13 malformed input.
@@ -23,6 +25,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.grading.density import PATTERNS_PATH, load_terms  # noqa: E402
+from scripts.grading.batch import (  # noqa: E402
+    DRAFTED,
+    INCOMPLETE,
+    ORPHAN,
+    PENDING,
+    summary,
+    survey,
+)
+from scripts.grading.density import scan  # noqa: E402
 from scripts.grading.profile import (  # noqa: E402
     ProfileError,
     load_profile,
@@ -140,6 +151,52 @@ def _cmd_verify(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def _cmd_status(args: argparse.Namespace) -> int:
+    items = survey(args.redacted, _drafts_dir(args))
+    if not items:
+        print(f"Nothing under {args.redacted}. Run redact.py first.")
+        return EXIT_OK
+    width = max(len(item.token) for item in items)
+    for item in items:
+        print(f"  {item.token.ljust(width)}  {item.state}")
+    counts = summary(items)
+    print(
+        f"\n{counts[PENDING]} pending, {counts[DRAFTED]} drafted, "
+        f"{counts[INCOMPLETE]} incomplete, {counts[ORPHAN]} orphaned."
+    )
+    if counts[ORPHAN]:
+        print(
+            "An orphaned draft has no redacted source. It is usually a prior "
+            "run's output. Move it out before grading.",
+            file=sys.stderr,
+        )
+    if counts[INCOMPLETE]:
+        print(
+            "An incomplete submission has a draft or a record but not both. "
+            "Regrade it.",
+            file=sys.stderr,
+        )
+    return EXIT_OK
+
+
+def _cmd_density(args: argparse.Namespace) -> int:
+    terms = load_terms(args.patterns)
+    result = scan(args.path.read_text(encoding="utf-8"), terms)
+    if args.json:
+        import json
+
+        print(json.dumps(result.as_dict(), indent=2, ensure_ascii=False))
+        return EXIT_OK
+    print(f"{args.path.name}: {result.words} words, {len(result.hits)} watched terms")
+    print(f"  {result.per_thousand} per 1000 words")
+    for pattern, count in sorted(result.by_pattern.items()):
+        print(f"  pattern {pattern}: {count}")
+    print(
+        "\nThis is evidence for the prose criterion. It says nothing about who "
+        "wrote the essay, and must never be used to claim it does."
+    )
+    return EXIT_OK
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, default=Path(".grading"))
 
@@ -169,6 +226,19 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(verify)
     verify.set_defaults(handler=_cmd_verify)
 
+    status = subparsers.add_parser("status", help="Show what a batch still owes")
+    status.add_argument("--batch", required=True)
+    status.add_argument("--redacted", type=Path, default=Path("redacted"))
+    status.add_argument("--drafts", type=Path, default=None)
+    _add_common(status)
+    status.set_defaults(handler=_cmd_status)
+
+    density = subparsers.add_parser("density", help="Count watched AI terms in a file")
+    density.add_argument("path", type=Path)
+    density.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
+    density.add_argument("--json", action="store_true")
+    _add_common(density)
+    density.set_defaults(handler=_cmd_density)
     return parser
 
 
