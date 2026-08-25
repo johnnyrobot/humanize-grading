@@ -212,8 +212,11 @@ python3 scripts/rehydrate.py .grading/drafts/<batch>/ \
   --map .grading/maps/<batch>.json --out final/<batch>/
 ```
 
-Local only. It fails when a token has no mapping, which is correct: a stray
-`STUDENT_12` pasted into an LMS comment is worth failing the run over.
+Local only. Rehydration first requires and revalidates the verification receipt,
+then restores identities through the local token map. It prepares every draft in
+staging before publishing anything. A missing, stale, or malformed receipt, a
+token with no mapping, or a rendering failure leaves the destination unchanged.
+Successful publication includes the identity-free `_publication.json` marker.
 
 Every file is a draft pending the instructor's sign-off. Say so.
 

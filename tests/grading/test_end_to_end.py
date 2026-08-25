@@ -14,13 +14,20 @@ from pathlib import Path
 
 import pytest
 
-from scripts.grading.batch import DRAFTED, PENDING, summary, survey
+from scripts.grading.batch import (
+    DRAFTED,
+    PENDING,
+    BatchPaths,
+    GradingBatch,
+    Progress,
+    VerificationInputs,
+    summary,
+    survey,
+)
 from scripts.grading.consistency import review
 from scripts.grading.density import PATTERNS_PATH, load_terms, scan
-from scripts.grading.profile import load_profile
 from scripts.grading.records import CriterionScore, GradeRecord, Justification, locate
 from scripts.grading.rubric import load_rubric
-from scripts.grading.verify import errors, verify_draft
 from scripts.redaction.pipeline import EXIT_OK, run
 from scripts.redaction.roster import load_roster
 
@@ -141,7 +148,6 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     drafts.mkdir()
 
     rubric = load_rubric(phil210 / "grading_rubric.md")
-    profile = load_profile(phil210 / "profile_phil210.md")
     terms = load_terms(PATTERNS_PATH)
 
     before = survey(redacted, drafts)
@@ -151,15 +157,29 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     records = []
     for item in before:
         record, feedback = _grade(item.token, item.source, rubric, terms)
-        findings = verify_draft(record, feedback, item.source.read_text("utf-8"),
-                                rubric, profile, terms)
-        assert errors(findings) == [], (item.token, errors(findings))
         record.save(drafts / f"{item.token}.json")
         (drafts / f"{item.token}.md").write_text(feedback, encoding="utf-8")
         records.append(record)
 
     after = survey(redacted, drafts)
     assert summary(after)[DRAFTED] == len(after)
+
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    verification = batch.verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=phil210 / "profile_phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+    assert verification.blocking_findings == ()
+    assert verification.receipt is not None
+    assert all(
+        entry.progress is Progress.VERIFIED for entry in batch.status().entries
+    )
 
     flags = review(records, {r.token: FEEDBACK_TEMPLATE for r in records})
     assert any(flag.kind == "reused-sentence" for flag in flags), (
@@ -176,6 +196,8 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     )
     assert rehydrated.returncode == 0, rehydrated.stderr
     assert list(final.glob("*.md"))
+    assert list(final.glob("*.json")) == [final / "_publication.json"]
+    assert (final / "_publication.json").is_file()
 
 
 def test_no_student_name_reaches_a_draft(graded_batch, phil210):

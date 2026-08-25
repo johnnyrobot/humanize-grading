@@ -4,20 +4,44 @@
 Usage:
     python3 scripts/rehydrate.py DRAFTS --map .grading/maps/essay-3.json --out final
 
-Fails when a token in the drafts has no mapping. A stray STUDENT_12 pasted
-into an LMS comment is worth failing the run over.
+Requires a current verification receipt and fails before publication when a
+token has no mapping or a draft cannot be rendered. The destination changes
+only after every draft succeeds.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from redaction.rehydrate import rehydrate_text  # noqa: E402
-from redaction.tokens import TokenMap  # noqa: E402
+from scripts.grading.batch import RenderResult, VerifiedBatch  # noqa: E402
+from scripts.redaction.rehydrate import rehydrate_text  # noqa: E402
+from scripts.redaction.tokens import TokenMap  # noqa: E402
+
+
+class TokenMapRenderer:
+    """Write rehydrated drafts while keeping identities outside grading modules."""
+
+    def __init__(self, token_map: TokenMap) -> None:
+        self.batch = token_map.batch
+        self._token_map = token_map
+
+    def render(self, source: Path, destination: Path) -> RenderResult:
+        try:
+            text = source.read_text(encoding="utf-8")
+            rendered, unmapped = rehydrate_text(text, self._token_map)
+            destination.write_text(rendered, encoding="utf-8")
+            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        except (OSError, UnicodeError, ValueError) as error:
+            return RenderResult(error=str(error))
+        return RenderResult(
+            sha256=digest,
+            unmapped_tokens=tuple(unmapped),
+        )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -27,25 +51,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, default=Path("final"))
     args = parser.parse_args(argv)
 
-    tmap = TokenMap.load(args.map)
-    args.out.mkdir(parents=True, exist_ok=True)
-
-    problems: list[str] = []
-    for path in sorted(p for p in args.drafts.rglob("*") if p.is_file()):
-        if path.name.startswith("_"):
-            continue
-        text, unmapped = rehydrate_text(path.read_text(encoding="utf-8"), tmap)
-        if unmapped:
-            problems.append(f"{path.name}: {', '.join(unmapped)}")
-        (args.out / path.name).write_text(text, encoding="utf-8")
-
-    if problems:
-        print("Unmapped tokens found:", file=sys.stderr)
-        for problem in problems:
-            print(f"  {problem}", file=sys.stderr)
+    resumed = VerifiedBatch.resume(args.drafts)
+    if resumed.verified_batch is None:
+        for finding in resumed.findings:
+            print(f"  ERROR {finding.code}: {finding.message}", file=sys.stderr)
         return 5
 
-    print(f"Wrote {args.out}. Every file is a DRAFT pending your sign-off.")
+    try:
+        token_map = TokenMap.load(args.map)
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+        print(f"  ERROR map-unreadable: {error}", file=sys.stderr)
+        return 5
+    renderer = TokenMapRenderer(token_map)
+    report = resumed.verified_batch.publish(args.out, renderer)
+    if report.findings:
+        for finding in report.findings:
+            where = f" [{finding.token}]" if finding.token else ""
+            print(
+                f"  ERROR {finding.code}{where}: {finding.message}",
+                file=sys.stderr,
+            )
+        return 5
+
+    print(
+        f"Wrote {args.out}. Every file is a DRAFT pending your sign-off."
+    )
     return 0
 
 
