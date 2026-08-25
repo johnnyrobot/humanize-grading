@@ -81,6 +81,23 @@ def _verified_fixture(tmp_path, phil210):
     return redacted, drafts, verified
 
 
+def _write_transaction_marker(directory: Path, target: Path) -> None:
+    publication = json.loads(
+        (target / "_publication.json").read_text(encoding="utf-8")
+    )
+    (directory / "_transaction.json").write_text(
+        json.dumps(
+            {
+                "schema": "grading-batch-publication-transaction/1",
+                "batch": "essay-2",
+                "receipt_sha256": publication["receipt_sha256"],
+                "target": target.name,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_only_persisted_verification_returns_verified_batch(tmp_path, phil210):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     batch = GradingBatch.open(
@@ -415,20 +432,7 @@ def test_safe_force_removes_recognized_abandoned_staging(tmp_path, phil210):
     abandoned = tmp_path / ".final-interrupted"
     abandoned.mkdir()
     (abandoned / "STUDENT_01.md").write_text("partial", encoding="utf-8")
-    publication = json.loads(
-        (target / "_publication.json").read_text(encoding="utf-8")
-    )
-    (abandoned / "_transaction.json").write_text(
-        json.dumps(
-            {
-                "schema": "grading-batch-publication-transaction/1",
-                "batch": "essay-2",
-                "receipt_sha256": publication["receipt_sha256"],
-                "target": "final",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_transaction_marker(abandoned, target)
 
     report = verified.publish(
         target,
@@ -491,20 +495,7 @@ def test_safe_force_recovers_installed_target_with_transaction_marker(
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     backup = tmp_path / ".final.backup"
     shutil.copytree(target, backup)
-    publication = json.loads(
-        (target / "_publication.json").read_text(encoding="utf-8")
-    )
-    (target / "_transaction.json").write_text(
-        json.dumps(
-            {
-                "schema": "grading-batch-publication-transaction/1",
-                "batch": "essay-2",
-                "receipt_sha256": publication["receipt_sha256"],
-                "target": "final",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_transaction_marker(target, target)
 
     report = verified.publish(
         target,
@@ -551,20 +542,7 @@ def test_recovery_reports_staging_cleanup_failure(tmp_path, phil210, monkeypatch
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     abandoned = tmp_path / ".final-interrupted"
     abandoned.mkdir()
-    publication = json.loads(
-        (target / "_publication.json").read_text(encoding="utf-8")
-    )
-    (abandoned / "_transaction.json").write_text(
-        json.dumps(
-            {
-                "schema": "grading-batch-publication-transaction/1",
-                "batch": "essay-2",
-                "receipt_sha256": publication["receipt_sha256"],
-                "target": "final",
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_transaction_marker(abandoned, target)
     original_rmtree = shutil.rmtree
 
     def fail_staging_cleanup(path, *args, **kwargs):
