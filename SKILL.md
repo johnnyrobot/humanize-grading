@@ -218,7 +218,8 @@ staging before publishing anything. A missing, stale, or malformed receipt, a
 token with no mapping, or a rendering failure leaves the destination unchanged.
 Successful publication includes the identity-free `_publication.json` marker.
 
-Every file is a draft pending the instructor's sign-off. Say so.
+Every rehydrated feedback file is a draft pending the instructor's sign-off. Say
+so. The identity-free publication marker is not feedback.
 
 ## Errors
 

@@ -261,14 +261,20 @@ class VerifiedBatch:
             if receipt.is_file()
             else ""
         )
-        findings = list(status.blocking_findings)
+        findings = [
+            replace(
+                finding,
+                message=_with_verification_instruction(finding.message),
+            )
+            for finding in status.blocking_findings
+        ]
         if current_digest != self._receipt_digest:
             findings.append(
                 BlockingFinding(
                     code="stale-verified-batch",
                     message=(
                         "The verification receipt changed after this verified batch "
-                        "was created. Resume it again."
+                        "was created. Run verification again before publication."
                     ),
                     token="",
                 )
@@ -879,6 +885,13 @@ def _paths_from_receipt(drafts: Path, receipt: Path) -> BatchPaths:
         redacted=parents.pop(),
         drafts=drafts.resolve(),
     )
+
+
+def _with_verification_instruction(message: str) -> str:
+    lowered = message.lower()
+    if "run verification" in lowered and "publication" in lowered:
+        return message
+    return message + " Run verification again before publication."
 
 
 def _validate_verification_receipt(

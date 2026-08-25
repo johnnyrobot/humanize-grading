@@ -207,6 +207,7 @@ def test_publish_revalidates_receipt_before_staging(tmp_path, phil210):
     assert "stale-verification-receipt" in {
         finding.code for finding in report.findings
     }
+    assert all("verification" in finding.message.lower() for finding in report.findings)
     assert renderer.rendered == []
     assert not target.exists()
 
@@ -341,6 +342,7 @@ def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
     )
 
     assert result.returncode == 0, result.stdout + result.stderr
+    assert "Every rehydrated feedback file is a DRAFT" in result.stdout
     assert "Maya Lin" in (target / "STUDENT_01.md").read_text(encoding="utf-8")
     assert not (target / "STUDENT_01.json").exists()
     assert (target / "_publication.json").is_file()

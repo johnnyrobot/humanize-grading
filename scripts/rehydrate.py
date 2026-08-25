@@ -30,6 +30,11 @@ class TokenMapRenderer:
         self.batch = token_map.batch
         self._token_map = token_map
 
+    @classmethod
+    def load(cls, map_path: Path) -> "TokenMapRenderer":
+        """Load the identity map inside the local renderer adapter."""
+        return cls(TokenMap.load(map_path))
+
     def render(self, source: Path, destination: Path) -> RenderResult:
         try:
             text = source.read_text(encoding="utf-8")
@@ -58,11 +63,10 @@ def main(argv: list[str] | None = None) -> int:
         return 5
 
     try:
-        token_map = TokenMap.load(args.map)
+        renderer = TokenMapRenderer.load(args.map)
     except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
         print(f"  ERROR map-unreadable: {error}", file=sys.stderr)
         return 5
-    renderer = TokenMapRenderer(token_map)
     report = resumed.verified_batch.publish(args.out, renderer)
     if report.findings:
         for finding in report.findings:
@@ -74,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
         return 5
 
     print(
-        f"Wrote {args.out}. Every file is a DRAFT pending your sign-off."
+        f"Wrote {args.out}. Every rehydrated feedback file is a DRAFT pending "
+        "your sign-off."
     )
     return 0
 
