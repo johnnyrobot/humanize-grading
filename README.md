@@ -19,6 +19,11 @@ grades the redacted copy, and reattaches real names locally at the end.
 /grade submissions/essay-3 --course phil210
 ```
 
+**[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
+calibration, a graded batch end to end, every command and exit code, and what
+the tool deliberately does not do. Every command in it was run against the
+synthetic corpus, and the output shown is real.
+
 Read `references/redaction.md` before sending anything to a cloud model.
 Pseudonymization is not anonymization, and your institution's policy decides
 whether student work may leave your machine.
