@@ -420,7 +420,7 @@ def test_grading_batch_aggregates_failures_and_leaves_every_record_unchanged(
     (redacted / "STUDENT_02.md").write_text(SOURCE, encoding="utf-8")
     (drafts / "STUDENT_02.md").write_text(FEEDBACK, encoding="utf-8")
     malformed = drafts / "STUDENT_02.json"
-    malformed.write_text("{not json", encoding="utf-8")
+    malformed.write_text("[]", encoding="utf-8")
     first_record = drafts / "STUDENT_01.json"
     before_first = first_record.read_bytes()
     before_second = malformed.read_bytes()
@@ -488,6 +488,8 @@ def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
 ):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     (drafts / "STUDENT_02.md").write_text("feedback", encoding="utf-8")
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.unlink()
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -495,7 +497,7 @@ def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
         VerificationInputs(
             course="phil210",
             rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "missing.md",
+            profile=profile_path,
             patterns=PATTERNS_PATH,
         )
     )
@@ -512,6 +514,8 @@ def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
 def test_missing_profile_does_not_hide_a_malformed_grade_record(tmp_path, phil210):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     (drafts / "STUDENT_01.json").write_text("{not json", encoding="utf-8")
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.unlink()
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -519,7 +523,7 @@ def test_missing_profile_does_not_hide_a_malformed_grade_record(tmp_path, phil21
         VerificationInputs(
             course="phil210",
             rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "missing.md",
+            profile=profile_path,
             patterns=PATTERNS_PATH,
         )
     )
@@ -527,6 +531,42 @@ def test_missing_profile_does_not_hide_a_malformed_grade_record(tmp_path, phil21
     assert report.failure is VerificationFailure.NO_PROFILE
     assert [finding.code for finding in report.blocking_findings] == [
         "malformed-record",
+        "no-profile",
+    ]
+
+
+def test_missing_profile_does_not_hide_safe_metadata_and_read_findings(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    outside = tmp_path / "submissions" / "STUDENT_01.md"
+    outside.parent.mkdir()
+    outside.write_text("outside", encoding="utf-8")
+    record_path = drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.token = "STUDENT_99"
+    record.source = str(outside)
+    record.save(record_path)
+    (drafts / "STUDENT_01.md").write_bytes(b"\xff")
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.unlink()
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=profile_path,
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert report.failure is VerificationFailure.NO_PROFILE
+    assert [finding.code for finding in report.blocking_findings] == [
+        "token-mismatch",
+        "source-mismatch",
+        "unreadable-draft",
         "no-profile",
     ]
 
@@ -563,6 +603,39 @@ def test_grading_batch_names_rubric_drift_before_checking_drafts(tmp_path, phil2
     assert "Thesis" in report.blocking_findings[0].message
     assert report.checked_tokens == ()
     assert report.persisted is False
+
+
+def test_incomplete_pairs_still_report_available_record_metadata(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    (drafts / "STUDENT_01.md").unlink()
+    record_path = drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.token = "STUDENT_99"
+    record.batch = "essay-9"
+    record.course = "eng999"
+    record.rubric = str(tmp_path / "another-rubric.md")
+    record.profile = str(tmp_path / "another-profile.md")
+    record.save(record_path)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "incomplete-pair",
+        "token-mismatch",
+        "batch-mismatch",
+        "course-mismatch",
+        "rubric-mismatch",
+        "profile-mismatch",
+    ]
 
 
 def test_grading_batch_refuses_verification_when_there_are_no_grade_records(

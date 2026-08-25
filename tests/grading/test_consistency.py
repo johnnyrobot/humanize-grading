@@ -206,7 +206,7 @@ def test_grading_batch_consistency_keeps_load_failures_separate_from_flags(tmp_p
         (redacted / f"{record.token}.md").write_text("essay", encoding="utf-8")
         (drafts / f"{record.token}.md").write_text("feedback here", encoding="utf-8")
         record.save(drafts / f"{record.token}.json")
-    (drafts / "STUDENT_01.json").write_text("{not json", encoding="utf-8")
+    (drafts / "STUDENT_01.json").write_text("[]", encoding="utf-8")
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)

@@ -43,6 +43,15 @@ _MALFORMED_CODES = {
     "malformed-rubric",
     "malformed-patterns",
 }
+_RECORD_LOAD_ERRORS = (
+    RecordError,
+    OSError,
+    UnicodeError,
+    AttributeError,
+    TypeError,
+    KeyError,
+    ValueError,
+)
 
 
 @dataclass(frozen=True)
@@ -149,6 +158,15 @@ class ConsistencyReport:
 
 
 @dataclass(frozen=True)
+class _LoadedEntry:
+    entry: BatchEntry
+    record: GradeRecord | None
+    source_text: str | None
+    draft_text: str | None
+    findings: tuple[BlockingFinding, ...]
+
+
+@dataclass(frozen=True)
 class GradingBatch:
     """Own the lifecycle rules for one grading batch."""
 
@@ -241,20 +259,11 @@ class GradingBatch:
                     token="",
                 )
             )
-        loaded_records: dict[str, GradeRecord] = {}
-        for entry in status.entries:
-            if entry.record is None:
-                continue
-            try:
-                loaded_records[entry.token] = GradeRecord.load(entry.record)
-            except (RecordError, OSError, UnicodeError) as error:
-                blocking.append(
-                    BlockingFinding(
-                        code="malformed-record",
-                        message=str(error),
-                        token=entry.token,
-                    )
-                )
+        loaded_entries = tuple(
+            _load_entry(entry, self.paths, inputs) for entry in status.entries
+        )
+        for loaded in loaded_entries:
+            blocking.extend(loaded.findings)
         try:
             profile = load_profile(inputs.profile)
         except ProfileError as error:
@@ -332,39 +341,22 @@ class GradingBatch:
         checked: list[str] = []
         records: list[tuple[Path, GradeRecord]] = []
 
-        for entry in status.entries:
-            if entry.source is None or entry.draft is None or entry.record is None:
-                continue
-            record = loaded_records.get(entry.token)
-            if record is None:
-                continue
-            blocking.extend(_metadata_findings(entry, record, self.paths, inputs))
-            try:
-                source_text = entry.source.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
-                blocking.append(
-                    BlockingFinding(
-                        code="unreadable-source",
-                        message=f"Cannot read {entry.source.name}: {error}",
-                        token=entry.token,
-                    )
-                )
-                continue
-            try:
-                draft_text = entry.draft.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
-                blocking.append(
-                    BlockingFinding(
-                        code="unreadable-draft",
-                        message=f"Cannot read {entry.draft.name}: {error}",
-                        token=entry.token,
-                    )
-                )
+        for loaded in loaded_entries:
+            entry = loaded.entry
+            record = loaded.record
+            if (
+                entry.source is None
+                or entry.draft is None
+                or entry.record is None
+                or record is None
+                or loaded.source_text is None
+                or loaded.draft_text is None
+            ):
                 continue
             findings = verify_draft(
                 record,
-                draft_text,
-                source_text,
+                loaded.draft_text,
+                loaded.source_text,
                 rubric,
                 profile,
                 terms,
@@ -415,36 +407,19 @@ class GradingBatch:
         records: list[GradeRecord] = []
         drafts: dict[str, str] = {}
         for entry in status.entries:
-            if entry.source is None or entry.draft is None or entry.record is None:
+            loaded = _load_entry(entry, self.paths)
+            blocking.extend(loaded.findings)
+            if (
+                entry.source is None
+                or entry.draft is None
+                or entry.record is None
+                or loaded.record is None
+                or loaded.draft_text is None
+                or loaded.findings
+            ):
                 continue
-            try:
-                record = GradeRecord.load(entry.record)
-            except (RecordError, OSError, UnicodeError) as error:
-                blocking.append(
-                    BlockingFinding(
-                        code="malformed-record",
-                        message=str(error),
-                        token=entry.token,
-                    )
-                )
-                continue
-            identity_findings = _batch_identity_findings(entry, record, self.paths)
-            if identity_findings:
-                blocking.extend(identity_findings)
-                continue
-            try:
-                draft_text = entry.draft.read_text(encoding="utf-8")
-            except (OSError, UnicodeError) as error:
-                blocking.append(
-                    BlockingFinding(
-                        code="unreadable-draft",
-                        message=f"Cannot read {entry.draft.name}: {error}",
-                        token=entry.token,
-                    )
-                )
-                continue
-            records.append(record)
-            drafts[entry.token] = draft_text
+            records.append(loaded.record)
+            drafts[entry.token] = loaded.draft_text
         if not records:
             blocking.append(
                 BlockingFinding(
@@ -497,6 +472,64 @@ def _same_path(left: str | Path, right: str | Path) -> bool:
     return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
 
 
+def _load_entry(
+    entry: BatchEntry,
+    paths: BatchPaths,
+    inputs: VerificationInputs | None = None,
+) -> _LoadedEntry:
+    findings: list[BlockingFinding] = []
+    record = None
+    if entry.record is not None:
+        try:
+            record = GradeRecord.load(entry.record)
+        except _RECORD_LOAD_ERRORS as error:
+            findings.append(
+                BlockingFinding(
+                    code="malformed-record",
+                    message=str(error),
+                    token=entry.token,
+                )
+            )
+    if record is not None:
+        if inputs is None:
+            findings.extend(_batch_identity_findings(entry, record, paths))
+        else:
+            findings.extend(_metadata_findings(entry, record, paths, inputs))
+
+    source_text = None
+    if entry.source is not None:
+        try:
+            source_text = entry.source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            findings.append(
+                BlockingFinding(
+                    code="unreadable-source",
+                    message=f"Cannot read {entry.source.name}: {error}",
+                    token=entry.token,
+                )
+            )
+
+    draft_text = None
+    if entry.draft is not None:
+        try:
+            draft_text = entry.draft.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            findings.append(
+                BlockingFinding(
+                    code="unreadable-draft",
+                    message=f"Cannot read {entry.draft.name}: {error}",
+                    token=entry.token,
+                )
+            )
+    return _LoadedEntry(
+        entry=entry,
+        record=record,
+        source_text=source_text,
+        draft_text=draft_text,
+        findings=tuple(findings),
+    )
+
+
 def _metadata_findings(
     entry: BatchEntry,
     record: GradeRecord,
@@ -504,19 +537,11 @@ def _metadata_findings(
     inputs: VerificationInputs,
 ) -> list[BlockingFinding]:
     findings = _batch_identity_findings(entry, record, paths)
-    checks = (
+    checks = [
         (
             record.course != inputs.course,
             "course-mismatch",
             "The grade record belongs to a different course.",
-        ),
-        (
-            not _same_path(record.source, entry.source),
-            "source-mismatch",
-            (
-                "The grade record names a different source. Verification uses the "
-                "redacted submission from this grading batch."
-            ),
         ),
         (
             not _same_path(record.rubric, inputs.rubric),
@@ -528,7 +553,19 @@ def _metadata_findings(
             "profile-mismatch",
             "The grade record names a different calibration profile.",
         ),
-    )
+    ]
+    if entry.source is not None:
+        checks.insert(
+            1,
+            (
+                not _same_path(record.source, entry.source),
+                "source-mismatch",
+                (
+                    "The grade record names a different source. Verification uses "
+                    "the redacted submission from this grading batch."
+                ),
+            ),
+        )
     findings.extend(
         BlockingFinding(code=code, message=message, token=entry.token)
         for mismatched, code, message in checks
