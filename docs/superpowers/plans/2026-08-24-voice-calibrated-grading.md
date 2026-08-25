@@ -947,11 +947,10 @@ def _parse_feedback(feedback: str) -> dict[str, object]:
 def load_sample(path: Path) -> GradedSample:
     """Read one graded sample."""
     text = path.read_text(encoding="utf-8")
-    if not _FEEDBACK_HEADING.search(text) and "Instructor Feedback" not in text:
-        raise SampleError(
-            f"{path.name} has no instructor feedback section. Add a "
-            "'### Instructor Feedback & Grading' heading."
-        )
+    # No pre-check here. _split_sections' guard is already case-insensitive and
+    # per-line; a whole-text `_FEEDBACK_HEADING.search` would only match at
+    # position 0 (no re.MULTILINE) and silently degrade to a case-SENSITIVE
+    # substring test, wrongly refusing a valid lowercase heading.
     header_block, essay, feedback = _split_sections(text)
     parsed = _parse_feedback(feedback)
     annotations = tuple(
@@ -1591,6 +1590,8 @@ SCHEMA = "grade-record/1"
 CANNOT_ASSESS = "cannot assess"
 MIN_QUOTE_WORDS = 4
 
+_PARAGRAPH_BREAK = re.compile(r"\n\s*\n")
+
 _REQUIRED = (
     "schema",
     "batch",
@@ -1631,8 +1632,22 @@ def locate(
             f"Quote is too short to be evidence. Use at least "
             f"{MIN_QUOTE_WORDS} words: {quote!r}"
         )
-    pattern = re.compile(r"\s+".join(re.escape(word) for word in words))
-    matches = list(pattern.finditer(source))
+    # Anchor only where the boundary character is alphanumeric, so a quote
+    # ending in "." still matches while "one cat" no longer matches inside
+    # "one category".
+    body = r"\s+".join(re.escape(word) for word in words)
+    prefix = r"\b" if words[0][:1].isalnum() else ""
+    suffix = r"\b" if words[-1][-1:].isalnum() else ""
+    pattern = re.compile(prefix + body + suffix)
+    # A quote may span a line WRAP -- a model reflows text and it is the same
+    # passage. It may never span a blank line: the tail of one paragraph
+    # stitched to the head of the next is two passages, and certifying it as
+    # one would let a fabricated quote pass as evidence.
+    matches = [
+        match
+        for match in pattern.finditer(source)
+        if not _PARAGRAPH_BREAK.search(match.group(0))
+    ]
     if not matches:
         raise RecordError(f"Quote is not in the source: {quote!r}")
     if len(matches) > 1 and occurrence is None:
@@ -1640,8 +1655,12 @@ def locate(
             f"Quote appears {len(matches)} times. Lengthen it, or set "
             f'"occurrence": {quote!r}'
         )
+    if occurrence is not None and occurrence < 1:
+        raise RecordError(
+            f"Occurrence must be 1 or greater, not {occurrence}: {quote!r}"
+        )
     index = (occurrence or 1) - 1
-    if index < 0 or index >= len(matches):
+    if index >= len(matches):
         raise RecordError(
             f"Quote appears {len(matches)} times, so occurrence "
             f"{occurrence} does not exist: {quote!r}"
@@ -2010,7 +2029,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts.grading.rubric import Rubric
+from scripts.grading.rubric import Rubric, RubricError
 
 FINGERPRINT_SECTION = "Rubric fingerprint"
 
@@ -2846,7 +2865,10 @@ def _inputs(args: argparse.Namespace) -> int:
             "annotation_count": len(sample.annotations),
             "annotations": annotations.splitlines(),
             "comments": comments,
-            "scrubbed": sorted(set(found)),
+            # A COUNT, never the names. `found` holds the literal names just
+            # replaced -- writing them here would put them back into the one
+            # artifact whose purpose is to be name-free.
+            "scrubbed_count": len(set(found)),
         }
 
     payload = {
@@ -3404,7 +3426,7 @@ from dataclasses import dataclass
 from scripts.grading.density import Term, scan
 from scripts.grading.profile import Profile
 from scripts.grading.records import CANNOT_ASSESS, GradeRecord, RecordError, locate
-from scripts.grading.rubric import Rubric
+from scripts.grading.rubric import Rubric, RubricError
 from scripts.redaction.rehydrate import TOKEN
 
 ERROR = "error"
@@ -3587,7 +3609,23 @@ def _check_totals(
                 record.token,
             )
         )
-    expected = rubric.letter_for(100 * total / possible)
+    # A score above its criterion maximum puts the percentage outside every
+    # band. That is a finding, not a crash: this is the gate that reports
+    # malformed records, so it must never raise on one.
+    percent = 100 * total / possible
+    try:
+        expected = rubric.letter_for(percent)
+    except RubricError as error:
+        found.append(
+            Finding(
+                ERROR,
+                "letter",
+                f"{total}/{possible} is {percent:.0f} percent, which the "
+                f"rubric's scale does not cover. {error}",
+                record.token,
+            )
+        )
+        return
     if record.letter.strip() != expected:
         found.append(
             Finding(
@@ -6016,6 +6054,24 @@ carries `level`, `code`, `message`, `token`, `criterion` and is filtered by
 `errors()` in both `verify.py` and `grade.py`. `TOKEN` is imported from
 `scripts.redaction.rehydrate` in Tasks 2, 5, and 7 and is the same compiled
 pattern in each.
+
+**Defects found during execution, and fixed in both code and this plan.**
+Every one of these passed its own tests before it was caught.
+
+1. `locate` certified a quote spliced across a paragraph break — the tail of
+   one paragraph stitched to the head of the next passed as evidence. Fixed by
+   discarding any match spanning a blank line, while a line wrap still matches.
+2. The calibration packet wrote `"scrubbed"`, the list of names it had just
+   replaced, into the one artifact whose purpose is to be name-free. Fixed to a
+   count. The CLI's stdout carried the same leak, and sample filenames a third.
+3. `_check_totals` raised instead of reporting when a score exceeded its
+   criterion maximum — a crash in the gate that exists to report bad records.
+4. `load_sample`'s guard silently degraded to a case-sensitive check and
+   refused validly-headed samples.
+5. Outlier detection used mean and standard deviation, so one extreme score
+   inflated the spread enough to hide itself. Now median and MAD.
+6. Two tests asserted nothing: a density ratio that collapsed to `> 0`, and a
+   stdout check that was already true before the fix it guarded.
 
 **Known gaps, carried forward.**
 
