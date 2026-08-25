@@ -3,7 +3,17 @@
 import subprocess
 import sys
 
-from scripts.grading.batch import DRAFTED, INCOMPLETE, ORPHAN, PENDING, summary, survey
+from scripts.grading.batch import (
+    DRAFTED,
+    INCOMPLETE,
+    ORPHAN,
+    PENDING,
+    BatchPaths,
+    GradingBatch,
+    Progress,
+    summary,
+    survey,
+)
 
 
 def _batch(tmp_path):
@@ -12,6 +22,82 @@ def _batch(tmp_path):
     redacted.mkdir()
     drafts.mkdir()
     return redacted, drafts
+
+
+def test_grading_batch_reports_a_redacted_submission_as_pending(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [(item.token, item.progress) for item in report.submissions] == [
+        ("STUDENT_01", Progress.PENDING)
+    ]
+    assert report.blocking_findings == ()
+
+
+def test_grading_batch_reports_a_complete_pair_as_drafted(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
+    (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_01.json").write_text("{}", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert report.submissions[0].progress is Progress.DRAFTED
+    assert report.blocking_findings == ()
+
+
+def test_grading_batch_reports_each_incomplete_pair_without_changing_progress(
+    tmp_path,
+):
+    redacted, drafts = _batch(tmp_path)
+    for token in ("STUDENT_01", "STUDENT_02"):
+        (redacted / f"{token}.md").write_text("essay", encoding="utf-8")
+    (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_02.json").write_text("{}", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [item.progress for item in report.submissions] == [
+        Progress.PENDING,
+        Progress.PENDING,
+    ]
+    assert [(finding.token, finding.code) for finding in report.blocking_findings] == [
+        ("STUDENT_01", "incomplete-pair"),
+        ("STUDENT_02", "incomplete-pair"),
+    ]
+
+
+def test_grading_batch_reports_each_artifact_without_a_submission_as_orphaned(
+    tmp_path,
+):
+    _, drafts = _batch(tmp_path)
+    (drafts / "STUDENT_08.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_09.json").write_text("{}", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(
+            batch="essay-2",
+            redacted=tmp_path / "redacted",
+            drafts=drafts,
+        )
+    ).status()
+
+    assert [(item.token, item.progress) for item in report.submissions] == [
+        ("STUDENT_08", None),
+        ("STUDENT_09", None),
+    ]
+    assert [(finding.token, finding.code) for finding in report.blocking_findings] == [
+        ("STUDENT_08", "orphaned-artifact"),
+        ("STUDENT_09", "orphaned-artifact"),
+    ]
 
 
 def test_a_file_with_no_draft_is_pending(tmp_path):
@@ -113,6 +199,35 @@ def test_the_status_subcommand_lists_what_is_left(tmp_path):
     assert result.returncode == 0
     assert "STUDENT_01" in result.stdout
     assert "pending" in result.stdout
+
+
+def test_the_status_subcommand_reports_progress_and_every_blocking_condition(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    for token in ("STUDENT_01", "STUDENT_02", "STUDENT_03"):
+        (redacted / f"{token}.md").write_text("essay", encoding="utf-8")
+    (drafts / "STUDENT_02.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_02.json").write_text("{}", encoding="utf-8")
+    (drafts / "STUDENT_03.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_09.json").write_text("{}", encoding="utf-8")
+
+    result = _run(
+        "status",
+        "--batch",
+        "essay-2",
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+    )
+
+    assert result.returncode == 0
+    assert "STUDENT_01  pending" in result.stdout
+    assert "STUDENT_02  drafted" in result.stdout
+    assert "STUDENT_03  incomplete" in result.stdout
+    assert "STUDENT_09  orphan" in result.stdout
+    assert "1 pending, 1 drafted, 1 incomplete, 1 orphaned" in result.stdout
+    assert "An incomplete submission" in result.stderr
+    assert "An orphaned draft" in result.stderr
 
 
 def test_the_density_subcommand_reports_a_count(phil210):

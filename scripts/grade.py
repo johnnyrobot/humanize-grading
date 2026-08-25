@@ -27,11 +27,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts.grading.density import PATTERNS_PATH, load_terms  # noqa: E402
 from scripts.grading.batch import (  # noqa: E402
-    DRAFTED,
     INCOMPLETE,
     ORPHAN,
-    PENDING,
-    summary,
+    BatchPaths,
+    GradingBatch,
+    Progress,
     survey,
 )
 from scripts.grading.density import scan  # noqa: E402
@@ -154,16 +154,37 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    items = survey(args.redacted, _drafts_dir(args))
-    if not items:
+    report = GradingBatch.open(
+        BatchPaths(
+            batch=args.batch,
+            redacted=args.redacted,
+            drafts=_drafts_dir(args),
+        )
+    ).status()
+    if not report.submissions:
         print(f"Nothing under {args.redacted}. Run redact.py first.")
         return EXIT_OK
-    width = max(len(item.token) for item in items)
-    for item in items:
-        print(f"  {item.token.ljust(width)}  {item.state}")
-    counts = summary(items)
+
+    states = {
+        item.token: item.progress.value if item.progress is not None else ORPHAN
+        for item in report.submissions
+    }
+    for finding in report.blocking_findings:
+        if finding.code == "incomplete-pair":
+            states[finding.token] = INCOMPLETE
+        elif finding.code == "orphaned-artifact":
+            states[finding.token] = ORPHAN
+
+    width = max(len(item.token) for item in report.submissions)
+    for item in report.submissions:
+        print(f"  {item.token.ljust(width)}  {states[item.token]}")
+    counts = {
+        state: sum(1 for current in states.values() if current == state)
+        for state in (Progress.PENDING.value, Progress.DRAFTED.value, INCOMPLETE, ORPHAN)
+    }
     print(
-        f"\n{counts[PENDING]} pending, {counts[DRAFTED]} drafted, "
+        f"\n{counts[Progress.PENDING.value]} pending, "
+        f"{counts[Progress.DRAFTED.value]} drafted, "
         f"{counts[INCOMPLETE]} incomplete, {counts[ORPHAN]} orphaned."
     )
     if counts[ORPHAN]:
