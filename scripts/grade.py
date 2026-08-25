@@ -34,16 +34,14 @@ from scripts.grading.batch import (  # noqa: E402
     Progress,
     VerificationFailure,
     VerificationInputs,
-    survey,
 )
 from scripts.grading.density import scan  # noqa: E402
-from scripts.grading.consistency import review  # noqa: E402
 from scripts.grading.profile import (  # noqa: E402
     ProfileError,
     load_profile,
     profile_path,
 )
-from scripts.grading.records import GradeRecord, RecordError  # noqa: E402
+from scripts.grading.records import RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
 
 EXIT_OK = 0
@@ -221,30 +219,26 @@ def _cmd_density(args: argparse.Namespace) -> int:
 
 def _cmd_consistency(args: argparse.Namespace) -> int:
     drafts_dir = _drafts_dir(args)
-    items = [item for item in survey(args.redacted, drafts_dir) if item.record]
-    records = []
-    drafts: dict[str, str] = {}
-    for item in items:
-        record = GradeRecord.load(item.record)
-        records.append(record)
-        if item.draft:
-            drafts[record.token] = item.draft.read_text(encoding="utf-8")
-
-    if not records:
-        print(f"No records under {drafts_dir}. Nothing to compare.", file=sys.stderr)
-        return EXIT_MALFORMED
-
-    flags = review(records, drafts, threshold=args.threshold)
-    print(f"{len(records)} graded submissions, {len(flags)} things to look at.")
-    for flag in flags:
+    report = GradingBatch.open(
+        BatchPaths(batch=args.batch, redacted=args.redacted, drafts=drafts_dir)
+    ).consistency(threshold=args.threshold)
+    for finding in report.blocking_findings:
+        _print_batch_finding(finding, blocking=True)
+    print(
+        f"{report.records_count} graded submissions, "
+        f"{len(report.flags)} things to look at."
+    )
+    for flag in report.flags:
         print(f"  {flag.kind}: {flag.message}")
-    if not flags:
+    if not report.flags:
         print("  Nothing stood out.")
     print(
         "\nThese are flags, not failures. An outlier is often a genuinely "
         "unusual essay. Read the drafts before changing a score."
     )
-    if flags and args.fail_on_findings:
+    if report.blocking_findings:
+        return EXIT_MALFORMED
+    if report.flags and args.fail_on_findings:
         return EXIT_FAILED
     return EXIT_OK
 

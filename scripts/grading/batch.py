@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from scripts.grading.consistency import Outlier, review
 from scripts.grading.density import load_terms
 from scripts.grading.profile import ProfileError, load_profile
 from scripts.grading.records import GradeRecord, RecordError
@@ -135,6 +136,16 @@ class VerificationReport:
     checked_tokens: tuple[str, ...]
     persisted: bool
     failure: VerificationFailure | None
+
+
+@dataclass(frozen=True)
+class ConsistencyReport:
+    """Structural findings and advisory flags for a grading batch."""
+
+    status: StatusReport
+    blocking_findings: tuple[BlockingFinding, ...]
+    flags: tuple[Outlier, ...]
+    records_count: int
 
 
 @dataclass(frozen=True)
@@ -398,6 +409,62 @@ class GradingBatch:
             failure=failure,
         )
 
+    def consistency(self, *, threshold: float = 2.0) -> ConsistencyReport:
+        status = self.status()
+        blocking = list(status.blocking_findings)
+        records: list[GradeRecord] = []
+        drafts: dict[str, str] = {}
+        for entry in status.entries:
+            if entry.source is None or entry.draft is None or entry.record is None:
+                continue
+            try:
+                record = GradeRecord.load(entry.record)
+            except (RecordError, OSError, UnicodeError) as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="malformed-record",
+                        message=str(error),
+                        token=entry.token,
+                    )
+                )
+                continue
+            identity_findings = _batch_identity_findings(entry, record, self.paths)
+            if identity_findings:
+                blocking.extend(identity_findings)
+                continue
+            try:
+                draft_text = entry.draft.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="unreadable-draft",
+                        message=f"Cannot read {entry.draft.name}: {error}",
+                        token=entry.token,
+                    )
+                )
+                continue
+            records.append(record)
+            drafts[entry.token] = draft_text
+        if not records:
+            blocking.append(
+                BlockingFinding(
+                    code="no-records",
+                    message=(
+                        "The grading batch has no readable grade records. Nothing "
+                        "can be compared."
+                    ),
+                    token="",
+                )
+            )
+        return ConsistencyReport(
+            status=status,
+            blocking_findings=tuple(blocking),
+            flags=(
+                tuple(review(records, drafts, threshold=threshold)) if records else ()
+            ),
+            records_count=len(records),
+        )
+
 
 @dataclass(frozen=True)
 class Item:
@@ -436,17 +503,8 @@ def _metadata_findings(
     paths: BatchPaths,
     inputs: VerificationInputs,
 ) -> list[BlockingFinding]:
+    findings = _batch_identity_findings(entry, record, paths)
     checks = (
-        (
-            record.token != entry.token,
-            "token-mismatch",
-            "The grade record token does not match its filename token.",
-        ),
-        (
-            record.batch != paths.batch,
-            "batch-mismatch",
-            "The grade record belongs to a different grading batch.",
-        ),
         (
             record.course != inputs.course,
             "course-mismatch",
@@ -469,6 +527,29 @@ def _metadata_findings(
             not _same_path(record.profile, inputs.profile),
             "profile-mismatch",
             "The grade record names a different calibration profile.",
+        ),
+    )
+    findings.extend(
+        BlockingFinding(code=code, message=message, token=entry.token)
+        for mismatched, code, message in checks
+        if mismatched
+    )
+    return findings
+
+
+def _batch_identity_findings(
+    entry: BatchEntry, record: GradeRecord, paths: BatchPaths
+) -> list[BlockingFinding]:
+    checks = (
+        (
+            record.token != entry.token,
+            "token-mismatch",
+            "The grade record token does not match its filename token.",
+        ),
+        (
+            record.batch != paths.batch,
+            "batch-mismatch",
+            "The grade record belongs to a different grading batch.",
         ),
     )
     return [

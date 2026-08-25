@@ -3,6 +3,7 @@
 import subprocess
 import sys
 
+from scripts.grading.batch import BatchPaths, GradingBatch, Progress
 from scripts.grading.consistency import review
 from scripts.grading.records import CANNOT_ASSESS, CriterionScore, GradeRecord
 
@@ -171,6 +172,106 @@ def test_an_unassessed_criterion_is_reported():
     assert any(flag.kind == "unassessed" for flag in flags)
 
 
+def test_grading_batch_consistency_loads_complete_authoritative_entries(tmp_path):
+    drafts = tmp_path / "drafts"
+    redacted = tmp_path / "redacted"
+    drafts.mkdir()
+    redacted.mkdir()
+    records = _even_batch()
+    records.append(_record("STUDENT_05", {1: 4, 2: 20, 3: 20, 4: 20}))
+    for record in records:
+        (redacted / f"{record.token}.md").write_text("essay", encoding="utf-8")
+        (drafts / f"{record.token}.md").write_text("feedback here", encoding="utf-8")
+        record.save(drafts / f"{record.token}.json")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).consistency()
+
+    assert report.blocking_findings == ()
+    assert report.records_count == 5
+    assert any(flag.kind == "score-outlier" for flag in report.flags)
+    assert all(entry.progress is Progress.DRAFTED for entry in report.status.entries)
+    assert not (drafts / "_verification.json").exists()
+
+
+def test_grading_batch_consistency_keeps_load_failures_separate_from_flags(tmp_path):
+    drafts = tmp_path / "drafts"
+    redacted = tmp_path / "redacted"
+    drafts.mkdir()
+    redacted.mkdir()
+    records = _even_batch()
+    records.append(_record("STUDENT_05", {1: 4, 2: 20, 3: 20, 4: 20}))
+    for record in records:
+        (redacted / f"{record.token}.md").write_text("essay", encoding="utf-8")
+        (drafts / f"{record.token}.md").write_text("feedback here", encoding="utf-8")
+        record.save(drafts / f"{record.token}.json")
+    (drafts / "STUDENT_01.json").write_text("{not json", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).consistency()
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "malformed-record"
+    ]
+    assert report.records_count == 4
+    assert any(flag.kind == "score-outlier" for flag in report.flags)
+
+
+def test_grading_batch_consistency_rejects_record_identity_mismatches(tmp_path):
+    drafts = tmp_path / "drafts"
+    redacted = tmp_path / "redacted"
+    drafts.mkdir()
+    redacted.mkdir()
+    records = _even_batch()
+    records.append(_record("STUDENT_05", {1: 4, 2: 20, 3: 20, 4: 20}))
+    for record in records:
+        (redacted / f"{record.token}.md").write_text("essay", encoding="utf-8")
+        (drafts / f"{record.token}.md").write_text("feedback here", encoding="utf-8")
+        record.save(drafts / f"{record.token}.json")
+    first_path = drafts / "STUDENT_01.json"
+    first = GradeRecord.load(first_path)
+    first.token = "STUDENT_99"
+    first.batch = "essay-9"
+    first.save(first_path)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).consistency()
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "token-mismatch",
+        "batch-mismatch",
+    ]
+    assert report.records_count == 4
+    assert any(flag.kind == "score-outlier" for flag in report.flags)
+
+
+def test_orphaned_records_are_findings_not_consistency_inputs(tmp_path):
+    drafts = tmp_path / "drafts"
+    redacted = tmp_path / "redacted"
+    drafts.mkdir()
+    redacted.mkdir()
+    for record in _even_batch():
+        (redacted / f"{record.token}.md").write_text("essay", encoding="utf-8")
+        (drafts / f"{record.token}.md").write_text("feedback here", encoding="utf-8")
+        record.save(drafts / f"{record.token}.json")
+    orphan = _record("STUDENT_09", {1: 1, 2: 1, 3: 1, 4: 1})
+    (drafts / "STUDENT_09.md").write_text("feedback here", encoding="utf-8")
+    orphan.save(drafts / "STUDENT_09.json")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).consistency()
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "orphaned-artifact"
+    ]
+    assert report.records_count == 4
+    assert report.flags == ()
+
+
 def test_the_consistency_subcommand_runs_over_a_directory(tmp_path):
     drafts = tmp_path / "drafts"
     redacted = tmp_path / "redacted"
@@ -213,3 +314,37 @@ def test_the_consistency_subcommand_can_fail_on_findings(tmp_path):
         capture_output=True, text=True,
     )
     assert result.returncode == 12
+
+
+def test_consistency_cli_reports_structural_findings_and_later_flags(tmp_path):
+    drafts = tmp_path / "drafts"
+    redacted = tmp_path / "redacted"
+    drafts.mkdir()
+    redacted.mkdir()
+    records = _even_batch()
+    records.append(_record("STUDENT_05", {1: 4, 2: 20, 3: 20, 4: 20}))
+    for record in records:
+        (redacted / f"{record.token}.md").write_text("essay", encoding="utf-8")
+        (drafts / f"{record.token}.md").write_text("feedback here", encoding="utf-8")
+        record.save(drafts / f"{record.token}.json")
+    (drafts / "STUDENT_01.json").write_text("{not json", encoding="utf-8")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/grade.py",
+            "consistency",
+            "--batch",
+            "essay-2",
+            "--redacted",
+            str(redacted),
+            "--drafts",
+            str(drafts),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 13
+    assert "malformed-record" in result.stdout + result.stderr
+    assert "score-outlier" in result.stdout
