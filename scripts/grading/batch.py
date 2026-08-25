@@ -416,7 +416,6 @@ class VerifiedBatch:
                     findings=tuple(findings),
                 )
             outputs.sort(key=lambda item: item["path"])
-            (staging / TRANSACTION_NAME).unlink()
             (staging / PUBLICATION_NAME).write_text(
                 json.dumps(
                     {
@@ -473,7 +472,11 @@ class VerifiedBatch:
                                 token="",
                             ),
                         ),
-                    )
+                        )
+                try:
+                    (target / TRANSACTION_NAME).unlink()
+                except OSError:
+                    pass
                 try:
                     shutil.rmtree(backup)
                 except OSError:
@@ -482,6 +485,10 @@ class VerifiedBatch:
                 if target.is_dir():
                     target.rmdir()
                 staging.replace(target)
+                try:
+                    (target / TRANSACTION_NAME).unlink()
+                except OSError:
+                    pass
             return PublicationReport(
                 destination=target,
                 progress=Progress.REHYDRATED,
@@ -1000,6 +1007,41 @@ def _recover_publication_transaction(
     status: StatusReport,
 ) -> tuple[BlockingFinding, ...]:
     backup = _publication_backup(target)
+    target_transaction = target / TRANSACTION_NAME
+    if target_transaction.is_file():
+        if not _transaction_matches(
+            target_transaction, target, batch, receipt_digest
+        ):
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    "The installed publication has an unrecognized transaction marker.",
+                ),
+            )
+        target_findings = _validate_existing_publication(
+            target,
+            renderer,
+            batch,
+            receipt_digest,
+            status,
+            allow_transaction=True,
+        )
+        if target_findings:
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    "The installed publication cannot be recovered automatically.",
+                ),
+            )
+        try:
+            target_transaction.unlink()
+        except OSError as error:
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    f"Could not finish the publication transaction: {error}",
+                ),
+            )
     if backup.exists():
         if not backup.is_dir():
             return (
@@ -1039,7 +1081,15 @@ def _recover_publication_transaction(
                     ),
                 )
         else:
-            backup.replace(target)
+            try:
+                backup.replace(target)
+            except OSError as error:
+                return (
+                    _publication_finding(
+                        "publication-recovery-required",
+                        f"Could not restore the publication backup: {error}",
+                    ),
+                )
 
     expected_names = {
         entry.draft.name for entry in status.entries if entry.draft is not None
@@ -1053,24 +1103,7 @@ def _recover_publication_transaction(
                 ),
             )
         transaction = staging / TRANSACTION_NAME
-        try:
-            transaction_payload = json.loads(
-                transaction.read_text(encoding="utf-8")
-            )
-        except (OSError, UnicodeError, json.JSONDecodeError) as error:
-            return (
-                _publication_finding(
-                    "publication-recovery-required",
-                    f"Unrecognized publication staging path: {staging.name}: {error}",
-                ),
-            )
-        if (
-            not isinstance(transaction_payload, dict)
-            or transaction_payload.get("schema") != TRANSACTION_SCHEMA
-            or transaction_payload.get("batch") != batch
-            or transaction_payload.get("receipt_sha256") != receipt_digest
-            or transaction_payload.get("target") != target.name
-        ):
+        if not _transaction_matches(transaction, target, batch, receipt_digest):
             return (
                 _publication_finding(
                     "publication-recovery-required",
@@ -1087,7 +1120,15 @@ def _recover_publication_transaction(
                     f"Unrecognized files remain in publication staging: {staging.name}",
                 ),
             )
-        shutil.rmtree(staging)
+        try:
+            shutil.rmtree(staging)
+        except OSError as error:
+            return (
+                _publication_finding(
+                    "publication-recovery-required",
+                    f"Could not remove publication staging: {error}",
+                ),
+            )
     return ()
 
 
@@ -1097,6 +1138,8 @@ def _validate_existing_publication(
     batch: str,
     receipt_digest: str,
     status: StatusReport,
+    *,
+    allow_transaction: bool = False,
 ) -> tuple[BlockingFinding, ...]:
     marker = target / PUBLICATION_NAME
     try:
@@ -1169,7 +1212,10 @@ def _validate_existing_publication(
             ),
         )
     actual_names = {path.name for path in target.iterdir()}
-    if actual_names != expected_names | {PUBLICATION_NAME}:
+    allowed_names = expected_names | {PUBLICATION_NAME}
+    if allow_transaction:
+        allowed_names.add(TRANSACTION_NAME)
+    if actual_names != allowed_names:
         return (
             _publication_finding(
                 "publication-files-changed",
@@ -1190,6 +1236,22 @@ def _validate_existing_publication(
             _publication_finding("publication-files-changed", str(error)),
         )
     return ()
+
+
+def _transaction_matches(
+    marker: Path, target: Path, batch: str, receipt_digest: str
+) -> bool:
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    return (
+        isinstance(payload, dict)
+        and payload.get("schema") == TRANSACTION_SCHEMA
+        and payload.get("batch") == batch
+        and payload.get("receipt_sha256") == receipt_digest
+        and payload.get("target") == target.name
+    )
 
 
 def _publication_finding(code: str, message: str) -> BlockingFinding:

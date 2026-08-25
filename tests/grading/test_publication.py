@@ -483,6 +483,109 @@ def test_receipt_failure_returns_before_recovery_changes_filesystem(
     assert renderer.rendered == []
 
 
+def test_safe_force_recovers_installed_target_with_transaction_marker(
+    tmp_path, phil210
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    backup = tmp_path / ".final.backup"
+    shutil.copytree(target, backup)
+    publication = json.loads(
+        (target / "_publication.json").read_text(encoding="utf-8")
+    )
+    (target / "_transaction.json").write_text(
+        json.dumps(
+            {
+                "schema": "grading-batch-publication-transaction/1",
+                "batch": "essay-2",
+                "receipt_sha256": publication["receipt_sha256"],
+                "target": "final",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert report.findings == ()
+    assert not (target / "_transaction.json").exists()
+    assert not backup.exists()
+
+
+def test_recovery_reports_backup_restore_failure(tmp_path, phil210, monkeypatch):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    backup = tmp_path / ".final.backup"
+    target.replace(backup)
+    original_replace = Path.replace
+
+    def fail_backup_restore(path, destination):
+        if path == backup and Path(destination) == target:
+            raise OSError("simulated restore failure")
+        return original_replace(path, destination)
+
+    monkeypatch.setattr(Path, "replace", fail_backup_restore)
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert [finding.code for finding in report.findings] == [
+        "publication-recovery-required"
+    ]
+    assert backup.is_dir()
+    assert not target.exists()
+
+
+def test_recovery_reports_staging_cleanup_failure(tmp_path, phil210, monkeypatch):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+    target = tmp_path / "final"
+    verified.publish(target, FakeRenderer(identity="Maya Lin"))
+    abandoned = tmp_path / ".final-interrupted"
+    abandoned.mkdir()
+    publication = json.loads(
+        (target / "_publication.json").read_text(encoding="utf-8")
+    )
+    (abandoned / "_transaction.json").write_text(
+        json.dumps(
+            {
+                "schema": "grading-batch-publication-transaction/1",
+                "batch": "essay-2",
+                "receipt_sha256": publication["receipt_sha256"],
+                "target": "final",
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_rmtree = shutil.rmtree
+
+    def fail_staging_cleanup(path, *args, **kwargs):
+        if Path(path) == abandoned:
+            raise OSError("simulated cleanup failure")
+        return original_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", fail_staging_cleanup)
+
+    report = verified.publish(
+        target,
+        FakeRenderer(identity="Maya Updated"),
+        force=True,
+    )
+
+    assert [finding.code for finding in report.findings] == [
+        "publication-recovery-required"
+    ]
+    assert abandoned.is_dir()
+
+
 def test_publish_aggregates_renderer_failures_and_keeps_destination_untouched(
     tmp_path, phil210
 ):
