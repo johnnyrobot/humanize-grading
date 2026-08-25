@@ -8,6 +8,7 @@ Subcommands:
     verify       Check every draft in a batch. Write the quote offsets.
     status       Show which submissions still need a draft.
     density      Count watched AI terms in one file.
+    consistency  Flag outliers across a graded batch.
 
 Exit codes: 0 clean, 10 no profile, 11 the rubric drifted since calibration,
 12 a draft failed verification, 13 malformed input.
@@ -34,6 +35,7 @@ from scripts.grading.batch import (  # noqa: E402
     survey,
 )
 from scripts.grading.density import scan  # noqa: E402
+from scripts.grading.consistency import review  # noqa: E402
 from scripts.grading.profile import (  # noqa: E402
     ProfileError,
     load_profile,
@@ -197,6 +199,35 @@ def _cmd_density(args: argparse.Namespace) -> int:
     )
     return EXIT_OK
 
+def _cmd_consistency(args: argparse.Namespace) -> int:
+    drafts_dir = _drafts_dir(args)
+    items = [item for item in survey(args.redacted, drafts_dir) if item.record]
+    records = []
+    drafts: dict[str, str] = {}
+    for item in items:
+        record = GradeRecord.load(item.record)
+        records.append(record)
+        if item.draft:
+            drafts[record.token] = item.draft.read_text(encoding="utf-8")
+
+    if not records:
+        print(f"No records under {drafts_dir}. Nothing to compare.", file=sys.stderr)
+        return EXIT_MALFORMED
+
+    flags = review(records, drafts, threshold=args.threshold)
+    print(f"{len(records)} graded submissions, {len(flags)} things to look at.")
+    for flag in flags:
+        print(f"  {flag.kind}: {flag.message}")
+    if not flags:
+        print("  Nothing stood out.")
+    print(
+        "\nThese are flags, not failures. An outlier is often a genuinely "
+        "unusual essay. Read the drafts before changing a score."
+    )
+    if flags and args.fail_on_findings:
+        return EXIT_FAILED
+    return EXIT_OK
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, default=Path(".grading"))
 
@@ -239,6 +270,20 @@ def build_parser() -> argparse.ArgumentParser:
     density.add_argument("--json", action="store_true")
     _add_common(density)
     density.set_defaults(handler=_cmd_density)
+    consistency = subparsers.add_parser(
+        "consistency", help="Flag outliers across a graded batch"
+    )
+    consistency.add_argument("--batch", required=True)
+    consistency.add_argument("--redacted", type=Path, default=Path("redacted"))
+    consistency.add_argument("--drafts", type=Path, default=None)
+    consistency.add_argument("--threshold", type=float, default=2.0)
+    consistency.add_argument(
+        "--fail-on-findings",
+        action="store_true",
+        help="Exit non-zero when anything is flagged",
+    )
+    _add_common(consistency)
+    consistency.set_defaults(handler=_cmd_consistency)
     return parser
 
 
