@@ -40,6 +40,7 @@ _MALFORMED_CODES = {
     "unreadable-source",
     "unreadable-draft",
     "no-records",
+    "malformed-profile",
     "malformed-rubric",
     "malformed-patterns",
 }
@@ -282,6 +283,22 @@ class GradingBatch:
                 persisted=False,
                 failure=VerificationFailure.NO_PROFILE,
             )
+        except (OSError, UnicodeError, ValueError, TypeError) as error:
+            blocking.append(
+                BlockingFinding(
+                    code="malformed-profile",
+                    message=str(error),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.MALFORMED,
+            )
         try:
             rubric = load_rubric(inputs.rubric)
         except (RubricError, OSError, UnicodeError) as error:
@@ -351,16 +368,30 @@ class GradingBatch:
                 or record is None
                 or loaded.source_text is None
                 or loaded.draft_text is None
+                or any(
+                    finding.code in _MALFORMED_CODES
+                    for finding in loaded.findings
+                )
             ):
                 continue
-            findings = verify_draft(
-                record,
-                loaded.draft_text,
-                loaded.source_text,
-                rubric,
-                profile,
-                terms,
-            )
+            try:
+                findings = verify_draft(
+                    record,
+                    loaded.draft_text,
+                    loaded.source_text,
+                    rubric,
+                    profile,
+                    terms,
+                )
+            except (AttributeError, TypeError, KeyError, ValueError) as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="malformed-record",
+                        message=f"Cannot verify {entry.record.name}: {error}",
+                        token=entry.token,
+                    )
+                )
+                continue
             checked.append(entry.token)
             records.append((entry.record, record))
             for finding in findings:
@@ -495,6 +526,15 @@ def _load_entry(
             findings.extend(_batch_identity_findings(entry, record, paths))
         else:
             findings.extend(_metadata_findings(entry, record, paths, inputs))
+        semantic_error = _record_semantic_error(record)
+        if semantic_error:
+            findings.append(
+                BlockingFinding(
+                    code="malformed-record",
+                    message=semantic_error,
+                    token=entry.token,
+                )
+            )
 
     source_text = None
     if entry.source is not None:
@@ -528,6 +568,41 @@ def _load_entry(
         draft_text=draft_text,
         findings=tuple(findings),
     )
+
+
+def _record_semantic_error(record: GradeRecord) -> str:
+    for criterion in record.criteria:
+        if criterion.score is not None and (
+            not isinstance(criterion.score, int)
+            or isinstance(criterion.score, bool)
+        ):
+            return (
+                f"Criterion {criterion.number} score must be an integer or null, "
+                f"not {criterion.score!r}."
+            )
+        for justification in criterion.justifications:
+            if justification.occurrence is not None and (
+                not isinstance(justification.occurrence, int)
+                or isinstance(justification.occurrence, bool)
+            ):
+                return (
+                    "A justification occurrence must be an integer or null, not "
+                    f"{justification.occurrence!r}."
+                )
+
+    density = record.pattern_density
+    numeric_fields = ("words", "count", "per_thousand")
+    for name in numeric_fields:
+        value = density.get(name)
+        if value is not None and (
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+        ):
+            return f"Pattern density {name} must be numeric, not {value!r}."
+    if "by_pattern" in density and not isinstance(density["by_pattern"], dict):
+        return "Pattern density by_pattern must be an object."
+    if "examples" in density and not isinstance(density["examples"], list):
+        return "Pattern density examples must be a list."
+    return ""
 
 
 def _metadata_findings(

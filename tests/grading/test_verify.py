@@ -483,6 +483,42 @@ def test_grading_batch_reports_unreadable_artifacts_and_checks_later_work(
     assert second_record.read_bytes() == before_second
 
 
+def test_semantically_malformed_record_does_not_stop_later_verification(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    first_path = drafts / "STUDENT_01.json"
+    first = GradeRecord.load(first_path)
+    first.criteria[0].score = "twenty"
+    first.save(first_path)
+    second_source = redacted / "STUDENT_02.md"
+    second_source.write_text(SOURCE, encoding="utf-8")
+    (drafts / "STUDENT_02.md").write_text(FEEDBACK, encoding="utf-8")
+    _record(
+        token="STUDENT_02",
+        source=str(second_source),
+        rubric=str(phil210 / "grading_rubric.md"),
+        profile=str(root / "profiles" / "phil210.md"),
+    ).save(drafts / "STUDENT_02.json")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "malformed-record"
+    ]
+    assert report.checked_tokens == ("STUDENT_02",)
+    assert report.failure is VerificationFailure.MALFORMED
+
+
 def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
     tmp_path, phil210
 ):
@@ -509,6 +545,28 @@ def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
     ]
     assert report.checked_tokens == ()
     assert report.persisted is False
+
+
+def test_grading_batch_reports_an_unreadable_profile_as_malformed(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.write_bytes(b"\xff")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=profile_path,
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert report.failure is VerificationFailure.MALFORMED
+    assert [finding.code for finding in report.blocking_findings] == [
+        "malformed-profile"
+    ]
 
 
 def test_missing_profile_does_not_hide_a_malformed_grade_record(tmp_path, phil210):
@@ -809,6 +867,32 @@ def test_the_verify_cli_preserves_missing_profile_exit_10(tmp_path, phil210):
 
     assert result.returncode == 10
     assert "calibrate" in (result.stdout + result.stderr).lower()
+
+
+def test_the_verify_cli_reports_an_unreadable_profile_as_malformed(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    (root / "profiles" / "phil210.md").write_bytes(b"\xff")
+
+    result = _run(
+        "verify",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+        "--root",
+        str(root),
+    )
+
+    assert result.returncode == 13
+    assert "malformed-profile" in result.stdout + result.stderr
 
 
 def test_the_verify_cli_preserves_rubric_drift_exit_11(tmp_path, phil210):
