@@ -13,7 +13,9 @@ Terms come from references/ai-patterns.md so there is one list, not two.
 Counts are grouped by pattern number rather than summed into a single figure,
 because the patterns are not equally meaningful in a student essay. Pattern 7
 carries the rubric's own buzzwords. Pattern 21 catches chatbot disclaimers.
-Reading them apart is the point.
+Reading them apart is the point. When a term is listed under multiple patterns,
+it is tagged with the pattern that appears first in the file; per-pattern counts
+are therefore a guide rather than an exact partition.
 """
 
 from __future__ import annotations

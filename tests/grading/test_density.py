@@ -58,7 +58,13 @@ def test_the_slop_paper_scores_far_above_the_clean_paper(phil210, terms):
         ).read_text(encoding="utf-8"),
         terms,
     )
-    assert slop.per_thousand > clean.per_thousand * 2
+    # Real values today: slop 55.97 per 1000 across 15 hits, clean 0.0. These
+    # floors leave headroom while still failing if hit detection regresses.
+    # A bare ratio does not work here: the clean paper scores 0.0, so
+    # `slop > clean * 2` reduces to `slop > 0`.
+    assert slop.per_thousand >= 20
+    assert len(slop.hits) >= 10
+    assert clean.per_thousand < 5
 
 
 def test_it_reports_where_each_hit_is(terms):
