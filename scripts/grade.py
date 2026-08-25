@@ -148,7 +148,13 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_FAILED
-    print(f"\nAll {len(report.checked_tokens)} drafts verified. Offsets written.")
+    if args.no_write:
+        print(f"\nAll {len(report.checked_tokens)} drafts verified. Nothing written.")
+    else:
+        print(
+            f"\nAll {len(report.checked_tokens)} drafts verified. "
+            "Offsets and verification receipt written."
+        )
     return EXIT_OK
 
 
@@ -164,19 +170,33 @@ def _cmd_status(args: argparse.Namespace) -> int:
         print(f"Nothing under {args.redacted}. Run redact.py first.")
         return EXIT_OK
 
-    states = {item.token: report.legacy_state(item) for item in report.entries}
+    states = {
+        item.token: (
+            Progress.VERIFIED.value
+            if item.progress is Progress.VERIFIED
+            else report.legacy_state(item)
+        )
+        for item in report.entries
+    }
 
     width = max(len(item.token) for item in report.entries)
     for item in report.entries:
         print(f"  {item.token.ljust(width)}  {states[item.token]}")
     counts = {
         state: sum(1 for current in states.values() if current == state)
-        for state in (Progress.PENDING.value, Progress.DRAFTED.value, INCOMPLETE, ORPHAN)
+        for state in (
+            Progress.PENDING.value,
+            Progress.DRAFTED.value,
+            Progress.VERIFIED.value,
+            INCOMPLETE,
+            ORPHAN,
+        )
     }
     print(
         f"\n{counts[Progress.PENDING.value]} pending, "
         f"{counts[Progress.DRAFTED.value]} drafted, "
-        f"{counts[INCOMPLETE]} incomplete, {counts[ORPHAN]} orphaned."
+        f"{counts[INCOMPLETE]} incomplete, {counts[ORPHAN]} orphaned, "
+        f"{counts[Progress.VERIFIED.value]} verified."
     )
     if counts[ORPHAN]:
         print(

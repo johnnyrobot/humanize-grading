@@ -1,14 +1,17 @@
 """No draft reaches an instructor until every claim in it has been checked."""
 
+import hashlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
 from scripts.grading.batch import (
     BatchPaths,
     GradingBatch,
+    Progress,
     VerificationFailure,
     VerificationInputs,
 )
@@ -320,6 +323,346 @@ def test_grading_batch_verifies_and_persists_a_clean_batch(tmp_path, phil210):
     assert payload["criteria"][0]["justifications"][0]["offset"] >= 0
 
 
+def test_persisted_verification_writes_one_versioned_receipt(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    receipt = drafts / "_verification.json"
+    assert report.receipt == receipt
+    assert [path.name for path in drafts.glob("_verification*.json")] == [
+        "_verification.json"
+    ]
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload["schema"] == "grading-batch-verification/1"
+    assert payload["batch"] == "essay-2"
+
+
+def test_no_write_verification_writes_neither_offsets_nor_a_receipt(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    record_path = drafts / "STUDENT_01.json"
+    before = record_path.read_bytes()
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        ),
+        persist=False,
+    )
+
+    assert report.blocking_findings == ()
+    assert report.persisted is False
+    assert report.receipt is None
+    assert record_path.read_bytes() == before
+    assert not (drafts / "_verification.json").exists()
+
+
+def test_receipt_binds_every_identity_free_artifact_with_sha256(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    receipt_path = drafts / "_verification.json"
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert payload["course"] == "phil210"
+    assert payload["hash"] == "sha256"
+    assert [artifact["role"] for artifact in payload["artifacts"]] == [
+        "calibration-profile",
+        "draft",
+        "grade-record",
+        "pattern-reference",
+        "redacted-submission",
+        "rubric",
+    ]
+    participant_roles = {"draft", "grade-record", "redacted-submission"}
+    for artifact in payload["artifacts"]:
+        assert Path(artifact["path"]).is_absolute() is False
+        assert len(artifact["sha256"]) == 64
+        if artifact["role"] in participant_roles:
+            assert artifact["token"] == "STUDENT_01"
+        else:
+            assert "token" not in artifact
+
+    record_artifact = next(
+        item for item in payload["artifacts"] if item["role"] == "grade-record"
+    )
+    assert record_artifact["sha256"] == hashlib.sha256(
+        (drafts / "STUDENT_01.json").read_bytes()
+    ).hexdigest()
+    blob = receipt_path.read_text(encoding="utf-8")
+    assert "Community solar cooperatives" not in blob
+    assert "Maya Lin" not in blob
+    assert "TokenMap" not in blob
+
+
+def test_repeated_verification_writes_the_same_receipt_bytes(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+    )
+
+    batch.verify(inputs)
+    first = (drafts / "_verification.json").read_bytes()
+    batch.verify(inputs)
+
+    assert (drafts / "_verification.json").read_bytes() == first
+
+
+def test_current_receipt_makes_grading_batch_progress_verified(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    batch.verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    status = batch.status()
+
+    assert [entry.progress for entry in status.entries] == [Progress.VERIFIED]
+    assert status.blocking_findings == ()
+
+
+def test_legacy_batch_requires_verification_only_when_eligibility_is_requested(
+    tmp_path, phil210
+):
+    redacted, drafts, _ = _write_batch(tmp_path, phil210)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+
+    ordinary = batch.status()
+    required = batch.status(require_verified=True)
+
+    assert [entry.progress for entry in ordinary.entries] == [Progress.DRAFTED]
+    assert ordinary.blocking_findings == ()
+    assert [entry.progress for entry in required.entries] == [Progress.DRAFTED]
+    assert [finding.code for finding in required.blocking_findings] == [
+        "verification-required"
+    ]
+
+
+@pytest.mark.parametrize(
+    "receipt_text",
+    [
+        "{not json",
+        json.dumps({"schema": "grading-batch-verification/99"}),
+    ],
+)
+def test_malformed_or_unknown_receipt_never_grants_verified_progress(
+    tmp_path, phil210, receipt_text
+):
+    redacted, drafts, _ = _write_batch(tmp_path, phil210)
+    (drafts / "_verification.json").write_text(receipt_text, encoding="utf-8")
+
+    status = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [entry.progress for entry in status.entries] == [Progress.DRAFTED]
+    assert [finding.code for finding in status.blocking_findings] == [
+        "malformed-verification-receipt"
+    ]
+
+
+def test_receipt_with_malformed_artifact_evidence_is_rejected(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    batch.verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+    receipt = drafts / "_verification.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["artifacts"][0]["sha256"] = "z" * 64
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = batch.status()
+
+    assert [entry.progress for entry in status.entries] == [Progress.DRAFTED]
+    assert [finding.code for finding in status.blocking_findings] == [
+        "malformed-verification-receipt"
+    ]
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["changed", "added", "removed", "renamed", "missing-course-evidence"],
+)
+def test_any_receipt_bound_artifact_change_invalidates_verified_progress(
+    tmp_path, phil210, change
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+    )
+    batch.verify(inputs)
+
+    if change == "changed":
+        (drafts / "STUDENT_01.md").write_text("changed feedback", encoding="utf-8")
+    elif change == "added":
+        (redacted / "STUDENT_02.md").write_text(SOURCE, encoding="utf-8")
+    elif change == "removed":
+        (drafts / "STUDENT_01.md").unlink()
+    elif change == "renamed":
+        (drafts / "STUDENT_01.json").rename(drafts / "STUDENT_02.json")
+    else:
+        inputs.profile.unlink()
+
+    status = batch.status()
+
+    assert all(entry.progress is not Progress.VERIFIED for entry in status.entries)
+    assert "stale-verification-receipt" in {
+        finding.code for finding in status.blocking_findings
+    }
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        "redacted-submission",
+        "draft",
+        "grade-record",
+        "rubric",
+        "calibration-profile",
+        "pattern-reference",
+    ],
+)
+def test_edit_to_each_bound_artifact_role_invalidates_receipt(tmp_path, phil210, role):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    rubric = tmp_path / "rubric.md"
+    rubric.write_bytes((phil210 / "grading_rubric.md").read_bytes())
+    patterns = tmp_path / "patterns.md"
+    patterns.write_bytes(PATTERNS_PATH.read_bytes())
+    record_path = drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.rubric = str(rubric)
+    record.save(record_path)
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=rubric,
+        profile=root / "profiles" / "phil210.md",
+        patterns=patterns,
+    )
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    batch.verify(inputs)
+    artifacts = {
+        "redacted-submission": redacted / "STUDENT_01.md",
+        "draft": drafts / "STUDENT_01.md",
+        "grade-record": record_path,
+        "rubric": rubric,
+        "calibration-profile": inputs.profile,
+        "pattern-reference": patterns,
+    }
+
+    changed = artifacts[role]
+    changed.write_bytes(changed.read_bytes() + b"\n")
+
+    assert "stale-verification-receipt" in {
+        finding.code for finding in batch.status().blocking_findings
+    }
+
+
+def test_reverification_replaces_a_stale_receipt(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+    )
+    batch.verify(inputs)
+    (drafts / "STUDENT_01.md").write_text(FEEDBACK + "\n", encoding="utf-8")
+    assert "stale-verification-receipt" in {
+        finding.code for finding in batch.status().blocking_findings
+    }
+
+    report = batch.verify(inputs)
+
+    assert report.persisted is True
+    assert [entry.progress for entry in batch.status().entries] == [Progress.VERIFIED]
+
+
+def test_status_cli_reports_verified_progress_from_a_current_receipt(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    result = _run(
+        "status",
+        "--batch",
+        "essay-2",
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+    )
+
+    assert result.returncode == 0
+    assert "STUDENT_01  verified" in result.stdout
+    assert "1 verified" in result.stdout
+
+
 def test_grading_batch_never_trusts_the_grade_record_source_path(tmp_path, phil210):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     outside = tmp_path / "submissions" / "STUDENT_01.md"
@@ -445,6 +788,7 @@ def test_grading_batch_aggregates_failures_and_leaves_every_record_unchanged(
     assert report.failure is VerificationFailure.MALFORMED
     assert first_record.read_bytes() == before_first
     assert malformed.read_bytes() == before_second
+    assert not (drafts / "_verification.json").exists()
 
 
 def test_grading_batch_reports_unreadable_artifacts_and_checks_later_work(
@@ -763,6 +1107,34 @@ def test_the_cli_writes_offsets_back_into_the_record(tmp_path, phil210):
     )
     payload = json.loads((drafts / "STUDENT_01.json").read_text(encoding="utf-8"))
     assert payload["criteria"][0]["justifications"][0]["offset"] >= 0
+
+
+def test_the_cli_no_write_check_writes_neither_offsets_nor_receipt(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    record_path = drafts / "STUDENT_01.json"
+    before = record_path.read_bytes()
+
+    result = _run(
+        "verify",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+        "--root",
+        str(root),
+        "--no-write",
+    )
+
+    assert result.returncode == 0
+    assert "Nothing written" in result.stdout
+    assert record_path.read_bytes() == before
+    assert not (drafts / "_verification.json").exists()
 
 
 def test_the_cli_fails_a_batch_with_a_bad_draft(tmp_path, phil210):

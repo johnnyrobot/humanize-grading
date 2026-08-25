@@ -11,7 +11,10 @@ grading on top of it would mix two batches.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+import json
+import os
+from dataclasses import dataclass, replace
 from enum import Enum
 from pathlib import Path
 
@@ -28,12 +31,15 @@ class Progress(str, Enum):
 
     PENDING = "pending"
     DRAFTED = "drafted"
+    VERIFIED = "verified"
 
 
 PENDING = Progress.PENDING.value
 DRAFTED = Progress.DRAFTED.value
 INCOMPLETE = "incomplete"
 ORPHAN = "orphan"
+RECEIPT_NAME = "_verification.json"
+RECEIPT_SCHEMA = "grading-batch-verification/1"
 
 _MALFORMED_CODES = {
     "malformed-record",
@@ -102,6 +108,8 @@ class StatusReport:
             return ORPHAN
         if "incomplete-pair" in codes:
             return INCOMPLETE
+        if entry.progress is Progress.VERIFIED:
+            return DRAFTED
         if entry.progress is not None:
             return entry.progress.value
         return ORPHAN
@@ -146,6 +154,7 @@ class VerificationReport:
     checked_tokens: tuple[str, ...]
     persisted: bool
     failure: VerificationFailure | None
+    receipt: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -168,6 +177,13 @@ class _LoadedEntry:
 
 
 @dataclass(frozen=True)
+class _ReceiptValidation:
+    present: bool
+    valid: bool
+    findings: tuple[BlockingFinding, ...]
+
+
+@dataclass(frozen=True)
 class GradingBatch:
     """Own the lifecycle rules for one grading batch."""
 
@@ -177,7 +193,12 @@ class GradingBatch:
     def open(cls, paths: BatchPaths) -> "GradingBatch":
         return cls(paths)
 
-    def status(self) -> StatusReport:
+    def status(self, *, require_verified: bool = False) -> StatusReport:
+        return self._status(check_receipt=True, require_verified=require_verified)
+
+    def _status(
+        self, *, check_receipt: bool, require_verified: bool = False
+    ) -> StatusReport:
         sources = _artifact_paths(self.paths.redacted, (".md", ".txt", ".docx"))
         drafts = _artifact_paths(self.paths.drafts, (".md",))
         records = _artifact_paths(self.paths.drafts, (".json",))
@@ -239,6 +260,27 @@ class GradingBatch:
                             token=token,
                         )
                     )
+        report = StatusReport(
+            entries=tuple(entries),
+            blocking_findings=tuple(findings),
+        )
+        if not check_receipt:
+            return report
+        validation = _validate_verification_receipt(self.paths, report)
+        findings.extend(validation.findings)
+        if require_verified and not validation.present:
+            findings.append(
+                BlockingFinding(
+                    code="verification-required",
+                    message=(
+                        "This grading batch has no verification receipt. Run "
+                        "verification before publication."
+                    ),
+                    token="",
+                )
+            )
+        if validation.valid:
+            entries = [replace(entry, progress=Progress.VERIFIED) for entry in entries]
         return StatusReport(
             entries=tuple(entries),
             blocking_findings=tuple(findings),
@@ -247,7 +289,7 @@ class GradingBatch:
     def verify(
         self, inputs: VerificationInputs, *, persist: bool = True
     ) -> VerificationReport:
-        status = self.status()
+        status = self._status(check_receipt=False)
         blocking = list(status.blocking_findings)
         if not any(entry.record is not None for entry in status.entries):
             blocking.append(
@@ -413,9 +455,11 @@ class GradingBatch:
                         )
                     )
 
+        receipt = None
         if persist and not blocking:
             for path, record in records:
                 record.save(path)
+            receipt = _write_verification_receipt(self.paths, inputs, status)
         failure = None
         if blocking:
             failure = (
@@ -430,10 +474,11 @@ class GradingBatch:
             checked_tokens=tuple(checked),
             persisted=persist and not blocking,
             failure=failure,
+            receipt=receipt,
         )
 
     def consistency(self, *, threshold: float = 2.0) -> ConsistencyReport:
-        status = self.status()
+        status = self._status(check_receipt=False)
         blocking = list(status.blocking_findings)
         records: list[GradeRecord] = []
         drafts: dict[str, str] = {}
@@ -497,6 +542,202 @@ def _artifact_paths(
         ):
             found.setdefault(path.stem, []).append(path)
     return {token: tuple(paths) for token, paths in found.items()}
+
+
+def _write_verification_receipt(
+    paths: BatchPaths, inputs: VerificationInputs, status: StatusReport
+) -> Path:
+    receipt = paths.drafts / RECEIPT_NAME
+    base = receipt.parent.resolve()
+    artifacts: list[dict[str, str]] = []
+    for entry in status.entries:
+        for role, path in (
+            ("redacted-submission", entry.source),
+            ("draft", entry.draft),
+            ("grade-record", entry.record),
+        ):
+            if path is not None:
+                artifacts.append(_receipt_artifact(role, path, base, entry.token))
+    for role, path in (
+        ("rubric", inputs.rubric),
+        ("calibration-profile", inputs.profile),
+        ("pattern-reference", inputs.patterns),
+    ):
+        artifacts.append(_receipt_artifact(role, path, base))
+    artifacts.sort(key=lambda item: (item["role"], item.get("token", ""), item["path"]))
+    payload = {
+        "schema": RECEIPT_SCHEMA,
+        "batch": paths.batch,
+        "course": inputs.course,
+        "hash": "sha256",
+        "artifacts": artifacts,
+    }
+    temporary = receipt.with_suffix(".tmp")
+    temporary.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary.replace(receipt)
+    return receipt
+
+
+def _receipt_artifact(
+    role: str, path: Path, base: Path, token: str | None = None
+) -> dict[str, str]:
+    resolved = path.expanduser().resolve()
+    artifact = {
+        "role": role,
+        "path": _receipt_locator(resolved, base),
+        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+    }
+    if token is not None:
+        artifact["token"] = token
+    return artifact
+
+
+def _receipt_locator(path: Path, base: Path) -> str:
+    try:
+        return Path(os.path.relpath(path, base)).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _validate_verification_receipt(
+    paths: BatchPaths, status: StatusReport
+) -> _ReceiptValidation:
+    receipt = paths.drafts / RECEIPT_NAME
+    if not receipt.is_file():
+        return _ReceiptValidation(present=False, valid=False, findings=())
+    try:
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        artifacts = _validated_receipt_artifacts(payload, paths)
+        expected = _expected_participant_artifacts(status, receipt.parent)
+        actual = {
+            (item["role"], item["token"], item["path"])
+            for item in artifacts
+            if item["role"] in {"draft", "grade-record", "redacted-submission"}
+        }
+        if actual != expected:
+            raise _StaleReceipt("The grading batch membership changed after verification.")
+        for item in artifacts:
+            locator = Path(item["path"])
+            artifact_path = locator if locator.is_absolute() else receipt.parent / locator
+            if not artifact_path.is_file():
+                raise _StaleReceipt(f"A verified artifact is missing: {item['path']}")
+            digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+            if digest != item["sha256"]:
+                raise _StaleReceipt(f"A verified artifact changed: {item['path']}")
+    except _StaleReceipt as error:
+        return _ReceiptValidation(
+            present=True,
+            valid=False,
+            findings=(
+                BlockingFinding(
+                    code="stale-verification-receipt",
+                    message=str(error),
+                    token="",
+                ),
+            ),
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError, KeyError, ValueError) as error:
+        return _ReceiptValidation(
+            present=True,
+            valid=False,
+            findings=(
+                BlockingFinding(
+                    code="malformed-verification-receipt",
+                    message=str(error),
+                    token="",
+                ),
+            ),
+        )
+    return _ReceiptValidation(present=True, valid=True, findings=())
+
+
+class _StaleReceipt(Exception):
+    """A well-formed receipt no longer matches its artifacts."""
+
+
+def _validated_receipt_artifacts(
+    payload: object, paths: BatchPaths
+) -> list[dict[str, str]]:
+    if not isinstance(payload, dict):
+        raise ValueError("The verification receipt must be a JSON object.")
+    if payload.get("schema") != RECEIPT_SCHEMA:
+        raise ValueError(f"Unknown verification receipt schema {payload.get('schema')!r}.")
+    if payload.get("batch") != paths.batch:
+        raise _StaleReceipt("The verification receipt belongs to another grading batch.")
+    if not isinstance(payload.get("course"), str) or not payload["course"]:
+        raise ValueError("The verification receipt needs a course.")
+    if payload.get("hash") != "sha256":
+        raise ValueError("The verification receipt must use SHA-256.")
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError("The verification receipt artifacts must be a list.")
+    allowed = {
+        "calibration-profile",
+        "draft",
+        "grade-record",
+        "pattern-reference",
+        "redacted-submission",
+        "rubric",
+    }
+    external = {"calibration-profile", "pattern-reference", "rubric"}
+    validated: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise ValueError("Each verification receipt artifact must be an object.")
+        role = artifact.get("role")
+        locator = artifact.get("path")
+        digest = artifact.get("sha256")
+        token = artifact.get("token", "")
+        if role not in allowed or not isinstance(locator, str) or not locator:
+            raise ValueError("A verification receipt artifact has an invalid role or path.")
+        if not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("A verification receipt artifact has an invalid SHA-256 hash.")
+        try:
+            if len(bytes.fromhex(digest)) != 32:
+                raise ValueError
+        except ValueError as error:
+            raise ValueError(
+                "A verification receipt artifact has an invalid SHA-256 hash."
+            ) from error
+        if role in external and "token" in artifact:
+            raise ValueError("Course evidence in a receipt must not carry a token.")
+        if role not in external and (not isinstance(token, str) or not token):
+            raise ValueError("A participant artifact in a receipt needs a token.")
+        key = (role, token, locator)
+        if key in seen:
+            raise ValueError("The verification receipt repeats an artifact.")
+        seen.add(key)
+        item = {"role": role, "path": locator, "sha256": digest}
+        if token:
+            item["token"] = token
+        validated.append(item)
+    if {item["role"] for item in validated if item["role"] in external} != external:
+        raise ValueError("The verification receipt is missing course evidence.")
+    for role in external:
+        if sum(1 for item in validated if item["role"] == role) != 1:
+            raise ValueError("The verification receipt repeats course evidence.")
+    return validated
+
+
+def _expected_participant_artifacts(
+    status: StatusReport, base: Path
+) -> set[tuple[str, str, str]]:
+    expected: set[tuple[str, str, str]] = set()
+    for entry in status.entries:
+        for role, path in (
+            ("redacted-submission", entry.source),
+            ("draft", entry.draft),
+            ("grade-record", entry.record),
+        ):
+            if path is not None:
+                expected.add(
+                    (role, entry.token, _receipt_locator(path.resolve(), base.resolve()))
+                )
+    return expected
 
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
