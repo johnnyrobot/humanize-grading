@@ -47,8 +47,9 @@ def _inputs(args: argparse.Namespace) -> int:
     roster = load_roster(args.roster) if args.roster else []
     if not roster:
         print(
-            "No roster given. Past students' names cannot be scrubbed from "
-            "the comment bank. Supply --roster.",
+            f"{args.roster} was read but contains no entries. Past "
+            "students' names cannot be scrubbed from the comment bank "
+            "without a roster.",
             file=sys.stderr,
         )
         return EXIT_MALFORMED
@@ -74,7 +75,7 @@ def _inputs(args: argparse.Namespace) -> int:
         )
         calibration = calibration[:MAX_SAMPLES]
 
-    def packet(path: Path) -> dict:
+    def packet(index: int, path: Path) -> dict:
         sample = load_sample(path)
         comments, found = scrub_names(sample.comments_only(), roster)
         annotations, _ = scrub_names(
@@ -82,9 +83,13 @@ def _inputs(args: argparse.Namespace) -> int:
         )
         # This packet is the artifact that keeps names out of the profile, so
         # it must not itself carry them: record how many name forms were
-        # scrubbed, never which ones.
+        # scrubbed, never which ones. The filename is left out for the same
+        # reason -- scrub_names cannot reliably clean it (case-sensitive,
+        # and \b never fires inside an underscore-joined "Lastname_First"
+        # name), and gradebook exports routinely embed the student's name
+        # in the filename itself. A position label carries no identity.
         return {
-            "path": str(path),
+            "label": f"sample_{index}",
             "score": sample.score,
             "possible": sample.possible,
             "letter": sample.letter,
@@ -123,12 +128,17 @@ def _inputs(args: argparse.Namespace) -> int:
                 ),
             },
         },
-        "samples": [packet(path) for path in calibration],
-        "holdout": {"path": str(holdout_path)},
+        "samples": [
+            packet(index, path) for index, path in enumerate(calibration, start=1)
+        ],
+        "holdout": {"label": "holdout"},
         "note": (
             "This packet holds the instructor's comments only. No student "
-            "essay text and no student name is in it. Build the profile from "
-            "this, never from the sample files directly."
+            "essay text and no student name is in it. Sample labels are "
+            "positions in the sorted sample listing, not filenames -- "
+            "filenames are deliberately not carried because they commonly "
+            "embed student names. Build the profile from this, never from "
+            "the sample files directly."
         ),
     }
 
@@ -139,7 +149,7 @@ def _inputs(args: argparse.Namespace) -> int:
     scrubbed = sum(item["scrubbed_count"] for item in payload["samples"])
     print(
         f"Wrote {args.out}. {len(payload['samples'])} calibration samples, "
-        f"holdout {holdout_path.name}."
+        "1 held back."
     )
     print(f"Scrubbed {scrubbed} name forms from the comments.")
     print("Read references/calibration.md before building the profile.")

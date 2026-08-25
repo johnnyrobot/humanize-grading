@@ -120,9 +120,11 @@ def test_calibrate_inputs_writes_comments_without_essay_text(phil210, tmp_path):
     assert all("scrubbed_count" in item for item in payload["samples"])
     assert "scrubbed" not in payload["samples"][0]
     assert len(payload["samples"]) == 4
-    assert payload["holdout"]["path"].endswith(
-        "paper_5_graded_subscription_software_paradox.md"
-    )
+    assert payload["holdout"] == {"label": "holdout"}
+    assert [item["label"] for item in payload["samples"]] == [
+        "sample_1", "sample_2", "sample_3", "sample_4",
+    ]
+    assert all("path" not in item for item in payload["samples"])
 
 
 def test_calibrate_inputs_carries_the_rubric_fingerprint(phil210, tmp_path):
@@ -166,3 +168,48 @@ def test_calibrate_inputs_refuses_fewer_than_three_samples(phil210, tmp_path):
     )
     assert result.returncode == 13
     assert "three" in result.stderr.lower()
+
+
+def test_a_name_bearing_filename_never_reaches_the_packet(phil210, tmp_path):
+    # Canvas-style exports name files "Lastname_Firstname_...". scrub_names
+    # cannot clean a filename -- it is case-sensitive, and its \b word
+    # boundaries never fire inside an underscore-joined name -- so the fix
+    # is to never carry filenames at all, not to scrub them.
+    canvas_export = tmp_path / "canvas_export"
+    canvas_export.mkdir()
+    mapping = {
+        "Lin_Maya_essay1.md": "paper_1_graded_algorithmic_gatekeeping.md",
+        "Brooks_Tyler_essay1.md": "paper_3_graded_gig_economy_ai_slop.md",
+        "essay_c.md": "paper_2_graded_carbon_pricing_developing_nations.md",
+        "essay_d.md": "paper_4_graded_predictive_policing.md",
+    }
+    for dest_name, source_name in mapping.items():
+        (canvas_export / dest_name).write_text(
+            (phil210 / "graded" / source_name).read_text(encoding="utf-8"),
+            encoding="utf-8",
+        )
+
+    out = tmp_path / "inputs.json"
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(canvas_export),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "essay_d.md",
+            "--out", str(out),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    blob = out.read_text(encoding="utf-8")
+
+    assert "Lin_Maya" not in blob
+    assert "Lin_Maya" not in result.stdout
+    assert "Brooks_Tyler" not in blob
+    assert "Brooks_Tyler" not in result.stdout
+    for entry in load_roster(phil210 / "roster.csv"):
+        for part in entry.name.split():
+            pattern = rf"\b{re.escape(part)}\b"
+            assert not re.search(pattern, blob), f"{part} reached the packet"
+            assert not re.search(pattern, result.stdout), f"{part} reached stdout"
