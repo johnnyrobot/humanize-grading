@@ -32,6 +32,8 @@ from scripts.grading.batch import (  # noqa: E402
     BatchPaths,
     GradingBatch,
     Progress,
+    VerificationFailure,
+    VerificationInputs,
     survey,
 )
 from scripts.grading.density import scan  # noqa: E402
@@ -43,7 +45,6 @@ from scripts.grading.profile import (  # noqa: E402
 )
 from scripts.grading.records import GradeRecord, RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
-from scripts.grading.verify import ERROR, Finding, errors, verify_draft  # noqa: E402
 
 EXIT_OK = 0
 EXIT_NO_PROFILE = 10
@@ -92,64 +93,64 @@ def _cmd_profile(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
-def _print(finding: Finding) -> None:
-    mark = "ERROR  " if finding.level == ERROR else "warning"
+def _print_batch_finding(finding, *, blocking: bool) -> None:
+    mark = "ERROR  " if blocking else "warning"
     where = f" [{finding.token}]" if finding.token else ""
     print(f"  {mark} {finding.code}{where}: {finding.message}")
 
 
 def _cmd_verify(args: argparse.Namespace) -> int:
-    profile = _profile_or_exit(args)
-    rubric = load_rubric(args.rubric)
-    terms = load_terms(args.patterns)
     drafts = _drafts_dir(args)
+    report = GradingBatch.open(
+        BatchPaths(batch=args.batch, redacted=args.redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course=args.course,
+            rubric=args.rubric,
+            profile=profile_path(args.course, args.root),
+            patterns=args.patterns,
+        ),
+        persist=not args.no_write,
+    )
 
-    records = sorted(drafts.glob("*.json"))
-    if not records:
-        print(f"No records under {drafts}. Nothing to verify.", file=sys.stderr)
-        return EXIT_MALFORMED
-
-    failed = 0
-    for record_path in records:
-        record = GradeRecord.load(record_path)
-        markdown_path = record_path.with_suffix(".md")
-        if not markdown_path.is_file():
-            print(f"{record_path.name}: no draft at {markdown_path.name}")
-            failed += 1
-            continue
-        source_path = Path(record.source)
-        if not source_path.is_file():
-            source_path = args.redacted / f"{record.token}.md"
-        if not source_path.is_file():
-            print(f"{record_path.name}: no redacted source at {record.source}")
-            failed += 1
-            continue
-
-        findings = verify_draft(
-            record,
-            markdown_path.read_text(encoding="utf-8"),
-            source_path.read_text(encoding="utf-8"),
-            rubric,
-            profile,
-            terms,
+    for token in report.checked_tokens:
+        bad = sum(
+            1 for finding in report.blocking_findings if finding.token == token
         )
-        bad = errors(findings)
-        print(f"{record.token}: {len(bad)} errors, {len(findings) - len(bad)} warnings")
-        for finding in findings:
-            _print(finding)
-        if bad:
-            failed += 1
-        elif not args.no_write:
-            record.save(record_path)
+        warned = sum(1 for finding in report.warnings if finding.token == token)
+        print(f"{token}: {bad} errors, {warned} warnings")
+    for finding in report.blocking_findings:
+        _print_batch_finding(finding, blocking=True)
+    for finding in report.warnings:
+        _print_batch_finding(finding, blocking=False)
 
-    if failed:
+    if report.failure is VerificationFailure.NO_PROFILE:
         print(
-            f"\n{failed} of {len(records)} drafts failed. Fix them before "
+            f"Run `/grade calibrate --course {args.course}` first. Grading "
+            "without a profile would produce feedback in nobody's voice.",
+            file=sys.stderr,
+        )
+        return EXIT_NO_PROFILE
+    if report.failure is VerificationFailure.RUBRIC_DRIFT:
+        print(
+            "Grading against a drifted criterion applies standards calibrated "
+            "for different words. Recalibrate first.",
+            file=sys.stderr,
+        )
+        return EXIT_DRIFT
+    if report.failure is VerificationFailure.MALFORMED:
+        return EXIT_MALFORMED
+    if report.failure is VerificationFailure.FAILED:
+        failed = len(
+            {finding.token for finding in report.blocking_findings if finding.token}
+        )
+        print(
+            f"\n{failed} of {len(report.status.entries)} drafts failed. Fix them before "
             "rehydrating. A failed draft must not reach a student.",
             file=sys.stderr,
         )
         return EXIT_FAILED
-    print(f"\nAll {len(records)} drafts verified. Offsets written.")
+    print(f"\nAll {len(report.checked_tokens)} drafts verified. Offsets written.")
     return EXIT_OK
 
 

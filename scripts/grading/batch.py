@@ -15,6 +15,12 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from scripts.grading.density import load_terms
+from scripts.grading.profile import ProfileError, load_profile
+from scripts.grading.records import GradeRecord, RecordError
+from scripts.grading.rubric import RubricError, load_rubric
+from scripts.grading.verify import ERROR, verify_draft
+
 
 class Progress(str, Enum):
     """How far one redacted submission has moved through grading."""
@@ -27,6 +33,15 @@ PENDING = Progress.PENDING.value
 DRAFTED = Progress.DRAFTED.value
 INCOMPLETE = "incomplete"
 ORPHAN = "orphan"
+
+_MALFORMED_CODES = {
+    "malformed-record",
+    "unreadable-source",
+    "unreadable-draft",
+    "no-records",
+    "malformed-rubric",
+    "malformed-patterns",
+}
 
 
 @dataclass(frozen=True)
@@ -79,6 +94,47 @@ class StatusReport:
         if entry.progress is not None:
             return entry.progress.value
         return ORPHAN
+
+
+@dataclass(frozen=True)
+class VerificationInputs:
+    """The current course evidence used to verify a grading batch."""
+
+    course: str
+    rubric: Path
+    profile: Path
+    patterns: Path
+
+
+class VerificationFailure(str, Enum):
+    """The existing command failure meanings for whole-batch verification."""
+
+    NO_PROFILE = "no-profile"
+    RUBRIC_DRIFT = "rubric-drift"
+    FAILED = "failed"
+    MALFORMED = "malformed"
+
+
+@dataclass(frozen=True)
+class AdvisoryFinding:
+    """A verification finding that asks for review but does not block."""
+
+    code: str
+    message: str
+    token: str
+    criterion: int | None = None
+
+
+@dataclass(frozen=True)
+class VerificationReport:
+    """Whole-batch verification findings and persistence result."""
+
+    status: StatusReport
+    blocking_findings: tuple[BlockingFinding, ...]
+    warnings: tuple[AdvisoryFinding, ...]
+    checked_tokens: tuple[str, ...]
+    persisted: bool
+    failure: VerificationFailure | None
 
 
 @dataclass(frozen=True)
@@ -158,6 +214,190 @@ class GradingBatch:
             blocking_findings=tuple(findings),
         )
 
+    def verify(
+        self, inputs: VerificationInputs, *, persist: bool = True
+    ) -> VerificationReport:
+        status = self.status()
+        blocking = list(status.blocking_findings)
+        if not any(entry.record is not None for entry in status.entries):
+            blocking.append(
+                BlockingFinding(
+                    code="no-records",
+                    message=(
+                        "The grading batch has no grade records. Nothing can be "
+                        "verified."
+                    ),
+                    token="",
+                )
+            )
+        loaded_records: dict[str, GradeRecord] = {}
+        for entry in status.entries:
+            if entry.record is None:
+                continue
+            try:
+                loaded_records[entry.token] = GradeRecord.load(entry.record)
+            except (RecordError, OSError, UnicodeError) as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="malformed-record",
+                        message=str(error),
+                        token=entry.token,
+                    )
+                )
+        try:
+            profile = load_profile(inputs.profile)
+        except ProfileError as error:
+            blocking.append(
+                BlockingFinding(
+                    code="no-profile",
+                    message=str(error),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.NO_PROFILE,
+            )
+        try:
+            rubric = load_rubric(inputs.rubric)
+        except (RubricError, OSError, UnicodeError) as error:
+            blocking.append(
+                BlockingFinding(
+                    code="malformed-rubric",
+                    message=str(error),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.MALFORMED,
+            )
+        drifted = profile.drift(rubric)
+        if drifted:
+            blocking.append(
+                BlockingFinding(
+                    code="rubric-drift",
+                    message=(
+                        "The rubric changed since calibration: " + ", ".join(drifted)
+                    ),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.RUBRIC_DRIFT,
+            )
+        try:
+            terms = load_terms(inputs.patterns)
+        except (OSError, UnicodeError, ValueError) as error:
+            blocking.append(
+                BlockingFinding(
+                    code="malformed-patterns",
+                    message=str(error),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.MALFORMED,
+            )
+        warnings: list[AdvisoryFinding] = []
+        checked: list[str] = []
+        records: list[tuple[Path, GradeRecord]] = []
+
+        for entry in status.entries:
+            if entry.source is None or entry.draft is None or entry.record is None:
+                continue
+            record = loaded_records.get(entry.token)
+            if record is None:
+                continue
+            blocking.extend(_metadata_findings(entry, record, self.paths, inputs))
+            try:
+                source_text = entry.source.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="unreadable-source",
+                        message=f"Cannot read {entry.source.name}: {error}",
+                        token=entry.token,
+                    )
+                )
+                continue
+            try:
+                draft_text = entry.draft.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="unreadable-draft",
+                        message=f"Cannot read {entry.draft.name}: {error}",
+                        token=entry.token,
+                    )
+                )
+                continue
+            findings = verify_draft(
+                record,
+                draft_text,
+                source_text,
+                rubric,
+                profile,
+                terms,
+            )
+            checked.append(entry.token)
+            records.append((entry.record, record))
+            for finding in findings:
+                if finding.level == ERROR:
+                    blocking.append(
+                        BlockingFinding(
+                            code=finding.code,
+                            message=finding.message,
+                            token=finding.token,
+                        )
+                    )
+                else:
+                    warnings.append(
+                        AdvisoryFinding(
+                            code=finding.code,
+                            message=finding.message,
+                            token=finding.token,
+                            criterion=finding.criterion,
+                        )
+                    )
+
+        if persist and not blocking:
+            for path, record in records:
+                record.save(path)
+        failure = None
+        if blocking:
+            failure = (
+                VerificationFailure.MALFORMED
+                if any(finding.code in _MALFORMED_CODES for finding in blocking)
+                else VerificationFailure.FAILED
+            )
+        return VerificationReport(
+            status=status,
+            blocking_findings=tuple(blocking),
+            warnings=tuple(warnings),
+            checked_tokens=tuple(checked),
+            persisted=persist and not blocking,
+            failure=failure,
+        )
+
 
 @dataclass(frozen=True)
 class Item:
@@ -184,6 +424,58 @@ def _artifact_paths(
         ):
             found.setdefault(path.stem, []).append(path)
     return {token: tuple(paths) for token, paths in found.items()}
+
+
+def _same_path(left: str | Path, right: str | Path) -> bool:
+    return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
+
+
+def _metadata_findings(
+    entry: BatchEntry,
+    record: GradeRecord,
+    paths: BatchPaths,
+    inputs: VerificationInputs,
+) -> list[BlockingFinding]:
+    checks = (
+        (
+            record.token != entry.token,
+            "token-mismatch",
+            "The grade record token does not match its filename token.",
+        ),
+        (
+            record.batch != paths.batch,
+            "batch-mismatch",
+            "The grade record belongs to a different grading batch.",
+        ),
+        (
+            record.course != inputs.course,
+            "course-mismatch",
+            "The grade record belongs to a different course.",
+        ),
+        (
+            not _same_path(record.source, entry.source),
+            "source-mismatch",
+            (
+                "The grade record names a different source. Verification uses the "
+                "redacted submission from this grading batch."
+            ),
+        ),
+        (
+            not _same_path(record.rubric, inputs.rubric),
+            "rubric-mismatch",
+            "The grade record names a different rubric.",
+        ),
+        (
+            not _same_path(record.profile, inputs.profile),
+            "profile-mismatch",
+            "The grade record names a different calibration profile.",
+        ),
+    )
+    return [
+        BlockingFinding(code=code, message=message, token=entry.token)
+        for mismatched, code, message in checks
+        if mismatched
+    ]
 
 
 def survey(redacted: Path, drafts: Path) -> list[Item]:
