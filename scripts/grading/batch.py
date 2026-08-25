@@ -207,7 +207,7 @@ def survey(redacted: Path, drafts: Path) -> list[Item]:
 
 
 def summary(items: list[Item]) -> dict[str, int]:
-    """Count how many submissions sit in each state."""
+    """Count how many legacy survey items sit in each state."""
     counts = {PENDING: 0, DRAFTED: 0, INCOMPLETE: 0, ORPHAN: 0}
     for item in items:
         counts[item.state] += 1
