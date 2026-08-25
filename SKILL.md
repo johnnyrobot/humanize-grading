@@ -186,6 +186,13 @@ letter against the rubric's scale, the structure against the protocol, the
 phrasing against the never-use list, and the density figures against a fresh
 count. It writes the located offsets back into each record.
 
+After every draft passes, verification also writes the versioned, identity-free
+`_verification.json` receipt beside the drafts. The receipt binds the exact
+redacted submissions, drafts, grade records, rubric, calibration profile, and
+pattern reference that passed. Any later edit makes the receipt stale and
+requires verification again. The `--no-write` check writes neither offsets nor
+a receipt.
+
 Exit 12 means at least one draft failed. Fix the draft and run again. Do not
 rehydrate a batch that failed verification.
 

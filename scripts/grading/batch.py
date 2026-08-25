@@ -40,6 +40,9 @@ INCOMPLETE = "incomplete"
 ORPHAN = "orphan"
 RECEIPT_NAME = "_verification.json"
 RECEIPT_SCHEMA = "grading-batch-verification/1"
+_PARTICIPANT_ROLES = {"draft", "grade-record", "redacted-submission"}
+_COURSE_EVIDENCE_ROLES = {"calibration-profile", "pattern-reference", "rubric"}
+_RECEIPT_ROLES = _PARTICIPANT_ROLES | _COURSE_EVIDENCE_ROLES
 
 _MALFORMED_CODES = {
     "malformed-record",
@@ -551,11 +554,7 @@ def _write_verification_receipt(
     base = receipt.parent.resolve()
     artifacts: list[dict[str, str]] = []
     for entry in status.entries:
-        for role, path in (
-            ("redacted-submission", entry.source),
-            ("draft", entry.draft),
-            ("grade-record", entry.record),
-        ):
+        for role, path in _participant_paths(entry):
             if path is not None:
                 artifacts.append(_receipt_artifact(role, path, base, entry.token))
     for role, path in (
@@ -615,7 +614,7 @@ def _validate_verification_receipt(
         actual = {
             (item["role"], item["token"], item["path"])
             for item in artifacts
-            if item["role"] in {"draft", "grade-record", "redacted-submission"}
+            if item["role"] in _PARTICIPANT_ROLES
         }
         if actual != expected:
             raise _StaleReceipt("The grading batch membership changed after verification.")
@@ -674,15 +673,6 @@ def _validated_receipt_artifacts(
     artifacts = payload.get("artifacts")
     if not isinstance(artifacts, list):
         raise ValueError("The verification receipt artifacts must be a list.")
-    allowed = {
-        "calibration-profile",
-        "draft",
-        "grade-record",
-        "pattern-reference",
-        "redacted-submission",
-        "rubric",
-    }
-    external = {"calibration-profile", "pattern-reference", "rubric"}
     validated: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
     for artifact in artifacts:
@@ -692,7 +682,7 @@ def _validated_receipt_artifacts(
         locator = artifact.get("path")
         digest = artifact.get("sha256")
         token = artifact.get("token", "")
-        if role not in allowed or not isinstance(locator, str) or not locator:
+        if role not in _RECEIPT_ROLES or not isinstance(locator, str) or not locator:
             raise ValueError("A verification receipt artifact has an invalid role or path.")
         if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("A verification receipt artifact has an invalid SHA-256 hash.")
@@ -703,10 +693,13 @@ def _validated_receipt_artifacts(
             raise ValueError(
                 "A verification receipt artifact has an invalid SHA-256 hash."
             ) from error
-        if role in external and "token" in artifact:
+        if role in _COURSE_EVIDENCE_ROLES and "token" in artifact:
             raise ValueError("Course evidence in a receipt must not carry a token.")
-        if role not in external and (not isinstance(token, str) or not token):
-            raise ValueError("A participant artifact in a receipt needs a token.")
+        if role in _PARTICIPANT_ROLES and (not isinstance(token, str) or not token):
+            raise ValueError(
+                "A redacted submission, draft, or grade record in a receipt needs "
+                "a token."
+            )
         key = (role, token, locator)
         if key in seen:
             raise ValueError("The verification receipt repeats an artifact.")
@@ -715,9 +708,13 @@ def _validated_receipt_artifacts(
         if token:
             item["token"] = token
         validated.append(item)
-    if {item["role"] for item in validated if item["role"] in external} != external:
+    if {
+        item["role"]
+        for item in validated
+        if item["role"] in _COURSE_EVIDENCE_ROLES
+    } != _COURSE_EVIDENCE_ROLES:
         raise ValueError("The verification receipt is missing course evidence.")
-    for role in external:
+    for role in _COURSE_EVIDENCE_ROLES:
         if sum(1 for item in validated if item["role"] == role) != 1:
             raise ValueError("The verification receipt repeats course evidence.")
     return validated
@@ -728,16 +725,20 @@ def _expected_participant_artifacts(
 ) -> set[tuple[str, str, str]]:
     expected: set[tuple[str, str, str]] = set()
     for entry in status.entries:
-        for role, path in (
-            ("redacted-submission", entry.source),
-            ("draft", entry.draft),
-            ("grade-record", entry.record),
-        ):
+        for role, path in _participant_paths(entry):
             if path is not None:
                 expected.add(
                     (role, entry.token, _receipt_locator(path.resolve(), base.resolve()))
                 )
     return expected
+
+
+def _participant_paths(entry: BatchEntry) -> tuple[tuple[str, Path | None], ...]:
+    return (
+        ("redacted-submission", entry.source),
+        ("draft", entry.draft),
+        ("grade-record", entry.record),
+    )
 
 
 def _same_path(left: str | Path, right: str | Path) -> bool:
