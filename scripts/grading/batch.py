@@ -399,11 +399,36 @@ class VerifiedBatch:
             )
             if target_has_content:
                 backup = _publication_backup(target)
-                target.replace(backup)
+                try:
+                    target.replace(backup)
+                except OSError as error:
+                    return PublicationReport(
+                        destination=target,
+                        progress=Progress.VERIFIED,
+                        findings=(
+                            _publication_finding(
+                                "publication-failed",
+                                f"Could not back up the publication: {error}",
+                            ),
+                        ),
+                    )
                 try:
                     staging.replace(target)
                 except OSError as error:
-                    backup.replace(target)
+                    try:
+                        backup.replace(target)
+                    except OSError as restore_error:
+                        return PublicationReport(
+                            destination=target,
+                            progress=Progress.VERIFIED,
+                            findings=(
+                                _publication_finding(
+                                    "publication-failed",
+                                    "Could not install or restore the publication: "
+                                    f"{error}; {restore_error}",
+                                ),
+                            ),
+                        )
                     return PublicationReport(
                         destination=target,
                         progress=Progress.VERIFIED,
@@ -415,7 +440,10 @@ class VerifiedBatch:
                             ),
                         ),
                     )
-                shutil.rmtree(backup)
+                try:
+                    shutil.rmtree(backup)
+                except OSError:
+                    pass
             else:
                 if target.is_dir():
                     target.rmdir()
@@ -978,7 +1006,15 @@ def _recover_publication_transaction(
                         "Both publication and backup exist. Move one manually.",
                     ),
                 )
-            shutil.rmtree(backup)
+            try:
+                shutil.rmtree(backup)
+            except OSError as error:
+                return (
+                    _publication_finding(
+                        "publication-recovery-required",
+                        f"Could not remove the recovered backup: {error}",
+                    ),
+                )
         else:
             backup.replace(target)
 
