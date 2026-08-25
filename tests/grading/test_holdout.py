@@ -196,7 +196,7 @@ def test_a_name_bearing_filename_never_reaches_the_packet(phil210, tmp_path):
             "--rubric", str(phil210 / "grading_rubric.md"),
             "--samples", str(canvas_export),
             "--roster", str(phil210 / "roster.csv"),
-            "--holdout", "essay_d.md",
+            "--holdout", "Lin_Maya_essay1.md",
             "--out", str(out),
         ],
         capture_output=True, text=True,
