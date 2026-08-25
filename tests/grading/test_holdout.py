@@ -1,0 +1,168 @@
+"""A bad profile must surface in the first minute, not on the fortieth essay."""
+
+import json
+import re
+import subprocess
+import sys
+
+from scripts.grading.holdout import compare, render
+from scripts.grading.records import CriterionScore, GradeRecord
+from scripts.grading.samples import load_sample
+from scripts.redaction.roster import load_roster
+
+PAPER_5 = "graded/paper_5_graded_subscription_software_paradox.md"
+
+
+def _record(total: int, letter: str) -> GradeRecord:
+    return GradeRecord(
+        batch="holdout",
+        token="STUDENT_01",
+        source="redacted/STUDENT_01.md",
+        course="phil210",
+        rubric="tests/fixtures/phil210/grading_rubric.md",
+        profile="tests/fixtures/phil210/profile_phil210.md",
+        criteria=(
+            CriterionScore(1, "Thesis", 25, total // 4, "Proficient", True, ()),
+        ),
+        total=total,
+        total_possible=100,
+        letter=letter,
+        pattern_density={},
+    )
+
+
+def test_it_reports_the_score_gap(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    delta = compare(_record(86, "B"), "Solid work.", sample)
+    assert delta.instructor_total == 83
+    assert delta.generated_total == 86
+    assert delta.points == 3
+
+
+def test_a_matching_letter_is_reported_as_a_match(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    assert compare(_record(83, "B"), "Solid.", sample).letter_match is True
+
+
+def test_a_different_letter_is_reported_as_a_miss(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    delta = compare(_record(94, "A"), "Solid.", sample)
+    assert delta.letter_match is False
+    assert any("letter" in finding.lower() for finding in delta.findings)
+
+
+def test_a_large_score_gap_becomes_a_finding(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    delta = compare(_record(96, "A"), "Solid.", sample)
+    assert any("points" in finding.lower() for finding in delta.findings)
+
+
+def test_a_small_score_gap_raises_no_finding_about_points(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    delta = compare(_record(85, "B"), "Solid.", sample)
+    assert not any("points above" in finding for finding in delta.findings)
+
+
+def test_it_reports_the_instructor_phrases_the_draft_reused(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    borrowed = sample.bottom_line
+    delta = compare(_record(83, "B"), borrowed, sample)
+    assert delta.shared_phrases
+
+
+def test_feedback_that_shares_nothing_reports_no_phrases(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    delta = compare(_record(83, "B"), "Zebra quantum marmalade orbit.", sample)
+    assert delta.shared_phrases == ()
+    assert any("no phrasing" in finding.lower() for finding in delta.findings)
+
+
+def test_feedback_far_longer_than_the_instructors_becomes_a_finding(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    delta = compare(_record(83, "B"), "word " * 2000, sample)
+    assert delta.length_ratio > 3
+    assert any("length" in finding.lower() for finding in delta.findings)
+
+
+def test_the_report_names_both_scores(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    report = render(compare(_record(86, "B"), "Solid.", sample))
+    assert "83" in report and "86" in report
+
+
+def test_calibrate_inputs_writes_comments_without_essay_text(phil210, tmp_path):
+    out = tmp_path / "inputs.json"
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(phil210 / "graded"),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "paper_5_graded_subscription_software_paradox.md",
+            "--out", str(out),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    blob = json.dumps(payload)
+    assert "Jürgen Habermas envisioned an idealized forum" not in blob
+    # Whole words only. A plain substring check flags "Lin" inside the
+    # rubric's own section name, "The Bottom Line", which the packet
+    # legitimately carries. Scanning the full roster is also stronger than
+    # spot-checking one student.
+    for entry in load_roster(phil210 / "roster.csv"):
+        for part in entry.name.split():
+            assert not re.search(rf"\b{re.escape(part)}\b", blob), (
+                f"{part} reached the calibration packet"
+            )
+    assert "[STUDENT]" in blob
+    assert all("scrubbed_count" in item for item in payload["samples"])
+    assert "scrubbed" not in payload["samples"][0]
+    assert len(payload["samples"]) == 4
+    assert payload["holdout"]["path"].endswith(
+        "paper_5_graded_subscription_software_paradox.md"
+    )
+
+
+def test_calibrate_inputs_carries_the_rubric_fingerprint(phil210, tmp_path):
+    out = tmp_path / "inputs.json"
+    subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(phil210 / "graded"),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "paper_5_graded_subscription_software_paradox.md",
+            "--out", str(out),
+        ],
+        capture_output=True, text=True, check=True,
+    )
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert len(payload["rubric"]["criteria"]) == 4
+    assert all(item["digest"] for item in payload["rubric"]["criteria"])
+
+
+def test_calibrate_inputs_refuses_fewer_than_three_samples(phil210, tmp_path):
+    thin = tmp_path / "thin"
+    thin.mkdir()
+    for name in [
+        "paper_1_graded_algorithmic_gatekeeping.md",
+        "paper_5_graded_subscription_software_paradox.md",
+    ]:
+        (thin / name).write_text(
+            (phil210 / "graded" / name).read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(thin),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "paper_5_graded_subscription_software_paradox.md",
+            "--out", str(tmp_path / "out.json"),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 13
+    assert "three" in result.stderr.lower()
