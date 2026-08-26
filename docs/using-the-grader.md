@@ -13,8 +13,8 @@ with that corpus before you point this at anything of your own.
 | --- | --- | --- |
 | `scripts/redact.py` | Replaces student identity with stable tokens | Your machine only |
 | `scripts/calibrate.py` | Builds calibration inputs, reports the holdout delta | Your machine only |
-| `scripts/grade.py` | Checks the profile, surveys a batch, counts patterns, verifies drafts, flags outliers | Your machine only |
-| `scripts/rehydrate.py` | Puts real names back into finished feedback | Your machine only |
+| `scripts/grade.py` | Owns grading-batch status, verification receipts, pattern counts and consistency flags | Your machine only |
+| `scripts/rehydrate.py` | Requires a current receipt, then stages and publishes rehydrated draft feedback | Your machine only |
 | `SKILL.md` | The grader. Reads the rubric and the profile, scores the work, drafts the feedback | Local or cloud model |
 | `skills/humanizer/SKILL.md` | The finishing pass that keeps feedback from reading like a chatbot | Local or cloud model |
 
@@ -45,6 +45,12 @@ short version:
   ever loads it.
 - **Redaction fails closed.** A non-zero exit means the batch is not safe to
   send. There is no override flag.
+- **Verification produces the evidence gate.** `_verification.json` binds the
+  exact redacted submissions, drafts, grade records, rubric, calibration
+  profile and pattern reference that passed. Any later edit makes it stale.
+- **Publication is staged.** Rehydration changes the destination only after
+  every draft renders without an unmapped token. `_publication.json` records
+  the receipt digest and output hashes without holding real identities.
 - **Pseudonymization is not anonymization.** "My grandmother's escape from
   Saigon in 1975" names nobody and still identifies its author to anyone who
   knows the class. The warning pass flags passages like that. It does not remove
@@ -156,8 +162,7 @@ python3 scripts/redact.py submissions/essay-2 \
 
 ```
 Read 5 files. Wrote redacted. Map at .grading/maps/essay-2.json.
-  0 names to review, 0 self-identifying passages, 0 bare-name substitutions.
-  See .grading/maps/reviews/essay-2.json.
+  0 names to review, 0 self-identifying passages, 0 bare-name substitutions. See .grading/maps/reviews/essay-2.json.
 ```
 
 Pass `--instructor` with your own name so you are never redacted. Repeat the
@@ -210,15 +215,16 @@ python3 scripts/grade.py status --batch essay-2 --redacted redacted
   STUDENT_04  pending
   STUDENT_05  pending
 
-5 pending, 0 drafted, 0 incomplete, 0 orphaned.
+5 pending, 0 drafted, 0 incomplete, 0 orphaned, 0 verified.
 ```
 
 Grade only what is `pending`. A submission that already has a draft has already
 been graded, and regrading produces a second, different grade with nothing to
 say which one to send. This is also how an interrupted batch resumes.
 
-`orphan` means a draft with no matching source, usually a prior run's output.
-`incomplete` means a draft or a record but not both.
+`orphan` means a draft or grade record with no matching redacted submission,
+usually a prior run's output. `incomplete` means a draft or a record but not
+both.
 
 ### 2.5 Grade each pending submission
 
@@ -235,12 +241,14 @@ For criterion-4 evidence it runs:
 python3 scripts/grade.py density redacted/STUDENT_02.md --json
 ```
 
-```
-STUDENT_02.md: 383 words, 0 watched terms
-  0.0 per 1000 words
-
-This is evidence for the prose criterion. It says nothing about who wrote
-the essay, and must never be used to claim it does.
+```json
+{
+  "words": 383,
+  "count": 0,
+  "per_thousand": 0.0,
+  "by_pattern": {},
+  "examples": []
+}
 ```
 
 ### 2.6 Verify
@@ -254,8 +262,12 @@ python3 scripts/grade.py verify --batch essay-2 --course phil210 \
 
 ```
 STUDENT_01: 0 errors, 0 warnings
-...
-All 5 drafts verified. Offsets written.
+STUDENT_02: 0 errors, 0 warnings
+STUDENT_03: 0 errors, 0 warnings
+STUDENT_04: 0 errors, 0 warnings
+STUDENT_05: 0 errors, 0 warnings
+
+All 5 drafts verified. Offsets and verification receipt written.
 ```
 
 It checks every quote against the source, the arithmetic against itself, the
@@ -269,8 +281,27 @@ so the positions were computed rather than guessed:
 "offset": 383, "line": 12, "length": 257
 ```
 
-Exit 12 means at least one draft failed. Fix it and run again. Do not rehydrate
-a batch that failed verification.
+The same successful run writes `.grading/drafts/essay-2/_verification.json`.
+For this five-submission batch it holds schema `grading-batch-verification/1`
+and 18 artifact entries: three per submission plus the rubric, profile and
+pattern reference. It holds paths, stable tokens and hashes, never source text
+or real identities.
+
+Status now shows the receipt-derived state:
+
+```
+  STUDENT_01  verified
+  STUDENT_02  verified
+  STUDENT_03  verified
+  STUDENT_04  verified
+  STUDENT_05  verified
+
+0 pending, 0 drafted, 0 incomplete, 0 orphaned, 5 verified.
+```
+
+Exit 12 means at least one draft failed. A failed batch writes neither offsets
+nor a receipt. Fix it and run verification again. `--no-write` checks the batch
+but writes neither artifact.
 
 ### 2.7 Look at the outliers
 
@@ -279,15 +310,15 @@ python3 scripts/grade.py consistency --batch essay-2 --redacted redacted
 ```
 
 ```
-5 graded submissions, 11 things to look at.
-  score-outlier: STUDENT_03 scored 15 on 1. Thesis & Theoretical Framing while
-    the batch median was 21. Check the quotes behind it.
-  density-inversion: STUDENT_01 has 31.5 watched terms per 1000 words and scored
-    23 on criterion 4. STUDENT_05 has 2.93 and scored 21. Density is evidence,
-    not proof, so read both before changing either score.
-  reused-sentence: 5 drafts share this sentence: 'come see me in office hours if
-    you want to push this further'. Feedback that repeats verbatim reads as a
-    form letter.
+5 graded submissions, 6 things to look at.
+  reused-sentence: 5 drafts share this sentence: 'and the evidence you chose does real work'. Feedback that repeats verbatim reads as a form letter.
+  reused-sentence: 5 drafts share this sentence: 'come see me in office hours if you want to push this further'. Feedback that repeats verbatim reads as a form letter.
+  reused-sentence: 5 drafts share this sentence: 'give the strongest counterargument a full paragraph not a clause'. Feedback that repeats verbatim reads as a form letter.
+  reused-sentence: 5 drafts share this sentence: 'name the statute or the case rather than describing it'. Feedback that repeats verbatim reads as a form letter.
+  reused-sentence: 5 drafts share this sentence: 'paragraph 2 does the analytical work the thesis promises'. Feedback that repeats verbatim reads as a form letter.
+  reused-sentence: 5 drafts share this sentence: 'you named the mechanism instead of gesturing at it'. Feedback that repeats verbatim reads as a form letter.
+
+These are flags, not failures. An outlier is often a genuinely unusual essay. Read the drafts before changing a score.
 ```
 
 These are flags, not failures — an outlier is often a genuinely unusual essay.
@@ -306,13 +337,39 @@ python3 scripts/rehydrate.py .grading/drafts/essay-2 \
 ```
 
 ```
-Wrote final/essay-2. Every file is a DRAFT pending your sign-off.
+Wrote final/essay-2. Every rehydrated feedback file is a DRAFT pending your sign-off.
 ```
 
-Local only. It fails when a token has no mapping, which is correct: a stray
-`STUDENT_12` pasted into an LMS comment is worth failing the run over.
+Local only. It first revalidates the receipt, then loads the local token map and
+renders all five drafts in a sibling staging directory. A missing, stale or
+malformed receipt, an unmapped token, or a rendering failure exits 5 and leaves
+the destination unchanged.
 
-Everything in `final/` is a draft until you sign it off.
+A legacy batch with no receipt cannot be published. Run verification again to
+produce current evidence for the whole batch.
+
+The successful output contains `STUDENT_01.md` through `STUDENT_05.md` and the
+identity-free `grading-batch-publication/1` marker `_publication.json`. Grade
+records are not copied into the publication.
+
+To replace that exact unchanged publication, run:
+
+```bash
+python3 scripts/rehydrate.py .grading/drafts/essay-2 \
+  --map .grading/maps/essay-2.json \
+  --out final/essay-2 \
+  --force
+```
+
+Safe force refuses a missing or unknown marker, another grading batch, stale
+receipt lineage, changed or missing output and unrelated files. It builds the
+complete replacement first, moves the prior publication to a recognized
+backup, installs the replacement, then removes the backup. A later run recovers
+supported interrupted states. The destination can be briefly absent during
+this portable swap, but it is never exposed as a partly populated new batch.
+
+Every rehydrated feedback file in `final/` remains a draft until you sign it
+off. `_publication.json` is lifecycle evidence, not feedback.
 
 ## The optional hook
 
@@ -342,13 +399,13 @@ guard that blocks every tool call would also block the calls needed to fix it.
 | Command | Purpose |
 | --- | --- |
 | `redact.py SOURCE --roster R --batch B` | Tokenize identity, write the map and review file |
-| `rehydrate.py DRAFTS --map M --out O` | Put real names back |
+| `rehydrate.py DRAFTS --map M --out O [--force]` | Require a current receipt, then stage and publish rehydrated draft feedback |
 | `calibrate.py inputs --rubric R --samples D --roster C --holdout N --out F` | Build the name-free calibration packet |
 | `calibrate.py holdout --record J --draft M --sample S` | Report the holdout delta |
 | `grade.py profile --course C --rubric R` | Confirm a profile exists and the rubric has not drifted |
 | `grade.py status --batch B` | Show what still needs grading |
 | `grade.py density FILE [--json]` | Count watched AI terms |
-| `grade.py verify --batch B --course C --rubric R` | Check every draft; write quote offsets |
+| `grade.py verify --batch B --course C --rubric R` | Check every draft; write offsets and the verification receipt |
 | `grade.py consistency --batch B [--fail-on-findings]` | Flag outliers across the batch |
 
 ### Exit codes
@@ -359,6 +416,7 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 | --- | --- | --- |
 | 0 | both | Clean |
 | 2, 3, 4, 5 | `redact.py` | Unmatched roster entry / unreviewed candidates / unreadable file / destination not empty |
+| 5 | `rehydrate.py` | Receipt, map, rendering, token mapping or publication failure |
 | 10 | `grade.py` | No profile for this course |
 | 11 | `grade.py` | The rubric drifted since calibration |
 | 12 | `grade.py` | A draft failed verification |

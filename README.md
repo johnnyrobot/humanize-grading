@@ -14,6 +14,15 @@ Grader keeps student identity out of a cloud model's context. It redacts names,
 IDs, emails, filenames, and document metadata to stable tokens on your machine,
 grades the redacted copy, and reattaches real names locally at the end.
 
+Verification covers the whole grading batch and writes an identity-free receipt
+that binds the inputs and drafts that passed. Rehydration refuses a legacy batch
+with no receipt, a stale receipt, or a malformed receipt. It stages every draft
+before publishing and leaves the destination unchanged if staging fails. Every
+rehydrated feedback file remains a draft pending instructor sign-off. `--force`
+only replaces an unchanged publication recognized by its identity-free marker;
+it refuses changed, unrelated, or unrecognized output and uses a recoverable
+staged swap.
+
 ```
 /grade calibrate --course phil210      # learn the instructor's standards
 /grade submissions/essay-3 --course phil210
@@ -195,7 +204,7 @@ Humanizer follows the sample's rhythm, word choice, punctuation, and deliberate 
 <details>
 <summary>Show release notes</summary>
 
-- **Next release** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes or safely replaces rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory.
+- **3.2.0** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes or safely replaces rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.
 - **3.0.0** — Grader becomes the package. Humanizer moves to `skills/humanizer/` and the 35 patterns move to `references/ai-patterns.md`.
 - **2.11.2** - Removed the plugin symlink and separate Claude Desktop package. Current Claude Code loads the root `SKILL.md` directly, so GitHub's source ZIP now works in Claude Desktop. No change to the 35 patterns.

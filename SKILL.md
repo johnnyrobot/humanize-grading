@@ -6,7 +6,7 @@ description: |
   Redacts student identity before any work reaches a cloud model.
 license: MIT
 metadata:
-  version: "3.1.0"
+  version: "3.2.0"
 ---
 
 # Grader
@@ -216,6 +216,8 @@ Local only. Rehydration first requires and revalidates the verification receipt,
 then restores identities through the local token map. It prepares every draft in
 staging before publishing anything. A missing, stale, or malformed receipt, a
 token with no mapping, or a rendering failure leaves the destination unchanged.
+It refuses a legacy batch with no receipt; run verification again to produce
+current whole-batch evidence.
 Successful publication includes the identity-free `_publication.json` marker.
 Pass `--force` only to replace an unchanged publication recognized by that marker.
 Safe force stages the complete replacement, moves the prior publication to a
