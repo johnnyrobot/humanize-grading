@@ -1,5 +1,14 @@
 # Humanizer Grading
 
+> **Best with fully local AI:** Humanizer Grading works best when model
+> inference and agent execution both happen on an instructor-controlled
+> machine, without sending prompts or files to a remote model or telemetry
+> service. Redaction stays on by default even in this fully local setup. A cloud
+> model or cloud agent may be used only through the mandatory redaction path
+> and when institutional policy permits it. This repository cannot verify the
+> privacy behavior of a third-party model or agent runtime; the instructor must
+> check that runtime separately.
+
 Humanizer Grading is a package of agent skills and local Python tools. It is
 meant to be operated by an AI agent working with an instructor. It is not a
 hosted grading service, a standalone desktop app, or an autonomous grade

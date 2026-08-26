@@ -15,6 +15,13 @@ Score student work against the instructor's rubric. Draft feedback that sounds
 like the instructor, not like a chatbot. Keep student identity out of a cloud
 model's context.
 
+Prefer a fully local model and agent when they are available. Fully local means
+model inference and agent execution happen on an instructor-controlled machine
+without sending prompts or files to a remote model or telemetry service.
+Redaction remains on by default. A cloud model or agent must use the mandatory
+redaction path below and follow institutional policy. The instructor must check
+the privacy behavior of any third-party runtime separately.
+
 ## The gate, before anything else
 
 Ask this before reading any file, every run:
