@@ -203,6 +203,7 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
                 "--rubric", str(phil210 / "grading_rubric.md"),
                 "--profile", str(profile_path),
                 "--redacted", str(redacted),
+                "--brief", str(brief),
                 "--map", str(tmp_path / "maps" / "essay-2.json"),
                 "--out", str(final),
             ],

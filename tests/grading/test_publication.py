@@ -154,6 +154,8 @@ def _rehydrate_command(
         str(root / "profiles" / "phil210.md"),
         "--redacted",
         str(redacted),
+        "--brief",
+        str(root / "assignments" / "essay-2.md"),
         "--map",
         str(map_path),
         "--out",
@@ -869,6 +871,31 @@ def test_rehydrate_cli_publishes_through_verified_batch(
     assert (target / "_publication.json").is_file()
 
 
+def test_rehydrate_cli_rejects_an_explicit_context_without_a_brief_before_map_load(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    target = tmp_path / "final"
+    command = _rehydrate_command(
+        drafts,
+        tmp_path / "missing-map.json",
+        target,
+        redacted,
+        root,
+        phil210 / "grading_rubric.md",
+    )
+    brief_index = command.index("--brief")
+    del command[brief_index : brief_index + 2]
+
+    result = subprocess.run(command, capture_output=True, text=True)
+
+    assert result.returncode == 5
+    assert "context-incomplete" in result.stderr
+    assert "brief" in result.stderr
+    assert "map-unreadable" not in result.stderr
+    assert not target.exists()
+
+
 def test_rehydrate_cli_safe_force_replaces_recognized_publication(
     tmp_path, phil210, approved_brief
 ):
@@ -903,7 +930,7 @@ def test_rehydrate_cli_safe_force_replaces_recognized_publication(
     assert (target / "_publication.json").is_file()
 
 
-def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
+def test_rehydrate_cli_recovers_schema_2_receipt_context_and_publishes(
     tmp_path, phil210, approved_brief
 ):
     redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
@@ -958,6 +985,93 @@ def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert (target / "_publication.json").is_file()
+
+
+def test_rehydrate_cli_refuses_schema_1_receipt_context_without_publishing(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+    receipt = drafts / "_verification.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["schema"] = "grading-batch-verification/1"
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+    token_map = _matching_map(redacted)
+    map_path = tmp_path / "maps" / "essay-2.json"
+    token_map.save(map_path)
+    target = tmp_path / "final"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path("scripts/rehydrate.py").resolve()),
+            str(drafts),
+            "--map",
+            str(map_path),
+            "--out",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+        cwd=tmp_path,
+    )
+
+    assert result.returncode == 5
+    assert "predates assignment briefing" in result.stderr
+    assert not target.exists()
+
+
+def test_rehydrate_cli_blocks_publication_when_the_approved_brief_changes(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+    brief = root / "assignments" / "essay-2.md"
+    brief.write_text(
+        brief.read_text(encoding="utf-8") + "\nChanged.\n",
+        encoding="utf-8",
+    )
+    token_map = _matching_map(redacted)
+    map_path = tmp_path / "maps" / "essay-2.json"
+    token_map.save(map_path)
+    target = tmp_path / "final"
+
+    result = subprocess.run(
+        _rehydrate_command(
+            drafts,
+            map_path,
+            target,
+            redacted,
+            root,
+            phil210 / "grading_rubric.md",
+        ),
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 5
+    assert "stale-verification-receipt" in result.stderr
+    assert not target.exists()
 
 
 def test_rehydrate_cli_requires_receipt_before_loading_map(tmp_path):

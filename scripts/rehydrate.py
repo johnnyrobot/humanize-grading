@@ -4,7 +4,8 @@
 Usage:
     python3 scripts/rehydrate.py DRAFTS --batch essay-3 --course phil210 \
       --rubric rubric.md --profile .grading/profiles/phil210.md \
-      --redacted redacted --map .grading/maps/essay-3.json --out final
+      --redacted redacted --brief .grading/assignments/essay-3.md \
+      --map .grading/maps/essay-3.json --out final
 
 Requires a current verification receipt and fails before publication when a
 token has no mapping or a draft cannot be rendered. The destination changes
@@ -26,7 +27,6 @@ from scripts.grading.batch import (  # noqa: E402
     VerifiedBatch,
     VerificationInputs,
 )
-from scripts.grading.brief import brief_path  # noqa: E402
 from scripts.grading.density import PATTERNS_PATH  # noqa: E402
 from scripts.path_safety import read_bytes_limited, require_component  # noqa: E402
 from scripts.redaction.rehydrate import rehydrate_text  # noqa: E402
@@ -96,6 +96,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rubric", type=Path)
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--redacted", type=Path)
+    parser.add_argument("--brief", type=Path)
     parser.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("final"))
@@ -106,13 +107,20 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    supplied = (args.batch, args.course, args.rubric, args.profile, args.redacted)
+    supplied = (
+        args.batch,
+        args.course,
+        args.rubric,
+        args.profile,
+        args.redacted,
+        args.brief,
+    )
     if any(value is not None for value in supplied) and not all(
         value is not None for value in supplied
     ):
         print(
-            "  ERROR context-incomplete: pass batch, course, rubric, profile and "
-            "redacted together, or omit all five for the legacy receipt context.",
+            "  ERROR context-incomplete: pass batch, course, rubric, profile, "
+            "redacted and brief together, or omit all six for the receipt context.",
             file=sys.stderr,
         )
         return 5
@@ -128,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
                 rubric=args.rubric,
                 profile=args.profile,
                 patterns=args.patterns,
-                brief=brief_path(args.profile.parent.parent, args.batch),
+                brief=args.brief,
             )
         else:
             paths, inputs = VerifiedBatch.context_from_receipt(args.drafts)
