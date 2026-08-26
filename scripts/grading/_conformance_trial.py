@@ -508,6 +508,29 @@ def attest_package(
     }
 
 
+def trusted_package_attestation(package_root: Path) -> dict[str, object]:
+    """Build an expected package byte set from a trusted external root."""
+    candidate = package_root.expanduser()
+    if candidate.is_symlink():
+        raise ConformanceError("The trusted package root must not be a link.")
+    root = candidate.resolve()
+    if not root.is_dir():
+        raise ConformanceError("The trusted package root must be one directory.")
+    root_fd = os.open(root, _directory_flags())
+    try:
+        files = tuple(
+            _current_package_file(root_fd, relative)
+            for relative in _package_paths(root)
+        )
+    except (OSError, ConformanceError) as error:
+        raise ConformanceError("Cannot attest the trusted package root.") from error
+    finally:
+        os.close(root_fd)
+    package = _package_document(files, _repository_revision(root))
+    package["trusted_root"] = str(root)
+    return package
+
+
 def refuse_workspace_links(
     workspace: Path,
     *,
@@ -626,11 +649,21 @@ def _artifact_entry(
 ) -> dict[str, object]:
     relative = _report_path(path.relative_to(workspace).as_posix(), identities)
     info = path.lstat()
+    kind = (
+        "file"
+        if stat.S_ISREG(info.st_mode)
+        else "directory"
+        if stat.S_ISDIR(info.st_mode)
+        else "symlink"
+        if stat.S_ISLNK(info.st_mode)
+        else "other"
+    )
     result: dict[str, object] = {
         "path": relative,
         "bytes": info.st_size,
         "mode": f"{stat.S_IMODE(info.st_mode):04o}",
         "regular": stat.S_ISREG(info.st_mode),
+        "kind": kind,
     }
     if content and result["regular"] and info.st_size <= ARTIFACT_LIMIT:
         try:
@@ -669,21 +702,32 @@ def observed_artifacts(
     workspace: Path, identities: tuple[str, ...] | None = None
 ) -> tuple[dict[str, object], ...]:
     roots = (TRIAL_BRIEF, TRIAL_REDACTED, TRIAL_DRAFTS, TRIAL_PUBLICATION)
-    paths: set[Path] = set()
+    paths: dict[Path, bool] = {}
     for relative in roots:
         root = workspace / relative
-        if root.is_symlink() or root.is_file():
-            paths.add(root)
-        elif root.is_dir():
+        try:
+            root_state = root.lstat()
+        except OSError:
+            continue
+        if stat.S_ISDIR(root_state.st_mode):
+            paths[root] = False
             for current, directories, files in os.walk(root, followlinks=False):
                 base = Path(current)
                 for name in directories + files:
                     path = base / name
-                    if path.is_symlink() or path.is_file():
-                        paths.add(path)
+                    if Path(name).suffix.lower() in {".md", ".json"}:
+                        paths[path] = True
+        else:
+            paths[root] = True
     trusted = identities if identities is not None else identity_values(workspace)
     return tuple(
-        _artifact_entry(workspace, path, identities=trusted) for path in sorted(paths)
+        _artifact_entry(
+            workspace,
+            path,
+            content=paths[path],
+            identities=trusted,
+        )
+        for path in sorted(paths)
     )
 
 
@@ -728,9 +772,8 @@ def _identity_artifact_paths(
         ):
             base = Path(current)
             for name in directories + files:
-                path = base / name
-                if path.is_symlink() or path.is_file():
-                    paths.add(path)
+                if Path(name).suffix.lower() in {".md", ".json"}:
+                    paths.add(base / name)
     return tuple(sorted(paths)), tuple(sorted(unreadable))
 
 
@@ -755,8 +798,11 @@ def identity_scan(
             except OSError:
                 findings[relative] = "artifact-unreadable"
                 continue
-            if stat.S_ISLNK(state.st_mode) or not stat.S_ISREG(state.st_mode):
+            if stat.S_ISLNK(state.st_mode):
                 findings[relative] = "artifact-linked"
+                continue
+            if not stat.S_ISREG(state.st_mode):
+                findings[relative] = "artifact-nonregular"
                 continue
             if state.st_size > ARTIFACT_LIMIT:
                 findings[relative] = "artifact-too-large"

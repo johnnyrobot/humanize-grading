@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -12,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+import scripts.grading._conformance_run as conformance_run
 from scripts.grading.brief import ANSWER_REQUIRED, approve_brief, prepare_brief
 from scripts.grading.conformance import (
     ConformanceError,
@@ -364,6 +366,39 @@ def test_audit_reports_unreadable_identity_artifact(tmp_path):
     }
 
 
+def test_audit_fails_closed_on_fifo_without_opening_it(tmp_path):
+    workspace = _trial(tmp_path)
+    artifact = workspace / "redacted/STUDENT_01.md"
+    artifact.parent.mkdir()
+    os.mkfifo(artifact)
+
+    started = time.monotonic()
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert time.monotonic() - started < 2
+    assert {(item["path"], item["code"]) for item in report.artifact_findings} == {
+        ("redacted/STUDENT_01.md", "artifact-nonregular")
+    }
+
+
+def test_audit_fails_closed_on_directory_named_as_draft_artifact(tmp_path):
+    workspace = _trial(tmp_path)
+    artifact = workspace / "drafts/essay-2/STUDENT_01.md"
+    artifact.mkdir(parents=True)
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert {(item["path"], item["code"]) for item in report.artifact_findings} == {
+        ("drafts/essay-2/STUDENT_01.md", "artifact-nonregular")
+    }
+    observed = next(
+        item
+        for item in report.artifacts
+        if item["path"] == artifact.relative_to(workspace).as_posix()
+    )
+    assert observed["regular"] is False
+
+
 def test_audit_reports_trace_unverified_when_absent(tmp_path):
     report = audit_workspace(_trial(tmp_path), runtime="manual")
 
@@ -488,6 +523,83 @@ def test_audit_keeps_out_of_order_next_commands_unverified(tmp_path):
     assert report.trace.status == "unverified"
 
 
+def test_trace_next_read_next_is_unverified_without_work_command(tmp_path):
+    workspace = _trial(tmp_path)
+    next_event = _trace_event(
+        "grading",
+        "command",
+        argv=["python3", "scripts/grade.py", "next", "--json"],
+        exit_code=0,
+    )
+    trace = _write_trace(
+        workspace,
+        "next-read-next",
+        [
+            next_event,
+            _trace_event("grading", "read", path="SKILL.md"),
+            next_event,
+        ],
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "unverified"
+
+
+def test_trace_does_not_match_loose_next_argv_membership(tmp_path):
+    workspace = _trial(tmp_path)
+    loose_next = _trace_event(
+        "grading",
+        "command",
+        argv=["python3", "scripts/grade.py", "status", "next", "--json"],
+        exit_code=0,
+    )
+    trace = _write_trace(
+        workspace,
+        "loose-next",
+        [
+            loose_next,
+            _trace_event(
+                "grading",
+                "command",
+                argv=["python3", "scripts/grade.py", "status"],
+                exit_code=0,
+            ),
+            _trace_event("grading", "read", path="SKILL.md"),
+            loose_next,
+        ],
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "unverified"
+
+
+def test_trace_passes_with_exact_next_and_successful_work_command(tmp_path):
+    workspace = _trial(tmp_path)
+    trace = _write_trace(
+        workspace,
+        "exact-next",
+        _ordered_phase_trace("grading", "SKILL.md"),
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "passed"
+
+
 def test_audit_keeps_trace_unverified_when_a_requested_phase_trace_is_missing(
     tmp_path,
 ):
@@ -595,6 +707,28 @@ def test_audit_rejects_phase_overshoot_artifacts(tmp_path):
     )
 
 
+@pytest.mark.parametrize("relative", ["redacted", "drafts/essay-2", "final"])
+def test_audit_rejects_empty_later_stage_directory_overshoot(tmp_path, relative):
+    workspace = _trial(tmp_path)
+    _approve_trial_brief(workspace)
+    (workspace / relative).mkdir(parents=True)
+
+    report = audit_workspace(
+        workspace,
+        runtime="manual",
+        expected_phase="briefing",
+    )
+
+    assert report.passed is False
+    assert report.lifecycle["phase"]["findings"] == (
+        f"later-stage-artifact:{relative}",
+    )
+    assert any(
+        item["path"] == relative and item["kind"] == "directory"
+        for item in report.artifacts
+    )
+
+
 def test_audit_records_exact_package_attestation(tmp_path):
     workspace = _trial(tmp_path)
 
@@ -607,6 +741,62 @@ def test_audit_records_exact_package_attestation(tmp_path):
         item["path"] == "scripts/grade.py" and len(item["sha256"]) == 64
         for item in report.package["files"]
     )
+
+
+def _rewrite_workspace_marker_for_package_mutation(workspace: Path, relative: str):
+    marker_path = workspace / ".grading/conformance-trial.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    package_path = workspace / relative
+    package_files = marker["package"]["files"]
+    item = next(item for item in package_files if item["path"] == relative)
+    data = package_path.read_bytes()
+    item.update(
+        {
+            "bytes": len(data),
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "mode": f"{os.stat(package_path, follow_symlinks=False).st_mode & 0o777:04o}",
+        }
+    )
+    canonical = json.dumps(
+        tuple(sorted(package_files, key=lambda entry: entry["path"])),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    marker["package"]["digest"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    marker_path.write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def test_audit_ignores_rewritten_workspace_marker_as_package_baseline(tmp_path):
+    workspace = _trial(tmp_path)
+    package_path = workspace / "scripts/grade.py"
+    package_path.write_bytes(package_path.read_bytes() + b"\n# marker rewrite\n")
+    _rewrite_workspace_marker_for_package_mutation(workspace, "scripts/grade.py")
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.package["status"] == "failed"
+    assert report.package["findings"] == ("package-changed:scripts/grade.py",)
+    assert report.package["marker_matches"] is False
+
+
+def test_audit_uses_explicit_different_trusted_package_root(tmp_path):
+    workspace = _trial(tmp_path / "workspace")
+    trusted_root = _trial(tmp_path / "trusted")
+    trusted_grade = trusted_root / "scripts/grade.py"
+    trusted_grade.write_bytes(trusted_grade.read_bytes() + b"\n# trusted variant\n")
+
+    report = audit_workspace(
+        workspace,
+        runtime="manual",
+        package_root=trusted_root,
+    )
+
+    assert report.package["trusted_root"] == str(trusted_root)
+    assert report.package["status"] == "failed"
+    assert report.package["findings"] == ("package-changed:scripts/grade.py",)
 
 
 def test_run_fails_when_agent_changes_immutable_package_code(tmp_path):
@@ -720,6 +910,26 @@ raise SystemExit(exit_code)
         encoding="utf-8",
     )
     return script
+
+
+def test_run_refuses_non_posix_platform_before_trial_creation(tmp_path, monkeypatch):
+    adapter = _fake_agent(tmp_path)
+    command = json.dumps(
+        [sys.executable, str(adapter), "literal", "0", "7", "{prompt}"]
+    )
+    workspace = tmp_path / "unsupported-run"
+    monkeypatch.setattr(conformance_run, "POSIX_PROCESS_GROUPS", False, raising=False)
+
+    with pytest.raises(ConformanceError, match="POSIX"):
+        run_trial(
+            REPO_ROOT,
+            runtime="unsupported",
+            command=parse_command_json(command),
+            timeout_seconds=5,
+            workspace=workspace,
+        )
+
+    assert not workspace.exists()
 
 
 def test_run_is_shell_free_bounded_and_stops_after_first_failed_phase(tmp_path):
@@ -949,6 +1159,8 @@ def test_cli_run_and_audit_print_report_paths_and_concise_status(tmp_path):
             "manual",
             "--workspace",
             str(workspace),
+            "--package-root",
+            str(REPO_ROOT),
         ],
         cwd=REPO_ROOT,
         capture_output=True,

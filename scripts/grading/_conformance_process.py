@@ -7,11 +7,13 @@ import signal
 import subprocess
 import time
 
+POSIX_PROCESS_GROUPS = os.name == "posix"
+
 
 def popen_group_options() -> dict[str, object]:
-    if os.name == "posix":
+    if POSIX_PROCESS_GROUPS:
         return {"start_new_session": True}
-    return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {}
 
 
 def _process_group_exists(process: subprocess.Popen) -> bool:
@@ -46,10 +48,7 @@ def terminate_process_group(process: subprocess.Popen) -> None:
             except (ProcessLookupError, PermissionError):
                 pass
     elif process.poll() is None:
-        try:
-            process.send_signal(signal.CTRL_BREAK_EVENT)
-        except (AttributeError, OSError):
-            process.terminate()
+        process.terminate()
         try:
             process.wait(timeout=0.25)
         except subprocess.TimeoutExpired:

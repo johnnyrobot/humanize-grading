@@ -52,6 +52,7 @@ from scripts.grading._conformance_trial import (
     private_write,
     read_trial_marker,
     refuse_workspace_links,
+    trusted_package_attestation,
     validate_synthetic_inputs,
 )
 from scripts.grading.batch import (
@@ -63,6 +64,9 @@ from scripts.grading.batch import (
 from scripts.grading.brief import check_brief
 from scripts.path_safety import read_bytes_limited
 from scripts.redaction.manifest import RedactionManifest
+
+
+DEFAULT_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _normalize_trace_path(
@@ -124,11 +128,11 @@ def _default_trace_phase(path: Path) -> str:
 
 
 def _is_successful_next(argv: list[str], exit_code: int) -> bool:
-    return bool(
-        exit_code == 0
-        and any(item.endswith("scripts/grade.py") for item in argv)
-        and "next" in argv
-        and "--json" in argv
+    if exit_code != 0 or "--json" not in argv:
+        return False
+    return any(
+        item.endswith("scripts/grade.py") and argv[index + 1] == "next"
+        for index, item in enumerate(argv[:-1])
     )
 
 
@@ -218,7 +222,6 @@ def audit_trace(
                         continue
                     if kind == "read":
                         reads += 1
-                        phase_work[event_phase].append(events)
                         relative = _normalize_trace_path(
                             workspace, event.get("path"), identities
                         )
@@ -242,7 +245,7 @@ def audit_trace(
                         else:
                             is_next = _is_successful_next(argv, int(event["exit_code"]))
                             phase_commands[event_phase].append((is_next, events))
-                            if not is_next:
+                            if not is_next and int(event["exit_code"]) == 0:
                                 phase_work[event_phase].append(events)
                     else:
                         findings.add("unknown-trace-event")
@@ -451,15 +454,29 @@ def _phase_findings(
 ) -> tuple[str, ...]:
     if expected_phase not in {"briefing", "redaction", "grading"}:
         raise ConformanceError("The expected conformance phase is unknown.")
-    later_prefixes = {
-        "briefing": ("redacted/", "drafts/", "final/"),
-        "redaction": ("drafts/", "final/"),
+    later_roots = {
+        "briefing": ("redacted", "drafts/essay-2", "final"),
+        "redaction": ("drafts/essay-2", "final"),
         "grading": (),
     }[expected_phase]
+    later = [
+        item
+        for item in artifacts
+        if any(
+            str(item["path"]) == root or str(item["path"]).startswith(root + "/")
+            for root in later_roots
+        )
+    ]
     findings = {
         f"later-stage-artifact:{item['path']}"
-        for item in artifacts
-        if any(str(item["path"]).startswith(prefix) for prefix in later_prefixes)
+        for item in later
+        if not (
+            item.get("kind") == "directory"
+            and any(
+                str(other["path"]).startswith(str(item["path"]) + "/")
+                for other in later
+            )
+        )
     }
     if expected_phase == "briefing":
         findings.update(
@@ -535,6 +552,7 @@ def audit_workspace(
     phases: tuple[TrialPhase, ...] = (),
     persist: bool = True,
     expected_package: dict[str, object] | None = None,
+    package_root: Path | None = None,
 ) -> ConformanceReport:
     """Audit one synthetic workspace without launching an agent."""
     if not RUNTIME_PATTERN.fullmatch(runtime):
@@ -546,9 +564,14 @@ def audit_workspace(
     if not root.is_dir():
         raise ConformanceError("The trial workspace must be one directory.")
     marker = read_trial_marker(root)
-    package_baseline = (
-        expected_package if expected_package is not None else dict(marker["package"])
-    )
+    if expected_package is not None:
+        package_baseline = expected_package
+        trusted_root = "run-baseline"
+    else:
+        package_baseline = trusted_package_attestation(
+            package_root if package_root is not None else DEFAULT_PACKAGE_ROOT
+        )
+        trusted_root = str(package_baseline["trusted_root"])
     package_paths = {
         str(item["path"])
         for item in package_baseline.get("files", ())
@@ -587,6 +610,11 @@ def audit_workspace(
     package = attest_package(
         root,
         package_baseline,
+    )
+    package["trusted_root"] = trusted_root
+    package["marker_digest"] = str(marker["package"].get("digest", ""))
+    package["marker_matches"] = package["marker_digest"] == package_baseline.get(
+        "digest"
     )
     if package["status"] == "passed":
         lifecycle = _lifecycle(root)

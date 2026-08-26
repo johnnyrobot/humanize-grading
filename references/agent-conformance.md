@@ -17,6 +17,11 @@ python3 scripts/agent_conformance.py run \
   --timeout 300
 ```
 
+Callable-agent `run` currently requires POSIX process groups. It fails before
+creating or launching a trial on other platforms because the Python standard
+library cannot guarantee descendant cleanup there after a parent exits.
+Artifact-only `audit` remains portable.
+
 `--command-json` must be a JSON array of command arguments, not shell text. It
 must contain `{prompt}` exactly once. `{workspace}` is optional. The harness
 replaces only those two placeholders and launches the result with
@@ -41,7 +46,8 @@ session:
 ```bash
 python3 scripts/agent_conformance.py audit \
   --runtime bionic-gemma \
-  --workspace /tmp/humanize-grading-bionic-e2e
+  --workspace /tmp/humanize-grading-bionic-e2e \
+  --package-root /path/to/trusted/humanize-grading
 ```
 
 To create the reviewed package and synthetic input without launching an
@@ -79,10 +85,13 @@ to `grading`. The trace is limited to 10,000 events and 1 MiB per line. Command
 events use the same argument count and item limits as adapters.
 
 A passing phase trace needs successful `grade.py next --json` command events
-before and after at least one phase-work command. The first command must be the
-opening `next`; the last command must be the closing `next`. Read-only,
-partial, missing, or out-of-order command evidence is `UNVERIFIED`. The
-10,000-event limit is global across every supplied phase file, not per file.
+before and after at least one successful non-next command. The grade script
+argument must be immediately followed by `next`, and the argv must contain
+`--json`. The first command must be the opening `next`; the last command must
+be the closing `next`. Reads do not count as phase work. Read-only, partial,
+missing, loosely matched, or out-of-order command evidence is `UNVERIFIED`.
+The 10,000-event limit is global across every supplied phase file, not per
+file.
 
 Read permissions are phase-specific. The grading phase may read the skill,
 references, scripts, rubric, current profile, approved brief, redacted source,
@@ -109,10 +118,17 @@ dirty. Package files are rechecked before and after every phase. Any changed,
 missing, linked, or unexpected package path fails before lifecycle code from
 the trial is run.
 
+Manual audit never trusts the package manifest stored inside the workspace as
+its baseline. It rebuilds the expected descriptor-bound manifest from
+`--package-root`; when that option is omitted, the executing package root is
+the default. The workspace marker is reported only as evidence. Run audit from
+a separate trusted checkout, not from the workspace being audited.
+
 The identity scan also fails closed. A linked, unreadable, oversized, invalid
 UTF-8, or otherwise unbounded redacted or draft artifact becomes a sanitized
 path finding and fails the deterministic audit. A phase checkpoint rejects
-artifacts that belong to a later phase.
+artifacts and relevant directories that belong to a later phase, including an
+empty later-stage directory.
 
 Reports use schema `grading-agent-conformance/1`. They contain sanitized
 arguments, elapsed time, exit and timeout state, bounded log hashes, artifact

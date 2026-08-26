@@ -41,6 +41,12 @@ def build_parser() -> argparse.ArgumentParser:
     audit.add_argument("--runtime", required=True)
     audit.add_argument("--workspace", required=True, type=Path)
     audit.add_argument("--trace", action="append", type=Path, default=[])
+    audit.add_argument(
+        "--package-root",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent,
+        help="Trusted package root used as the immutable audit baseline",
+    )
     return parser
 
 
@@ -67,6 +73,7 @@ def main(argv: list[str] | None = None) -> int:
                 args.workspace,
                 runtime=args.runtime,
                 trace_paths=tuple(args.trace),
+                package_root=args.package_root,
             )
     except (ConformanceError, OSError, UnicodeError, ValueError) as error:
         print(str(error), file=sys.stderr)

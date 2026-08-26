@@ -28,6 +28,7 @@ from scripts.grading._conformance_model import (
     utc_now,
 )
 from scripts.grading._conformance_process import (
+    POSIX_PROCESS_GROUPS,
     popen_group_options,
     terminate_process_group,
 )
@@ -293,6 +294,11 @@ def run_trial(
     workspace: Path | None = None,
 ) -> ConformanceReport:
     """Create a synthetic trial and run its three agent phases shell-free."""
+    if not POSIX_PROCESS_GROUPS:
+        raise ConformanceError(
+            "Callable-agent run requires POSIX process groups. Use audit on this "
+            "platform."
+        )
     if not RUNTIME_PATTERN.fullmatch(runtime):
         raise ConformanceError("The runtime label must be one short safe name.")
     if (
