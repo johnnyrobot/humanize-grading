@@ -204,7 +204,7 @@ Humanizer follows the sample's rhythm, word choice, punctuation, and deliberate 
 <details>
 <summary>Show release notes</summary>
 
-- **3.2.0** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes or safely replaces rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory.
+- **3.2.0** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes or safely replaces rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.
 - **3.0.0** — Grader becomes the package. Humanizer moves to `skills/humanizer/` and the 35 patterns move to `references/ai-patterns.md`.
 - **2.11.2** - Removed the plugin symlink and separate Claude Desktop package. Current Claude Code loads the root `SKILL.md` directly, so GitHub's source ZIP now works in Claude Desktop. No change to the 35 patterns.
@@ -240,13 +240,18 @@ MIT
 
 ## Installation
 
-Install Humanizer with the Skills CLI:
+Install Grader and Humanizer with the Skills CLI:
 
 ```bash
-npx skills add blader/humanizer --global
+npx skills add blader/humanizer --full-depth --global
 ```
 
-Leave off `--global` to install Humanizer only in the current project. Add `--agent <name>` or `--agent '*'` to choose which agents receive it, then reload their skills.
+The root Grader skill otherwise shadows the nested Humanizer skill during
+discovery, so this two-skill package requires `--full-depth`. Leave off
+`--global` to install the skills only in the current project. Add
+`--skill grader` or `--skill humanizer` to install one of them. Add
+`--agent <name>` or `--agent '*'` to choose which agents receive them, then
+reload their skills.
 
 Claude Code 2.1.142 or newer can install the plugin instead:
 
@@ -259,4 +264,5 @@ The plugin command is `/humanizer:humanizer`.
 
 In Claude Desktop, download this repository as a ZIP and upload it as a skill.
 
-For a manual install, copy `SKILL.md` into the agent's skill folder.
+For a manual install, keep the repository layout and load both `SKILL.md` and
+`skills/humanizer/SKILL.md` so they can share the reference files.
