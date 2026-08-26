@@ -10,6 +10,9 @@
 .scratch/grading-batch-lifecycle/issues/07-contract-legacy-batch-interface.md
 .scratch/grading-batch-lifecycle/issues/08-ship-and-verify-version-3-2-0.md
 .scratch/grading-batch-lifecycle/spec.md
+.superpowers/sdd/.gitignore
+.superpowers/sdd/2026-08-26-assignment-briefing/progress.md
+.superpowers/sdd/2026-08-26-assignment-briefing/task-1-brief.md
 AGENTS.md
 CONTEXT.md
 LICENSE
@@ -24,7 +27,9 @@ docs/agents/triage-labels.md
 docs/superpowers/decisions-redaction-foundation.md
 docs/superpowers/plans/2026-08-23-redaction-foundation.md
 docs/superpowers/plans/2026-08-24-voice-calibrated-grading.md
+docs/superpowers/plans/2026-08-26-assignment-briefing.md
 docs/superpowers/specs/2026-08-23-voice-calibrated-grading-design.md
+docs/superpowers/specs/2026-08-26-assignment-briefing-design.md
 docs/using-the-grader.md
 hooks/block-raw-reads.json
 hooks/block_raw_reads.py
@@ -38,6 +43,7 @@ scripts/calibrate.py
 scripts/grade.py
 scripts/grading/__init__.py
 scripts/grading/batch.py
+scripts/grading/brief.py
 scripts/grading/consistency.py
 scripts/grading/density.py
 scripts/grading/holdout.py
@@ -77,6 +83,7 @@ tests/fixtures/phil210/ungraded/paper_7_ungraded_ai_healthcare_slop.md
 tests/fixtures/phil210/ungraded/paper_8_ungraded_agricultural_right_to_repair.md
 tests/fixtures/phil210/ungraded/paper_9_ungraded_algorithmic_rent_fixing.md
 tests/grading/test_batch.py
+tests/grading/test_brief.py
 tests/grading/test_consistency.py
 tests/grading/test_density.py
 tests/grading/test_end_to_end.py
