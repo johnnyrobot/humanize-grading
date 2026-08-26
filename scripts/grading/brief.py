@@ -92,7 +92,7 @@ def prepare_brief(
         body_sha256="",
         approved_at="",
         approval="",
-        body=_draft_body(batch),
+        body=_draft_body(batch, mode),
     )
     _create_private_text(path, text)
     return _parse_text(path, text)
@@ -179,7 +179,7 @@ def _load(path: Path) -> AssignmentBrief:
 def _parse_text(path: Path, text: str) -> AssignmentBrief:
     metadata, body = _split_front_matter(text)
     _validate_metadata(metadata)
-    _validate_body(body)
+    _validate_body(body, metadata["mode"])
     return AssignmentBrief(
         path=path,
         batch=metadata["batch"],
@@ -248,13 +248,28 @@ def _validate_metadata(metadata: dict[str, str]) -> None:
             _validate_timestamp(metadata["approved_at"])
 
 
-def _validate_body(body: str) -> None:
+def _validate_body(body: str, mode: str) -> None:
     headings = set(_HEADING.findall(body))
     missing = [heading for heading in REQUIRED_HEADINGS if heading not in headings]
     if missing:
         raise BriefError(
             "The assignment brief is missing headings: " + ", ".join(missing) + "."
         )
+    boundaries = _section_body(body, "Boundaries")
+    host_modes = re.findall(r"^Host mode: (local|cloud)$", boundaries, re.MULTILINE)
+    if host_modes != [mode]:
+        raise BriefError(
+            "The Boundaries section must contain one Host mode line that matches mode."
+        )
+
+
+def _section_body(body: str, heading: str) -> str:
+    match = re.search(
+        rf"^## {re.escape(heading)}\s*$\n(.*?)(?=^##\s|\Z)",
+        body,
+        re.MULTILINE | re.DOTALL,
+    )
+    return match.group(1) if match else ""
 
 
 def _validate_mode(mode: str) -> None:
@@ -311,11 +326,15 @@ def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _draft_body(batch: str) -> str:
-    sections = "\n\n".join(
-        f"## {heading}\n\n{ANSWER_REQUIRED}" for heading in REQUIRED_HEADINGS
-    )
-    return f"# Assignment brief: {batch}\n\n{sections}\n"
+def _draft_body(batch: str, mode: str) -> str:
+    sections = []
+    for heading in REQUIRED_HEADINGS:
+        content = ANSWER_REQUIRED
+        if heading == "Boundaries":
+            content = f"Host mode: {mode}\n\n{ANSWER_REQUIRED}"
+        sections.append(f"## {heading}\n\n{content}")
+    rendered = "\n\n".join(sections)
+    return f"# Assignment brief: {batch}\n\n{rendered}\n"
 
 
 def _render_brief(brief: AssignmentBrief) -> str:

@@ -128,6 +128,38 @@ def test_changes_invalidate_approval(tmp_path, phil210, profile, changed):
         )
 
 
+def test_mode_must_match_the_hash_bound_boundaries_line(tmp_path, phil210, profile):
+    path = brief_path(tmp_path, "essay-3")
+    _approved(path, phil210, profile)
+    original = path.read_text(encoding="utf-8")
+    path.write_text(
+        original.replace("mode: local", "mode: cloud", 1), encoding="utf-8"
+    )
+    with pytest.raises(BriefError, match="Host mode"):
+        check_brief(
+            path,
+            batch="essay-3",
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=profile,
+        )
+
+    path.write_text(
+        original.replace("mode: local", "mode: cloud", 1).replace(
+            "Host mode: local", "Host mode: cloud"
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(BriefError, match="body changed"):
+        check_brief(
+            path,
+            batch="essay-3",
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=profile,
+        )
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
