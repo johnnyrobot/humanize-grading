@@ -418,6 +418,21 @@ def test_record_prepare_refuses_a_profile_for_another_course(
     assert not (root / "drafts" / "essay-2" / "STUDENT_01.md").exists()
 
 
+def test_record_prepare_collapses_newlines_in_runtime_error_messages(
+    tmp_path, phil210
+):
+    root = tmp_path / "missing\nprofile-root"
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    source = redacted / "STUDENT_01.md"
+    source.write_text("A redacted essay.", encoding="utf-8")
+
+    result = _record_prepare_run(root, redacted, source, phil210)
+
+    _assert_plain_record_prepare_failure(result)
+    assert "missing profile-root" in result.stderr
+
+
 def test_the_status_subcommand_lists_what_is_left(tmp_path):
     redacted, drafts = _batch(tmp_path)
     (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")

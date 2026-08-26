@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
+import shlex
 import sys
 from pathlib import Path
 
@@ -54,6 +56,11 @@ from scripts.grading.profile import (  # noqa: E402
 )
 from scripts.grading.records import RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
+from scripts.grading.workflow import (  # noqa: E402
+    WorkflowContext,
+    WorkflowError,
+    next_action,
+)
 from scripts.path_safety import (  # noqa: E402
     is_within,
     read_bytes_limited,
@@ -394,8 +401,13 @@ def _cmd_brief_check(args: argparse.Namespace) -> int:
 
 
 def _record_error(message: str, *, exit_code: int = EXIT_MALFORMED) -> int:
-    print(f"ERROR record-prepare: {message}", file=sys.stderr)
+    print(f"ERROR record-prepare: {_one_line(message)}", file=sys.stderr)
     return exit_code
+
+
+def _one_line(message: object) -> str:
+    """Collapse runtime error text for one physical CLI line."""
+    return " ".join(str(message).split())
 
 
 def _cmd_record_prepare(args: argparse.Namespace) -> int:
@@ -496,6 +508,55 @@ def _cmd_record_prepare(args: argparse.Namespace) -> int:
         "Fill every criterion, replace every feedback marker, then run "
         "`python3 scripts/grade.py next`."
     )
+    return EXIT_OK
+
+
+def _cmd_next(args: argparse.Namespace) -> int:
+    try:
+        action = next_action(
+            WorkflowContext(
+                batch=args.batch,
+                course=args.course,
+                rubric=args.rubric,
+                redacted=args.redacted,
+                drafts=_drafts_dir(args),
+                root=args.root,
+                patterns=args.patterns,
+                publication=args.publication,
+                submissions=args.submissions,
+                roster=args.roster,
+                instructor=tuple(args.instructor),
+            )
+        )
+    except (
+        WorkflowError,
+        BriefError,
+        ProfileError,
+        RubricError,
+        OSError,
+        UnicodeError,
+        TypeError,
+        KeyError,
+        ValueError,
+    ) as error:
+        print(f"ERROR next: {_one_line(error)}", file=sys.stderr)
+        return EXIT_MALFORMED
+    if args.json:
+        print(json.dumps(action.as_dict(), indent=2, ensure_ascii=False))
+    else:
+        print(f"Action: {action.action}")
+        print(action.message)
+        if action.token:
+            print(f"Token: {action.token}")
+        for command in action.commands:
+            print(f"Command: {shlex.join(command)}")
+        for finding in action.findings:
+            where = f" [{finding.token}]" if finding.token else ""
+            print(
+                f"Finding: {finding.code}{where}: {_one_line(finding.message)}"
+            )
+    if action.action in {"repair-brief", "repair-batch", "repair-verification"}:
+        return EXIT_FAILED
     return EXIT_OK
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
@@ -617,6 +678,27 @@ def build_parser() -> argparse.ArgumentParser:
     record_prepare.add_argument("--brief", type=Path, default=None)
     _add_common(record_prepare)
     record_prepare.set_defaults(handler=_cmd_record_prepare)
+
+    next_command = subparsers.add_parser(
+        "next", help="Show the next legal grading action"
+    )
+    next_command.add_argument(
+        "--batch", required=True, type=_component("The grading batch")
+    )
+    next_command.add_argument(
+        "--course", required=True, type=_component("The course")
+    )
+    next_command.add_argument("--rubric", required=True, type=Path)
+    next_command.add_argument("--redacted", type=Path, default=Path("redacted"))
+    next_command.add_argument("--drafts", type=Path, default=None)
+    next_command.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
+    next_command.add_argument("--publication", type=Path, default=Path("final"))
+    next_command.add_argument("--submissions", type=Path, default=None)
+    next_command.add_argument("--roster", type=Path, default=None)
+    next_command.add_argument("--instructor", action="append", default=[])
+    next_command.add_argument("--json", action="store_true")
+    _add_common(next_command)
+    next_command.set_defaults(handler=_cmd_next)
     return parser
 
 

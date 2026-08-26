@@ -13,6 +13,7 @@ from scripts.grading.brief import (
     approve_brief,
     brief_path,
     check_brief,
+    load_brief,
     prepare_brief,
 )
 
@@ -72,6 +73,45 @@ def test_prepare_creates_an_owner_only_draft_without_overwriting(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
     with pytest.raises(BriefError, match="already exists"):
         prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+
+
+def test_load_brief_reads_draft_and_approved_state_without_changing_it(
+    tmp_path, phil210, profile
+):
+    path = brief_path(tmp_path, "essay-3")
+    draft = prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    draft_bytes = path.read_bytes()
+
+    assert load_brief(path) == draft
+    assert path.read_bytes() == draft_bytes
+
+    _answer(path)
+    approved = approve_brief(
+        path,
+        batch="essay-3",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+        approval="Approve assignment brief for essay-3",
+    )
+    approved_bytes = path.read_bytes()
+
+    assert load_brief(path) == approved
+    assert path.read_bytes() == approved_bytes
+
+
+def test_load_brief_rejects_malformed_metadata(tmp_path):
+    path = brief_path(tmp_path, "essay-3")
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "status: draft", "status: pending", 1
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(BriefError, match="status must be draft or approved"):
+        load_brief(path)
 
 
 def test_prepare_rejects_unknown_mode(tmp_path):

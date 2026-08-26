@@ -168,6 +168,11 @@ def check_brief(
     return brief
 
 
+def load_brief(path: Path) -> AssignmentBrief:
+    """Load a draft or approved assignment brief without changing it."""
+    return _load(path)
+
+
 def _load(path: Path) -> AssignmentBrief:
     _reject_symlink_path(path)
     try:

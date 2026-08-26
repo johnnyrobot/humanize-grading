@@ -54,6 +54,7 @@ scripts/grading/records.py
 scripts/grading/rubric.py
 scripts/grading/samples.py
 scripts/grading/verify.py
+scripts/grading/workflow.py
 scripts/path_safety.py
 scripts/redact.py
 scripts/redaction/__init__.py
@@ -98,6 +99,7 @@ tests/grading/test_records.py
 tests/grading/test_rubric.py
 tests/grading/test_samples.py
 tests/grading/test_verify.py
+tests/grading/test_workflow.py
 tests/redaction/test_candidates.py
 tests/redaction/test_documents.py
 tests/redaction/test_leak.py

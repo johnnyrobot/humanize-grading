@@ -1,0 +1,554 @@
+"""One durable action resumes grading from identity-free state."""
+
+import json
+import subprocess
+import sys
+from dataclasses import dataclass, replace
+from pathlib import Path
+
+import pytest
+
+from scripts.grading.density import PATTERNS_PATH
+from scripts.grading.batch import BatchPaths, GradingBatch, VerificationInputs
+from scripts.grading.brief import prepare_brief
+from scripts.grading.drafts import prepare_draft_pair
+from scripts.grading.rubric import load_rubric
+from scripts.grading.records import GradeRecord
+from scripts.grading.workflow import WorkflowContext, next_action
+from scripts.redaction.manifest import RedactionManifest
+from tests.grading.test_verify import _write_batch
+from tests.grading.test_publication import FakeRenderer
+
+
+@dataclass
+class ReadyBatch:
+    root: Path
+    redacted: Path
+    drafts: Path
+    rubric: Path
+
+    def context(self, tmp_path: Path) -> WorkflowContext:
+        return WorkflowContext(
+            batch="essay-2",
+            course="phil210",
+            rubric=self.rubric,
+            redacted=self.redacted,
+            drafts=self.drafts,
+            root=self.root,
+            patterns=PATTERNS_PATH,
+            publication=tmp_path / "final",
+        )
+
+
+def _empty_context(tmp_path: Path, phil210: Path) -> WorkflowContext:
+    return WorkflowContext(
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        redacted=tmp_path / "redacted",
+        drafts=tmp_path / "drafts",
+        root=tmp_path / ".grading",
+        patterns=PATTERNS_PATH,
+        publication=tmp_path / "final",
+    )
+
+
+def _write_profile(context: WorkflowContext, phil210: Path) -> Path:
+    path = context.root / "profiles" / "phil210.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes((phil210 / "profile_phil210.md").read_bytes())
+    return path
+
+
+def _answer_brief(path: Path) -> None:
+    path.write_text(
+        path.read_text(encoding="utf-8").replace(
+            "<!-- answer-required -->", "Instructor answer."
+        ),
+        encoding="utf-8",
+    )
+
+
+def _complete_context(
+    tmp_path: Path, phil210: Path, approved_brief
+) -> WorkflowContext:
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    return WorkflowContext(
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        redacted=redacted,
+        drafts=drafts,
+        root=root,
+        patterns=PATTERNS_PATH,
+        publication=tmp_path / "final",
+    )
+
+
+def _private_sentinels(
+    context: WorkflowContext, tmp_path: Path
+) -> tuple[WorkflowContext, Path, Path, Path, Path]:
+    private = tmp_path / "private-sentinel"
+    private.write_text("must not be read", encoding="utf-8")
+    private.chmod(0)
+    submissions = tmp_path / "submissions-sentinel"
+    roster = tmp_path / "roster-sentinel.csv"
+    map_path = context.root / "maps" / f"{context.batch}.json"
+    review = context.root / "maps" / "reviews" / f"{context.batch}.json"
+    review.parent.mkdir(parents=True, exist_ok=True)
+    for path in (submissions, roster, map_path, review):
+        path.symlink_to(private)
+    return (
+        replace(context, submissions=submissions, roster=roster),
+        submissions,
+        roster,
+        map_path,
+        review,
+    )
+
+
+def _next_run(context: WorkflowContext, *extra: str):
+    return subprocess.run(
+        [
+            sys.executable,
+            "scripts/grade.py",
+            "next",
+            "--batch",
+            context.batch,
+            "--course",
+            context.course,
+            "--rubric",
+            str(context.rubric),
+            "--redacted",
+            str(context.redacted),
+            "--drafts",
+            str(context.drafts),
+            "--root",
+            str(context.root),
+            "--patterns",
+            str(context.patterns),
+            "--publication",
+            str(context.publication),
+            *extra,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.fixture
+def ready_batch(tmp_path, phil210, approved_brief) -> ReadyBatch:
+    root = tmp_path / ".grading"
+    profile = root / "profiles" / "phil210.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_bytes((phil210 / "profile_phil210.md").read_bytes())
+    approved_brief(
+        root / "assignments" / "essay-2.md",
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+    )
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    source = redacted / "STUDENT_01.md"
+    source.write_text("A redacted submission ready to grade.", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2", "test-redaction-run", [source], reviewed=True
+    ).save(redacted)
+    drafts = tmp_path / "drafts"
+    drafts.mkdir()
+    return ReadyBatch(
+        root=root,
+        redacted=redacted,
+        drafts=drafts,
+        rubric=phil210 / "grading_rubric.md",
+    )
+
+
+def test_next_action_names_the_first_pending_record(tmp_path, ready_batch):
+    context = ready_batch.context(tmp_path)
+
+    action = next_action(context)
+
+    assert action.action == "prepare-record"
+    assert action.token == "STUDENT_01"
+    assert action.commands[0][-4:] == (
+        "--source",
+        str(context.redacted / "STUDENT_01.md"),
+        "--redacted",
+        str(context.redacted),
+    )
+
+
+def test_next_action_serializes_context_commands_and_findings(tmp_path, ready_batch):
+    action = next_action(ready_batch.context(tmp_path))
+
+    assert action.as_dict() == {
+        "schema": "grading-next-action/1",
+        "batch": "essay-2",
+        "course": "phil210",
+        "stage": "drafting",
+        "action": "prepare-record",
+        "message": "Prepare the draft pair for STUDENT_01.",
+        "token": "STUDENT_01",
+        "commands": [list(action.commands[0])],
+        "findings": [],
+    }
+
+
+def test_missing_profile_returns_calibrate(tmp_path, phil210):
+    action = next_action(_empty_context(tmp_path, phil210))
+
+    assert action.action == "calibrate"
+
+
+def test_rubric_drift_precedes_brief_state(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210)
+    drifted = tmp_path / "drifted-rubric.md"
+    drifted.write_text(
+        context.rubric.read_text(encoding="utf-8").replace(
+            "Thesis & Theoretical Framing", "Thesis and Framing", 1
+        ),
+        encoding="utf-8",
+    )
+    context = WorkflowContext(**{**context.__dict__, "rubric": drifted})
+
+    action = next_action(context)
+
+    assert action.action == "recalibrate"
+
+
+def test_missing_brief_returns_prepare_brief(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210)
+
+    action = next_action(context)
+
+    assert action.action == "prepare-brief"
+
+
+def test_unanswered_brief_returns_complete_brief(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210)
+    prepare_brief(
+        context.root / "assignments" / "essay-2.md",
+        batch=context.batch,
+        course=context.course,
+        mode="local",
+    )
+
+    action = next_action(context)
+
+    assert action.action == "complete-brief"
+
+
+def test_draft_brief_from_wrong_batch_returns_repair_brief(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210)
+    prepare_brief(
+        context.root / "assignments" / "essay-2.md",
+        batch="essay-9",
+        course=context.course,
+        mode="local",
+    )
+
+    action = next_action(context)
+
+    assert action.action == "repair-brief"
+
+
+def test_complete_draft_brief_returns_approve_brief(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210)
+    path = context.root / "assignments" / "essay-2.md"
+    prepare_brief(path, batch=context.batch, course=context.course, mode="local")
+    _answer_brief(path)
+
+    action = next_action(context)
+
+    assert action.action == "approve-brief"
+
+
+def test_stale_approved_brief_returns_repair_brief(tmp_path, ready_batch):
+    context = ready_batch.context(tmp_path)
+    path = context.root / "assignments" / "essay-2.md"
+    path.write_text(
+        path.read_text(encoding="utf-8") + "Changed after approval.\n",
+        encoding="utf-8",
+    )
+
+    action = next_action(context)
+
+    assert action.action == "repair-brief"
+
+
+def test_missing_manifest_returns_redact(tmp_path, ready_batch):
+    context = ready_batch.context(tmp_path)
+    (context.redacted / "_redaction.json").unlink()
+
+    action = next_action(context)
+
+    assert action.action == "redact"
+
+
+def test_symlinked_manifest_returns_repair_batch_without_following_it(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    manifest = context.redacted / "_redaction.json"
+    private = tmp_path / "private-manifest.json"
+    private.write_bytes(manifest.read_bytes())
+    manifest.unlink()
+    manifest.symlink_to(private)
+
+    action = next_action(context)
+
+    assert action.action == "repair-batch"
+    assert action.findings[0].code == "symlink-redaction-manifest"
+
+
+def test_unreviewed_manifest_returns_review_redaction(tmp_path, ready_batch):
+    context = ready_batch.context(tmp_path)
+    source = context.redacted / "STUDENT_01.md"
+    RedactionManifest.create(
+        context.batch, "test-redaction-run", [source], reviewed=False
+    ).save(context.redacted)
+
+    action = next_action(context)
+
+    assert action.action == "review-redaction"
+
+
+def test_inventory_finding_returns_repair_batch(tmp_path, ready_batch):
+    context = ready_batch.context(tmp_path)
+    (context.drafts / "STUDENT_99.json").write_text("{}", encoding="utf-8")
+
+    action = next_action(context)
+
+    assert action.action == "repair-batch"
+    assert action.findings[0].code == "orphaned-artifact"
+
+
+def test_template_pair_returns_complete_draft(tmp_path, ready_batch):
+    context = ready_batch.context(tmp_path)
+    prepare_draft_pair(
+        batch=context.batch,
+        course=context.course,
+        source=context.redacted / "STUDENT_01.md",
+        rubric=load_rubric(context.rubric),
+        profile=context.root / "profiles" / "phil210.md",
+        patterns=context.patterns,
+        drafts=context.drafts,
+    )
+
+    action = next_action(context)
+
+    assert action.action == "complete-draft"
+    assert action.token == "STUDENT_01"
+
+
+def test_invalid_record_returns_repair_verification(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    record_path = context.drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.total = 95
+    record.save(record_path)
+
+    action = next_action(context)
+
+    assert action.action == "repair-verification"
+    assert "total" in {finding.code for finding in action.findings}
+    assert {
+        "code": "total",
+        "message": "The total is 95; the scored criteria add to 82.",
+        "token": "STUDENT_01",
+    } in action.as_dict()["findings"]
+
+
+def test_clean_dry_run_returns_verify(tmp_path, phil210, approved_brief):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+
+    action = next_action(context)
+
+    assert action.action == "verify"
+    assert action.commands[0][:3] == ("python3", "scripts/grade.py", "verify")
+
+
+def test_current_receipt_returns_consistency_and_publish(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(
+        VerificationInputs(
+            course=context.course,
+            rubric=context.rubric,
+            profile=context.root / "profiles" / "phil210.md",
+            patterns=context.patterns,
+            brief=context.root / "assignments" / "essay-2.md",
+        )
+    )
+    assert report.persisted is True
+
+    action = next_action(context)
+
+    assert action.action == "consistency-and-publish"
+    assert [command[2] for command in action.commands] == [
+        "consistency",
+        str(context.drafts),
+    ]
+
+
+def test_stale_receipt_returns_repair_verification(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(
+        VerificationInputs(
+            course=context.course,
+            rubric=context.rubric,
+            profile=context.root / "profiles" / "phil210.md",
+            patterns=context.patterns,
+            brief=context.root / "assignments" / "essay-2.md",
+        )
+    )
+    assert report.persisted is True
+    (context.drafts / "_verification.json").write_text("{}", encoding="utf-8")
+
+    action = next_action(context)
+
+    assert action.action == "repair-verification"
+    assert action.findings[0].code == "malformed-verification-receipt"
+
+
+def test_publication_returns_terminal_review_publication(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(
+        VerificationInputs(
+            course=context.course,
+            rubric=context.rubric,
+            profile=context.root / "profiles" / "phil210.md",
+            patterns=context.patterns,
+            brief=context.root / "assignments" / "essay-2.md",
+        )
+    )
+    assert report.verified_batch is not None
+    published = report.verified_batch.publish(context.publication, FakeRenderer())
+    assert published.changed is True
+
+    action = next_action(context)
+
+    assert action.action == "review-publication"
+    assert action.commands == ()
+
+
+def test_redaction_action_renders_private_paths_without_reading_them(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    (context.redacted / "_redaction.json").unlink()
+    context, submissions, roster, map_path, review = _private_sentinels(
+        context, tmp_path
+    )
+
+    action = next_action(context)
+
+    assert action.action == "redact"
+    assert action.commands == (
+        (
+            "python3",
+            "scripts/redact.py",
+            str(submissions),
+            "--roster",
+            str(roster),
+            "--batch",
+            context.batch,
+            "--out",
+            str(context.redacted),
+            "--map",
+            str(map_path),
+            "--review",
+            str(review),
+        ),
+    )
+
+
+def test_publication_action_renders_map_path_without_reading_private_sentinels(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(
+        VerificationInputs(
+            course=context.course,
+            rubric=context.rubric,
+            profile=context.root / "profiles" / "phil210.md",
+            patterns=context.patterns,
+            brief=context.root / "assignments" / "essay-2.md",
+        )
+    )
+    assert report.persisted is True
+    context, _, _, map_path, _ = _private_sentinels(context, tmp_path)
+
+    action = next_action(context)
+
+    assert action.action == "consistency-and-publish"
+    assert action.commands[1][-4:] == (
+        "--map",
+        str(map_path),
+        "--out",
+        str(context.publication),
+    )
+
+
+def test_next_cli_emits_stable_json_argv(tmp_path, ready_batch):
+    result = _next_run(ready_batch.context(tmp_path), "--json")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["schema"] == "grading-next-action/1"
+    assert payload["action"] == "prepare-record"
+    assert isinstance(payload["commands"][0], list)
+
+
+def test_next_cli_prints_plain_repair_action_and_exits_twelve(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    record_path = context.drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.total = 95
+    record.save(record_path)
+
+    result = _next_run(context)
+
+    assert result.returncode == 12
+    assert "repair-verification" in result.stdout
+    assert "total" in result.stdout
+    assert "Traceback" not in result.stderr
+
+
+def test_next_cli_exits_thirteen_for_malformed_workflow_state(
+    tmp_path, ready_batch
+):
+    context = replace(
+        ready_batch.context(tmp_path), rubric=tmp_path / "missing-rubric.md"
+    )
+
+    result = _next_run(context, "--json")
+
+    assert result.returncode == 13
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
