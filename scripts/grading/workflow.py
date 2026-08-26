@@ -344,22 +344,6 @@ def next_action(context: WorkflowContext) -> NextAction:
             findings=(finding,),
         )
     receipt = context.drafts / RECEIPT_NAME
-    if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
-        finding = BlockingFinding(
-            "malformed-verification-receipt",
-            (
-                "The verification receipt must be one regular file without a "
-                "symbolic link. Remove it, then run verification again."
-            ),
-            "",
-        )
-        return _action(
-            context,
-            stage="verification",
-            action="repair-verification",
-            message="Remove the unsafe verification receipt and verify again.",
-            findings=(finding,),
-        )
     status = GradingBatch.open(
         BatchPaths(
             batch=context.batch,
@@ -388,6 +372,22 @@ def next_action(context: WorkflowContext) -> NextAction:
             action="repair-batch",
             message="Repair the grading batch inventory before continuing.",
             findings=status.blocking_findings,
+        )
+    if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
+        finding = BlockingFinding(
+            "malformed-verification-receipt",
+            (
+                "The verification receipt must be one regular file without a "
+                "symbolic link. Remove it, then run verification again."
+            ),
+            "",
+        )
+        return _action(
+            context,
+            stage="verification",
+            action="repair-verification",
+            message="Remove the unsafe verification receipt and verify again.",
+            findings=(finding,),
         )
     pending = next(
         (entry for entry in status.entries if entry.progress is Progress.PENDING),

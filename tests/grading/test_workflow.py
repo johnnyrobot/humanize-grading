@@ -579,6 +579,34 @@ def test_next_cli_nonregular_receipt_exits_twelve(
     assert payload["findings"][0]["code"] == "malformed-verification-receipt"
 
 
+def test_orphan_inventory_precedes_directory_receipt_repair(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    (context.drafts / "STUDENT_99.json").write_text("{}", encoding="utf-8")
+    _install_nonregular_receipt(context, "directory")
+
+    action = next_action(context)
+
+    assert action.action == "repair-batch"
+    assert "orphaned-artifact" in {finding.code for finding in action.findings}
+
+
+def test_incomplete_inventory_precedes_symlink_receipt_repair(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    (context.drafts / "STUDENT_01.md").write_text(
+        "unfinished feedback", encoding="utf-8"
+    )
+    _install_nonregular_receipt(context, "symlink")
+
+    action = next_action(context)
+
+    assert action.action == "repair-batch"
+    assert "incomplete-pair" in {finding.code for finding in action.findings}
+
+
 def test_publication_returns_terminal_review_publication(
     tmp_path, phil210, approved_brief
 ):
