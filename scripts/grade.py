@@ -31,6 +31,7 @@ from scripts.grading.density import PATTERNS_PATH, load_terms  # noqa: E402
 from scripts.grading.batch import (  # noqa: E402
     BatchPaths,
     GradingBatch,
+    Progress,
     VerificationFailure,
     VerificationInputs,
 )
@@ -42,6 +43,10 @@ from scripts.grading.brief import (  # noqa: E402
     prepare_brief,
 )
 from scripts.grading.density import scan  # noqa: E402
+from scripts.grading.drafts import (  # noqa: E402
+    DraftPreparationError,
+    prepare_draft_pair,
+)
 from scripts.grading.profile import (  # noqa: E402
     ProfileError,
     load_profile,
@@ -387,6 +392,108 @@ def _cmd_brief_check(args: argparse.Namespace) -> int:
     print(f"Approved assignment brief is current: {brief.path}")
     return EXIT_OK
 
+
+def _record_error(message: str, *, exit_code: int = EXIT_MALFORMED) -> int:
+    print(f"ERROR record-prepare: {message}", file=sys.stderr)
+    return exit_code
+
+
+def _cmd_record_prepare(args: argparse.Namespace) -> int:
+    try:
+        profile = load_profile(profile_path(args.course, args.root))
+        rubric = load_rubric(args.rubric)
+        drifted = profile.drift(rubric)
+        if drifted:
+            return _record_error(
+                "The rubric changed since calibration: " + "; ".join(drifted),
+                exit_code=EXIT_DRIFT,
+            )
+        try:
+            check_brief(
+                args.brief or brief_path(args.root, args.batch),
+                batch=args.batch,
+                course=args.course,
+                rubric=rubric.path,
+                profile=profile.path,
+            )
+        except (BriefError, OSError, UnicodeError, ValueError) as error:
+            return _record_error(f"The assignment brief is not ready: {error}")
+        manifest = RedactionManifest.load(args.redacted)
+        if manifest.batch != args.batch:
+            return _record_error(
+                "The redaction manifest belongs to another grading batch."
+            )
+        manifest.validate(args.redacted)
+        if not manifest.reviewed:
+            return _record_error(
+                "The instructor must review the redaction result before preparing records.",
+                exit_code=EXIT_FAILED,
+            )
+        if (
+            args.source.is_symlink()
+            or not is_within(args.source, args.redacted, follow_symlinks=False)
+            or not is_within(args.source, args.redacted, follow_symlinks=True)
+            or args.source.resolve().parent != args.redacted.resolve()
+        ):
+            return _record_error(
+                "The selected source must be a regular file directly inside the "
+                "configured redacted directory."
+            )
+
+        drafts = _drafts_dir(args)
+        report = GradingBatch.open(
+            BatchPaths(batch=args.batch, redacted=args.redacted, drafts=drafts)
+        ).status()
+        if report.blocking_findings:
+            finding = report.blocking_findings[0]
+            return _record_error(
+                f"The grading batch is {finding.code}: {finding.message}",
+                exit_code=EXIT_FAILED,
+            )
+        selected = [
+            entry
+            for entry in report.entries
+            if entry.source is not None
+            and entry.source.resolve() == args.source.resolve()
+        ]
+        if len(selected) != 1:
+            return _record_error(
+                "The selected source is not exactly one manifest-bound pending entry.",
+                exit_code=EXIT_FAILED,
+            )
+        entry = selected[0]
+        if entry.progress is not Progress.PENDING:
+            return _record_error(
+                f"{entry.token} is not pending and cannot be prepared again.",
+                exit_code=EXIT_FAILED,
+            )
+        pair = prepare_draft_pair(
+            batch=args.batch,
+            course=args.course,
+            source=args.source,
+            rubric=rubric,
+            profile=profile.path,
+            patterns=args.patterns,
+            drafts=drafts,
+        )
+    except (
+        BriefError,
+        DraftPreparationError,
+        ProfileError,
+        RubricError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ) as error:
+        return _record_error(str(error))
+    print(f"Prepared grade record: {pair.record}")
+    print(f"Prepared feedback draft: {pair.feedback}")
+    print(
+        "Fill every criterion, replace every feedback marker, then run "
+        "`python3 scripts/grade.py next`."
+    )
+    return EXIT_OK
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, default=Path(".grading"))
 
@@ -486,6 +593,26 @@ def build_parser() -> argparse.ArgumentParser:
     brief_check.add_argument("--brief", type=Path, default=None)
     _add_common(brief_check)
     brief_check.set_defaults(handler=_cmd_brief_check)
+
+    record = subparsers.add_parser("record", help="Prepare a grade record pair")
+    record_actions = record.add_subparsers(dest="record_action", required=True)
+    record_prepare = record_actions.add_parser(
+        "prepare", help="Prepare one pending submission's draft pair"
+    )
+    record_prepare.add_argument(
+        "--batch", required=True, type=_component("The grading batch")
+    )
+    record_prepare.add_argument(
+        "--course", required=True, type=_component("The course")
+    )
+    record_prepare.add_argument("--rubric", required=True, type=Path)
+    record_prepare.add_argument("--source", required=True, type=Path)
+    record_prepare.add_argument("--redacted", type=Path, default=Path("redacted"))
+    record_prepare.add_argument("--drafts", type=Path, default=None)
+    record_prepare.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
+    record_prepare.add_argument("--brief", type=Path, default=None)
+    _add_common(record_prepare)
+    record_prepare.set_defaults(handler=_cmd_record_prepare)
     return parser
 
 

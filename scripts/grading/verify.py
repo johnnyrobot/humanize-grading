@@ -21,6 +21,7 @@ import re
 from dataclasses import dataclass
 
 from scripts.grading.density import Term, scan
+from scripts.grading.drafts import TEMPLATE_MARKER
 from scripts.grading.profile import Profile
 from scripts.grading.records import CANNOT_ASSESS, GradeRecord, RecordError, locate
 from scripts.grading.rubric import Rubric, RubricError
@@ -280,6 +281,16 @@ def _check_feedback(
     terms: list[Term],
     found: list[Finding],
 ) -> None:
+    if TEMPLATE_MARKER in markdown:
+        found.append(
+            Finding(
+                ERROR,
+                "template-marker",
+                "The feedback still has an unfinished template marker. Replace "
+                "every marker before verification.",
+                record.token,
+            )
+        )
     lowered = markdown.lower()
     lines = markdown.splitlines()
     headings: list[tuple[str, int]] = []

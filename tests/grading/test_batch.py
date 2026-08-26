@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 from scripts.grading.batch import BatchPaths, GradingBatch, Progress
+from scripts.redaction.manifest import RedactionManifest
 
 
 def _batch(tmp_path):
@@ -192,6 +193,197 @@ def _run(*args):
     return subprocess.run(
         [sys.executable, "scripts/grade.py", *args], capture_output=True, text=True
     )
+
+
+def _record_prepare_context(tmp_path, phil210, approved_brief, *, reviewed=True):
+    root = tmp_path / ".grading"
+    profile = root / "profiles" / "phil210.md"
+    profile.parent.mkdir(parents=True)
+    profile.write_bytes((phil210 / "profile_phil210.md").read_bytes())
+    approved_brief(
+        root / "assignments" / "essay-2.md",
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+    )
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    source = redacted / "STUDENT_01.md"
+    source.write_text("Community solar needs a named causal mechanism.", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [source],
+        reviewed=reviewed,
+    ).save(redacted)
+    return root, redacted, source
+
+
+def test_record_prepare_creates_the_pending_draft_pair(
+    tmp_path, phil210, approved_brief
+):
+    root, redacted, source = _record_prepare_context(
+        tmp_path, phil210, approved_brief
+    )
+
+    result = _run(
+        "record",
+        "prepare",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--source",
+        str(source),
+        "--redacted",
+        str(redacted),
+        "--root",
+        str(root),
+    )
+
+    assert result.returncode == 0
+    assert "Fill every criterion" in result.stdout
+    assert (root / "drafts" / "essay-2" / "STUDENT_01.json").is_file()
+    assert (root / "drafts" / "essay-2" / "STUDENT_01.md").is_file()
+
+
+def _record_prepare_run(root, redacted, source, phil210):
+    return _run(
+        "record",
+        "prepare",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--source",
+        str(source),
+        "--redacted",
+        str(redacted),
+        "--root",
+        str(root),
+    )
+
+
+def _assert_plain_record_prepare_failure(result):
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+
+
+def test_record_prepare_refuses_a_missing_or_unapproved_brief(
+    tmp_path, phil210, approved_brief
+):
+    for condition in ("missing", "unapproved"):
+        case = tmp_path / condition
+        root, redacted, source = _record_prepare_context(
+            case, phil210, approved_brief
+        )
+        brief = root / "assignments" / "essay-2.md"
+        if condition == "missing":
+            brief.unlink()
+        else:
+            brief.write_text(
+                brief.read_text(encoding="utf-8").replace(
+                    "status: approved", "status: draft", 1
+                ),
+                encoding="utf-8",
+            )
+
+        result = _record_prepare_run(root, redacted, source, phil210)
+
+        _assert_plain_record_prepare_failure(result)
+        assert "assignment brief" in result.stderr.lower()
+
+
+def test_record_prepare_refuses_an_unreviewed_redaction(
+    tmp_path, phil210, approved_brief
+):
+    root, redacted, source = _record_prepare_context(
+        tmp_path, phil210, approved_brief, reviewed=False
+    )
+
+    result = _record_prepare_run(root, redacted, source, phil210)
+
+    _assert_plain_record_prepare_failure(result)
+    assert "review" in result.stderr.lower()
+
+
+def test_record_prepare_refuses_a_non_pending_token(
+    tmp_path, phil210, approved_brief
+):
+    root, redacted, source = _record_prepare_context(
+        tmp_path, phil210, approved_brief
+    )
+    drafts = root / "drafts" / "essay-2"
+    drafts.mkdir(parents=True)
+    (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
+    (drafts / "STUDENT_01.json").write_text("{}", encoding="utf-8")
+
+    result = _record_prepare_run(root, redacted, source, phil210)
+
+    _assert_plain_record_prepare_failure(result)
+    assert "pending" in result.stderr.lower()
+
+
+def test_record_prepare_refuses_an_incomplete_or_orphaned_batch(
+    tmp_path, phil210, approved_brief
+):
+    for condition in ("incomplete", "orphaned"):
+        case = tmp_path / condition
+        root, redacted, source = _record_prepare_context(
+            case, phil210, approved_brief
+        )
+        drafts = root / "drafts" / "essay-2"
+        drafts.mkdir(parents=True)
+        if condition == "incomplete":
+            (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
+        else:
+            (drafts / "STUDENT_09.json").write_text("{}", encoding="utf-8")
+
+        result = _record_prepare_run(root, redacted, source, phil210)
+
+        _assert_plain_record_prepare_failure(result)
+        assert condition[:-1] in result.stderr.lower()
+
+
+def test_record_prepare_refuses_a_source_outside_redacted(
+    tmp_path, phil210, approved_brief
+):
+    root, redacted, _ = _record_prepare_context(
+        tmp_path, phil210, approved_brief
+    )
+    outside = tmp_path / "outside" / "STUDENT_01.md"
+    outside.parent.mkdir()
+    outside.write_text("Not the manifest-bound source.", encoding="utf-8")
+
+    result = _record_prepare_run(root, redacted, outside, phil210)
+
+    _assert_plain_record_prepare_failure(result)
+    assert "redacted directory" in result.stderr.lower()
+
+
+def test_record_prepare_preserves_an_existing_destination(
+    tmp_path, phil210, approved_brief
+):
+    root, redacted, source = _record_prepare_context(
+        tmp_path, phil210, approved_brief
+    )
+    drafts = root / "drafts" / "essay-2"
+    drafts.mkdir(parents=True)
+    existing = drafts / "STUDENT_01.json"
+    existing.write_bytes(b"keep these bytes")
+
+    result = _record_prepare_run(root, redacted, source, phil210)
+
+    _assert_plain_record_prepare_failure(result)
+    assert existing.read_bytes() == b"keep these bytes"
+    assert not (drafts / "STUDENT_01.md").exists()
 
 
 def test_the_status_subcommand_lists_what_is_left(tmp_path):
