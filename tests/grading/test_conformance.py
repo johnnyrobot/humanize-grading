@@ -7,6 +7,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ from scripts.grading.brief import ANSWER_REQUIRED, approve_brief, prepare_brief
 from scripts.grading.conformance import (
     ConformanceError,
     MAX_STDOUT_BYTES,
+    audit_trace,
     audit_workspace,
     create_trial,
     parse_command_json,
@@ -240,6 +242,38 @@ def _write_trace(workspace: Path, name: str, events: list[dict]) -> Path:
     return path
 
 
+def _trace_event(phase: str, event: str, **values) -> dict:
+    return {
+        "schema": "grading-agent-trace/1",
+        "event": event,
+        "phase": phase,
+        **values,
+    }
+
+
+def _ordered_phase_trace(phase: str, read_path: str) -> list[dict]:
+    next_argv = ["python3", "scripts/grade.py", "next", "--json"]
+    return [
+        _trace_event(phase, "command", argv=next_argv, exit_code=0),
+        _trace_event(
+            phase,
+            "command",
+            argv=["python3", "scripts/grade.py", "status"],
+            exit_code=0,
+        ),
+        _trace_event(phase, "read", path=read_path),
+        _trace_event(phase, "command", argv=next_argv, exit_code=0),
+    ]
+
+
+def _complete_trace_events() -> list[dict]:
+    return (
+        _ordered_phase_trace("briefing", "SKILL.md")
+        + _ordered_phase_trace("redaction", str(PROFILE))
+        + _ordered_phase_trace("grading", "redacted/STUDENT_01.md")
+    )
+
+
 def test_audit_detects_malformed_record_and_absent_receipt(tmp_path):
     workspace = _trial(tmp_path)
     _approve_trial_brief(workspace)
@@ -280,6 +314,54 @@ def test_audit_sanitizes_an_identity_bearing_artifact_name(tmp_path):
 
     assert report.identity_leaks == ("redacted/<identity-bearing-path>",)
     assert synthetic_name not in repr(report)
+
+
+@pytest.mark.parametrize(
+    ("payload", "finding_code"),
+    [
+        (b"\xff\xfe", "artifact-invalid-utf8"),
+        (None, "artifact-too-large"),
+    ],
+)
+def test_audit_fails_closed_on_unscannable_identity_artifacts(
+    tmp_path, payload, finding_code
+):
+    workspace = _trial(tmp_path)
+    artifact = workspace / "redacted/STUDENT_01.md"
+    artifact.parent.mkdir()
+    if payload is None:
+        with artifact.open("wb") as handle:
+            handle.truncate(25 * 1024 * 1024 + 1)
+    else:
+        artifact.write_bytes(payload)
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.passed is False
+    assert {(item["path"], item["code"]) for item in report.artifact_findings} == {
+        ("redacted/STUDENT_01.md", finding_code)
+    }
+    observed = next(
+        item for item in report.artifacts if item["path"] == "redacted/STUDENT_01.md"
+    )
+    assert observed["bounded"] is False
+
+
+def test_audit_reports_unreadable_identity_artifact(tmp_path):
+    workspace = _trial(tmp_path)
+    artifact = workspace / "drafts/essay-2/STUDENT_01.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("identity-free", encoding="utf-8")
+    artifact.chmod(0)
+    try:
+        report = audit_workspace(workspace, runtime="manual")
+    finally:
+        artifact.chmod(0o600)
+
+    assert report.passed is False
+    assert {(item["path"], item["code"]) for item in report.artifact_findings} == {
+        ("drafts/essay-2/STUDENT_01.md", "artifact-unreadable")
+    }
 
 
 def test_audit_reports_trace_unverified_when_absent(tmp_path):
@@ -350,26 +432,60 @@ def test_audit_passes_phase_allowed_reads(tmp_path):
     trace = _write_trace(
         workspace,
         "manual",
-        [
-            {
-                "schema": "grading-agent-trace/1",
-                "event": "read",
-                "phase": "grading",
-                "path": path,
-            }
-            for path in (
-                "SKILL.md",
-                str(RUBRIC),
-                str(PROFILE),
-                "redacted/STUDENT_01.md",
-            )
-        ],
+        _complete_trace_events(),
     )
 
     report = audit_workspace(workspace, runtime="manual", trace_paths=(trace,))
 
     assert report.passed is True
     assert report.trace.status == "passed"
+
+
+def test_audit_keeps_a_read_only_trace_unverified(tmp_path):
+    workspace = _trial(tmp_path)
+    _complete_trial(workspace)
+    trace = _write_trace(
+        workspace,
+        "read-only",
+        [_trace_event("grading", "read", path="redacted/STUDENT_01.md")],
+    )
+
+    report = audit_workspace(workspace, runtime="manual", trace_paths=(trace,))
+
+    assert report.passed is True
+    assert report.trace.status == "unverified"
+
+
+def test_audit_keeps_out_of_order_next_commands_unverified(tmp_path):
+    workspace = _trial(tmp_path)
+    _complete_trial(workspace)
+    next_event = _trace_event(
+        "grading",
+        "command",
+        argv=["python3", "scripts/grade.py", "next", "--json"],
+        exit_code=0,
+    )
+    work_event = _trace_event(
+        "grading",
+        "command",
+        argv=["python3", "scripts/grade.py", "status"],
+        exit_code=0,
+    )
+    trace = _write_trace(
+        workspace,
+        "out-of-order",
+        [
+            work_event,
+            next_event,
+            next_event,
+            _trace_event("grading", "read", path="redacted/STUDENT_01.md"),
+        ],
+    )
+
+    report = audit_workspace(workspace, runtime="manual", trace_paths=(trace,))
+
+    assert report.passed is True
+    assert report.trace.status == "unverified"
 
 
 def test_audit_keeps_trace_unverified_when_a_requested_phase_trace_is_missing(
@@ -400,15 +516,43 @@ def test_audit_keeps_trace_unverified_when_a_requested_phase_trace_is_missing(
     assert report.trace.status == "unverified"
 
 
-def test_audit_refuses_workspace_escape_symlink(tmp_path):
+def test_trace_event_limit_is_global_and_stops_before_later_files(
+    tmp_path, monkeypatch
+):
+    workspace = _trial(tmp_path)
+    event = _trace_event("grading", "read", path="SKILL.md")
+    first = _write_trace(workspace, "first", [event] * 10_000)
+    unopened = _write_trace(workspace, "must-not-open", [event])
+    original_open = Path.open
+
+    def guarded_open(path, *args, **kwargs):
+        if path == unopened:
+            raise AssertionError("trace reader continued after the global bound")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", guarded_open)
+
+    result = audit_trace(workspace, (first, unopened))
+
+    assert result.status == "failed"
+    assert result.events == 10_000
+    assert result.findings == ("too-many-trace-events",)
+
+
+def test_audit_reports_workspace_escape_symlink_without_reading_it(tmp_path):
     workspace = _trial(tmp_path)
     outside = tmp_path / "outside.md"
     outside.write_text("outside", encoding="utf-8")
     (workspace / "redacted").mkdir()
     (workspace / "redacted/STUDENT_01.md").symlink_to(outside)
 
-    with pytest.raises(ConformanceError):
-        audit_workspace(workspace, runtime="manual")
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.passed is False
+    assert {(item["path"], item["code"]) for item in report.artifact_findings} == {
+        ("redacted/STUDENT_01.md", "artifact-linked")
+    }
+    assert outside.read_text(encoding="utf-8") == "outside"
 
 
 def test_audit_refuses_a_workspace_that_replaces_the_synthetic_inputs(tmp_path):
@@ -420,6 +564,136 @@ def test_audit_refuses_a_workspace_that_replaces_the_synthetic_inputs(tmp_path):
 
     with pytest.raises(ConformanceError):
         audit_workspace(workspace, runtime="manual")
+
+
+def test_audit_refuses_a_top_level_workspace_symlink_before_resolve(tmp_path):
+    workspace = _trial(tmp_path)
+    alias = tmp_path / "trial-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+
+    with pytest.raises(ConformanceError):
+        audit_workspace(alias, runtime="manual")
+
+
+def test_audit_rejects_phase_overshoot_artifacts(tmp_path):
+    workspace = _trial(tmp_path)
+    _approve_trial_brief(workspace)
+    overshoot = workspace / "drafts/essay-2/STUDENT_01.md"
+    overshoot.parent.mkdir(parents=True)
+    overshoot.write_text("too early", encoding="utf-8")
+
+    report = audit_workspace(
+        workspace,
+        runtime="manual",
+        expected_phase="briefing",
+    )
+
+    assert report.passed is False
+    assert report.lifecycle["phase"]["status"] == "failed"
+    assert report.lifecycle["phase"]["findings"] == (
+        "later-stage-artifact:drafts/essay-2/STUDENT_01.md",
+    )
+
+
+def test_audit_records_exact_package_attestation(tmp_path):
+    workspace = _trial(tmp_path)
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.package["status"] == "passed"
+    assert len(report.package["digest"]) == 64
+    assert report.package["dirty"] is report.repository_revision.endswith("+dirty")
+    assert any(
+        item["path"] == "scripts/grade.py" and len(item["sha256"]) == 64
+        for item in report.package["files"]
+    )
+
+
+def test_run_fails_when_agent_changes_immutable_package_code(tmp_path):
+    adapter = tmp_path / "package_mutator.py"
+    adapter.write_text(
+        """import pathlib
+
+path = pathlib.Path('scripts/grade.py')
+path.write_bytes(path.read_bytes() + b'\\n# changed by synthetic adapter\\n')
+raise SystemExit(7)
+""",
+        encoding="utf-8",
+    )
+    command = json.dumps([sys.executable, str(adapter), "{prompt}"])
+
+    report = run_trial(
+        REPO_ROOT,
+        runtime="fake-package-change",
+        command=parse_command_json(command),
+        timeout_seconds=5,
+        workspace=tmp_path / "package-change-trial",
+    )
+
+    assert report.passed is False
+    assert report.phases[0].error == "package-changed"
+    assert report.package["status"] == "failed"
+    assert report.package["findings"] == ("package-changed:scripts/grade.py",)
+
+
+def test_trial_copy_refuses_symlinked_package_source_parent(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "profile_phil210.md").write_text("outside", encoding="utf-8")
+    (source / "linked").symlink_to(outside, target_is_directory=True)
+    (source / "PACKAGE_FILES.txt").write_text(
+        "linked/profile_phil210.md\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConformanceError):
+        create_trial(source, tmp_path / "copy-trial")
+
+
+def test_trial_copy_never_follows_a_symlinked_package_file(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    (source / "linked.txt").symlink_to(outside)
+    (source / "PACKAGE_FILES.txt").write_text("linked.txt\n", encoding="utf-8")
+
+    with pytest.raises(ConformanceError):
+        create_trial(source, tmp_path / "copy-trial")
+
+
+def test_trial_copy_detects_a_source_path_swap(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    source.mkdir()
+    payload = source / "payload.txt"
+    payload.write_text("original package bytes", encoding="utf-8")
+    replacement = source / "replacement.txt"
+    replacement.write_text("replacement bytes", encoding="utf-8")
+    (source / "PACKAGE_FILES.txt").write_text(
+        "PACKAGE_FILES.txt\npayload.txt\n",
+        encoding="utf-8",
+    )
+    original_read = os.read
+    manifest_seen = False
+    swapped = False
+
+    def swapping_read(descriptor, size):
+        nonlocal manifest_seen, swapped
+        data = original_read(descriptor, size)
+        if b"payload.txt" in data:
+            manifest_seen = True
+        elif manifest_seen and data and not swapped:
+            os.replace(replacement, payload)
+            swapped = True
+        return data
+
+    monkeypatch.setattr(os, "read", swapping_read)
+
+    with pytest.raises(ConformanceError):
+        create_trial(source, tmp_path / "copy-trial")
+    assert swapped is True
 
 
 def _fake_agent(tmp_path: Path) -> Path:
@@ -508,6 +782,73 @@ def test_run_records_timeout_and_elapsed_time(tmp_path):
     assert report.phases[0].elapsed_seconds >= 0.05
 
 
+def test_run_reaps_descendants_before_a_phase_audit(tmp_path):
+    child_marker = tmp_path / "child-survived.txt"
+    adapter = tmp_path / "spawning_agent.py"
+    adapter.write_text(
+        """import subprocess
+import sys
+
+marker = sys.argv[1]
+subprocess.Popen([
+    sys.executable,
+    '-c',
+    'import pathlib,sys,time; time.sleep(0.6); pathlib.Path(sys.argv[1]).write_text("survived")',
+    marker,
+])
+raise SystemExit(7)
+""",
+        encoding="utf-8",
+    )
+    command = json.dumps([sys.executable, str(adapter), str(child_marker), "{prompt}"])
+
+    report = run_trial(
+        REPO_ROOT,
+        runtime="fake-descendants",
+        command=parse_command_json(command),
+        timeout_seconds=5,
+        workspace=tmp_path / "descendant-trial",
+    )
+    time.sleep(0.8)
+
+    assert report.phases[0].exit_code == 7
+    assert not child_marker.exists()
+
+
+def test_run_detects_a_guessed_log_symlink_swap_without_following_it(tmp_path):
+    sentinel = tmp_path / "sentinel.txt"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    adapter = tmp_path / "log_swap_agent.py"
+    adapter.write_text(
+        """import os
+import pathlib
+import sys
+
+log_path = pathlib.Path('.grading/conformance/logs/1-briefing.stdout.log')
+log_path.unlink()
+log_path.symlink_to(sys.argv[1])
+print('must stay on the original descriptor')
+raise SystemExit(7)
+""",
+        encoding="utf-8",
+    )
+    command = json.dumps([sys.executable, str(adapter), str(sentinel), "{prompt}"])
+
+    report = run_trial(
+        REPO_ROOT,
+        runtime="fake-log-swap",
+        command=parse_command_json(command),
+        timeout_seconds=5,
+        workspace=tmp_path / "log-swap-trial",
+    )
+
+    phase = report.phases[0]
+    assert phase.error == "log-substituted"
+    assert phase.stdout["path_verified"] is False
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert not (report.workspace / phase.stdout["path"]).is_symlink()
+
+
 def test_run_fails_and_truncates_oversized_agent_output(tmp_path):
     adapter = tmp_path / "noisy_agent.py"
     adapter.write_text(
@@ -532,6 +873,34 @@ os.write(1, b'x' * (2 * 1024 * 1024 + 4096))
     assert phase.error == "output-limit"
     assert phase.stdout["bytes"] == MAX_STDOUT_BYTES
     assert (report.workspace / phase.stdout["path"]).stat().st_size == MAX_STDOUT_BYTES
+
+
+def test_run_terminates_an_unbounded_output_flood_before_timeout(tmp_path):
+    adapter = tmp_path / "flood_agent.py"
+    adapter.write_text(
+        """import os
+
+chunk = b'x' * 65536
+while True:
+    os.write(1, chunk)
+""",
+        encoding="utf-8",
+    )
+    command = json.dumps([sys.executable, str(adapter), "{prompt}"])
+
+    started = time.monotonic()
+    report = run_trial(
+        REPO_ROOT,
+        runtime="fake-flood",
+        command=parse_command_json(command),
+        timeout_seconds=5,
+        workspace=tmp_path / "flood-trial",
+    )
+
+    phase = report.phases[0]
+    assert phase.error == "output-limit"
+    assert phase.stdout["bytes"] == MAX_STDOUT_BYTES
+    assert time.monotonic() - started < 2
 
 
 def stat_mode(path: Path) -> int:

@@ -28,6 +28,10 @@ from scripts.grading._conformance_model import (
     TRIAL_SCHEMA,
     TRIAL_SUBMISSIONS,
 )
+from scripts.grading._conformance_process import (
+    popen_group_options,
+    terminate_process_group,
+)
 from scripts.path_safety import is_within, read_bytes_limited, read_text_limited
 
 
@@ -67,44 +71,109 @@ def private_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
 
 
 def _repository_revision(repo_root: Path) -> str:
+    def git_output(arguments: list[str]) -> tuple[int, str]:
+        process = subprocess.Popen(
+            arguments,
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            **popen_group_options(),
+        )
+        try:
+            stdout, _ = process.communicate(timeout=5)
+            if len(stdout) > 1024 * 1024:
+                return 1, ""
+            return int(process.returncode or 0), stdout
+        finally:
+            terminate_process_group(process)
+
     try:
-        revision = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=repo_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-            check=False,
-        )
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=repo_root,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            timeout=5,
-            check=False,
-        )
+        revision_code, revision_output = git_output(["git", "rev-parse", "HEAD"])
+        dirty_code, dirty_output = git_output(["git", "status", "--porcelain"])
     except (OSError, subprocess.SubprocessError):
         return "unknown"
-    if revision.returncode != 0:
+    if revision_code != 0:
         return "unknown"
-    value = revision.stdout.strip()
-    if dirty.returncode == 0 and dirty.stdout:
+    value = revision_output.strip()
+    if dirty_code == 0 and dirty_output:
         value += "+dirty"
     return value
 
 
-def _package_paths(repo_root: Path) -> tuple[Path, ...]:
-    manifest = repo_root / "PACKAGE_FILES.txt"
-    if manifest.is_symlink() or not manifest.is_file():
-        raise ConformanceError("PACKAGE_FILES.txt must be one regular file.")
+def _read_fd_limited(descriptor: int, label: str, limit: int) -> bytes:
+    state = os.fstat(descriptor)
+    if not stat.S_ISREG(state.st_mode) or state.st_size > limit:
+        raise ConformanceError(f"{label} is not one bounded regular file.")
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = limit + 1
+    while remaining:
+        chunk = os.read(descriptor, min(64 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    data = b"".join(chunks)
+    if len(data) > limit:
+        raise ConformanceError(f"{label} is too large.")
+    return data
+
+
+def _directory_flags() -> int:
+    return (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+
+
+def _open_directory_chain(root_fd: int, parts: tuple[str, ...], *, create: bool) -> int:
+    current = os.dup(root_fd)
     try:
-        lines = read_text_limited(
-            manifest, "The reviewed package inventory", 1024 * 1024
-        ).splitlines()
-    except (OSError, UnicodeError, ValueError) as error:
+        for part in parts:
+            if create:
+                try:
+                    os.mkdir(part, 0o755, dir_fd=current)
+                except FileExistsError:
+                    pass
+            child = os.open(part, _directory_flags(), dir_fd=current)
+            os.close(current)
+            current = child
+        return current
+    except Exception:
+        os.close(current)
+        raise
+
+
+def _open_regular_at(parent_fd: int, name: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(name, flags, dir_fd=parent_fd)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise ConformanceError("A reviewed package source is not a regular file.")
+    return descriptor
+
+
+def _package_paths(repo_root: Path) -> tuple[Path, ...]:
+    root_fd = os.open(repo_root, _directory_flags())
+    try:
+        manifest_fd = _open_regular_at(root_fd, "PACKAGE_FILES.txt")
+        try:
+            source = _read_fd_limited(
+                manifest_fd, "The reviewed package inventory", 1024 * 1024
+            )
+        finally:
+            os.close(manifest_fd)
+    except (OSError, UnicodeError, ValueError, ConformanceError) as error:
+        raise ConformanceError("Cannot read the reviewed package inventory.") from error
+    finally:
+        os.close(root_fd)
+    try:
+        lines = source.decode("utf-8").splitlines()
+    except UnicodeError as error:
         raise ConformanceError("Cannot read the reviewed package inventory.") from error
     paths: list[Path] = []
     for raw in lines:
@@ -117,19 +186,100 @@ def _package_paths(repo_root: Path) -> tuple[Path, ...]:
             or relative.as_posix() != raw
         ):
             raise ConformanceError("PACKAGE_FILES.txt contains an unsafe path.")
-        source = repo_root / relative
-        if source.is_symlink() or not source.is_file():
-            raise ConformanceError(
-                f"Reviewed package path is not one regular file: {relative.as_posix()}"
-            )
-        try:
-            source.resolve().relative_to(repo_root)
-        except ValueError as error:
-            raise ConformanceError(
-                "A reviewed package path escapes the repository."
-            ) from error
         paths.append(relative)
     return tuple(paths)
+
+
+def _copy_package_file(
+    source_root_fd: int, destination_root_fd: int, relative: Path
+) -> dict[str, object]:
+    source_parent = _open_directory_chain(
+        source_root_fd, relative.parts[:-1], create=False
+    )
+    destination_parent = _open_directory_chain(
+        destination_root_fd, relative.parts[:-1], create=True
+    )
+    source_fd = -1
+    destination_fd = -1
+    try:
+        source_fd = _open_regular_at(source_parent, relative.name)
+        before = os.fstat(source_fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        destination_fd = os.open(
+            relative.name,
+            flags,
+            stat.S_IMODE(before.st_mode),
+            dir_fd=destination_parent,
+        )
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(source_fd, 64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            total += len(chunk)
+            view = memoryview(chunk)
+            while view:
+                written = os.write(destination_fd, view)
+                view = view[written:]
+        os.fchmod(destination_fd, stat.S_IMODE(before.st_mode))
+        after = os.fstat(source_fd)
+        path_after = os.stat(relative.name, dir_fd=source_parent, follow_symlinks=False)
+        verified_parent = _open_directory_chain(
+            source_root_fd, relative.parts[:-1], create=False
+        )
+        try:
+            parent_after = os.fstat(verified_parent)
+        finally:
+            os.close(verified_parent)
+        identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        if (
+            identity
+            != (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+            )
+            or (path_after.st_dev, path_after.st_ino)
+            != (
+                before.st_dev,
+                before.st_ino,
+            )
+            or (parent_after.st_dev, parent_after.st_ino)
+            != (
+                os.fstat(source_parent).st_dev,
+                os.fstat(source_parent).st_ino,
+            )
+        ):
+            raise ConformanceError("A reviewed package source changed during copy.")
+        return {
+            "path": relative.as_posix(),
+            "bytes": total,
+            "sha256": digest.hexdigest(),
+            "mode": f"{stat.S_IMODE(before.st_mode):04o}",
+        }
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+        if source_fd >= 0:
+            os.close(source_fd)
+        os.close(destination_parent)
+        os.close(source_parent)
+
+
+def _package_document(
+    files: tuple[dict[str, object], ...], revision: str
+) -> dict[str, object]:
+    canonical = json.dumps(files, sort_keys=True, separators=(",", ":"))
+    return {
+        "schema": "grading-agent-package/1",
+        "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "dirty": revision.endswith("+dirty"),
+        "files": files,
+    }
 
 
 def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
@@ -150,12 +300,16 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
     destination.chmod(0o700)
 
     try:
-        for relative in _package_paths(source_root):
-            source = source_root / relative
-            target = destination / relative
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, target, follow_symlinks=False)
-            target.chmod(stat.S_IMODE(source.stat(follow_symlinks=False).st_mode))
+        source_root_fd = os.open(source_root, _directory_flags())
+        destination_root_fd = os.open(destination, _directory_flags())
+        try:
+            package_files = tuple(
+                _copy_package_file(source_root_fd, destination_root_fd, relative)
+                for relative in _package_paths(source_root)
+            )
+        finally:
+            os.close(destination_root_fd)
+            os.close(source_root_fd)
 
         profile_source = destination / "tests/fixtures/phil210/profile_phil210.md"
         private_write(
@@ -167,6 +321,8 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
             destination / TRIAL_SUBMISSIONS / "Maya Lin.md",
             _TRIAL_SUBMISSION_TEXT.encode("utf-8"),
         )
+        revision = _repository_revision(source_root)
+        package = _package_document(package_files, revision)
         private_write(
             destination / TRIAL_MARKER,
             (
@@ -176,7 +332,8 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
                         "synthetic": True,
                         "batch": TRIAL_BATCH,
                         "course": TRIAL_COURSE,
-                        "repository_revision": _repository_revision(source_root),
+                        "repository_revision": revision,
+                        "package": package,
                     },
                     indent=2,
                     sort_keys=True,
@@ -184,6 +341,9 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
                 + "\n"
             ).encode("utf-8"),
         )
+    except OSError as error:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise ConformanceError("Cannot copy the reviewed package safely.") from error
     except Exception:
         shutil.rmtree(destination, ignore_errors=True)
         raise
@@ -198,7 +358,7 @@ def read_trial_marker(workspace: Path) -> dict[str, object]:
         )
     try:
         payload = json.loads(
-            read_text_limited(marker, "The conformance trial marker", 64 * 1024)
+            read_text_limited(marker, "The conformance trial marker", 1024 * 1024)
         )
     except (OSError, UnicodeError, ValueError) as error:
         raise ConformanceError("The conformance trial marker is malformed.") from error
@@ -210,12 +370,150 @@ def read_trial_marker(workspace: Path) -> dict[str, object]:
         or payload.get("course") != TRIAL_COURSE
         or not isinstance(payload.get("repository_revision"), str)
         or not _REVISION.fullmatch(str(payload.get("repository_revision")))
+        or not isinstance(payload.get("package"), dict)
     ):
         raise ConformanceError("The conformance trial marker is malformed.")
+    package = payload["package"]
+    if (
+        package.get("schema") != "grading-agent-package/1"
+        or not isinstance(package.get("digest"), str)
+        or len(package["digest"]) != 64
+        or not isinstance(package.get("dirty"), bool)
+        or not isinstance(package.get("files"), list)
+    ):
+        raise ConformanceError("The conformance package attestation is malformed.")
     return payload
 
 
-def refuse_workspace_links(workspace: Path) -> None:
+def _current_package_file(root_fd: int, relative: Path) -> dict[str, object]:
+    parent = _open_directory_chain(root_fd, relative.parts[:-1], create=False)
+    descriptor = -1
+    try:
+        descriptor = _open_regular_at(parent, relative.name)
+        state = os.fstat(descriptor)
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            digest.update(chunk)
+        return {
+            "path": relative.as_posix(),
+            "bytes": total,
+            "sha256": digest.hexdigest(),
+            "mode": f"{stat.S_IMODE(state.st_mode):04o}",
+        }
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        os.close(parent)
+
+
+def _unexpected_package_paths(
+    workspace: Path, expected_paths: set[str]
+) -> tuple[str, ...]:
+    expected_top = {Path(path).parts[0] for path in expected_paths}
+    runtime_top = {".grading", "redacted", "drafts", "final", "synthetic"}
+    unexpected: set[str] = set()
+    for entry in workspace.iterdir():
+        if entry.name not in expected_top | runtime_top:
+            unexpected.add(entry.name)
+    for top in sorted(expected_top):
+        root = workspace / top
+        if not root.is_dir() or root.is_symlink():
+            continue
+        for current, directories, files in os.walk(root, followlinks=False):
+            base = Path(current)
+            directories[:] = [name for name in directories if name != "__pycache__"]
+            for name in directories + files:
+                path = base / name
+                if "__pycache__" in path.parts or path.suffix == ".pyc":
+                    continue
+                relative = path.relative_to(workspace).as_posix()
+                if relative not in expected_paths and (
+                    path.is_symlink() or path.is_file()
+                ):
+                    unexpected.add(relative)
+    return tuple(sorted(unexpected))
+
+
+def attest_package(
+    workspace: Path, expected: dict[str, object] | None = None
+) -> dict[str, object]:
+    """Revalidate every reviewed package byte without trusting package code."""
+    if expected is None:
+        expected = dict(read_trial_marker(workspace)["package"])
+    raw_files = expected.get("files")
+    if not isinstance(raw_files, (list, tuple)):
+        raise ConformanceError("The conformance package attestation is malformed.")
+    files: list[dict[str, object]] = []
+    expected_paths: set[str] = set()
+    for item in raw_files:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("path"), str)
+            or Path(item["path"]).is_absolute()
+            or ".." in Path(item["path"]).parts
+            or not isinstance(item.get("bytes"), int)
+            or not isinstance(item.get("sha256"), str)
+            or len(item["sha256"]) != 64
+            or not isinstance(item.get("mode"), str)
+        ):
+            raise ConformanceError("The conformance package attestation is malformed.")
+        if item["path"] in expected_paths:
+            raise ConformanceError(
+                "The conformance package attestation has duplicates."
+            )
+        expected_paths.add(item["path"])
+        files.append(dict(item))
+    files.sort(key=lambda item: item["path"])
+    canonical = json.dumps(tuple(files), sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if expected.get("digest") != digest or not isinstance(expected.get("dirty"), bool):
+        raise ConformanceError("The conformance package attestation is malformed.")
+
+    root_fd = os.open(workspace, _directory_flags())
+    findings: set[str] = set()
+    actual_files: list[dict[str, object]] = []
+    try:
+        for item in files:
+            relative = Path(item["path"])
+            try:
+                actual = _current_package_file(root_fd, relative)
+            except (OSError, ConformanceError):
+                findings.add(f"package-missing:{relative.as_posix()}")
+                continue
+            actual_files.append(actual)
+            if actual != item:
+                findings.add(f"package-changed:{relative.as_posix()}")
+    finally:
+        os.close(root_fd)
+    for relative in _unexpected_package_paths(workspace, expected_paths):
+        findings.add(f"package-unexpected:{relative}")
+    actual_canonical = json.dumps(
+        tuple(sorted(actual_files, key=lambda item: item["path"])),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        "schema": "grading-agent-package/1",
+        "status": "failed" if findings else "passed",
+        "digest": digest,
+        "actual_digest": hashlib.sha256(actual_canonical.encode("utf-8")).hexdigest(),
+        "dirty": bool(expected["dirty"]),
+        "files": tuple(files),
+        "findings": tuple(sorted(findings)),
+    }
+
+
+def refuse_workspace_links(
+    workspace: Path,
+    *,
+    allow_identity_artifacts: bool = False,
+    allowed_package_paths: set[str] | None = None,
+) -> None:
     def refuse_unreadable(_error: OSError) -> None:
         raise ConformanceError("The trial contains an unreadable directory.")
 
@@ -227,6 +525,22 @@ def refuse_workspace_links(workspace: Path) -> None:
             path = base / name
             if not path.is_symlink():
                 continue
+            relative = path.relative_to(workspace).as_posix()
+            if allow_identity_artifacts and any(
+                path == workspace / root or workspace / root in path.parents
+                for root in (TRIAL_REDACTED, TRIAL_DRAFTS)
+            ):
+                continue
+            if allowed_package_paths:
+                package_roots = {
+                    Path(package_path).parts[0]
+                    for package_path in allowed_package_paths
+                }
+                if Path(relative).parts[0] in package_roots or any(
+                    relative == package_path or package_path.startswith(relative + "/")
+                    for package_path in allowed_package_paths
+                ):
+                    continue
             try:
                 target = path.resolve(strict=False)
             except OSError as error:
@@ -269,6 +583,29 @@ def private_directory(workspace: Path, relative: Path) -> Path:
     return current
 
 
+def open_workspace_directory(workspace: Path, relative: Path) -> int:
+    root_fd = os.open(workspace, _directory_flags())
+    try:
+        return _open_directory_chain(root_fd, relative.parts, create=False)
+    finally:
+        os.close(root_fd)
+
+
+def workspace_directory_matches(
+    workspace: Path, relative: Path, expected: os.stat_result
+) -> bool:
+    descriptor = -1
+    try:
+        descriptor = open_workspace_directory(workspace, relative)
+        current = os.fstat(descriptor)
+        return (current.st_dev, current.st_ino) == (expected.st_dev, expected.st_ino)
+    except OSError:
+        return False
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
 def _report_path(relative: str, identities: tuple[str, ...]) -> str:
     if any(value.casefold() in relative.casefold() for value in identities):
         parent = Path(relative).parent.as_posix()
@@ -288,7 +625,7 @@ def _artifact_entry(
     identities: tuple[str, ...] = (),
 ) -> dict[str, object]:
     relative = _report_path(path.relative_to(workspace).as_posix(), identities)
-    info = path.stat(follow_symlinks=False)
+    info = path.lstat()
     result: dict[str, object] = {
         "path": relative,
         "bytes": info.st_size,
@@ -296,10 +633,14 @@ def _artifact_entry(
         "regular": stat.S_ISREG(info.st_mode),
     }
     if content and result["regular"] and info.st_size <= ARTIFACT_LIMIT:
-        result["sha256"] = hashlib.sha256(
-            read_bytes_limited(path, "The observed artifact", ARTIFACT_LIMIT)
-        ).hexdigest()
-        result["bounded"] = True
+        try:
+            result["sha256"] = hashlib.sha256(
+                read_bytes_limited(path, "The observed artifact", ARTIFACT_LIMIT)
+            ).hexdigest()
+            result["bounded"] = True
+        except (OSError, UnicodeError, ValueError):
+            result["sha256"] = ""
+            result["bounded"] = False
     elif content:
         result["sha256"] = ""
         result["bounded"] = False
@@ -331,10 +672,15 @@ def observed_artifacts(
     paths: set[Path] = set()
     for relative in roots:
         root = workspace / relative
-        if root.is_file():
+        if root.is_symlink() or root.is_file():
             paths.add(root)
         elif root.is_dir():
-            paths.update(path for path in root.rglob("*") if path.is_file())
+            for current, directories, files in os.walk(root, followlinks=False):
+                base = Path(current)
+                for name in directories + files:
+                    path = base / name
+                    if path.is_symlink() or path.is_file():
+                        paths.add(path)
     trusted = identities if identities is not None else identity_values(workspace)
     return tuple(
         _artifact_entry(workspace, path, identities=trusted) for path in sorted(paths)
@@ -360,24 +706,94 @@ def identity_values(workspace: Path) -> tuple[str, ...]:
     return tuple(sorted(values, key=str.casefold))
 
 
-def identity_leaks(
+def _identity_artifact_paths(
+    workspace: Path,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    paths: set[Path] = set()
+    unreadable: set[Path] = set()
+
+    def record_unreadable(error: OSError) -> None:
+        if error.filename:
+            unreadable.add(Path(error.filename))
+
+    for relative in (TRIAL_REDACTED, TRIAL_DRAFTS):
+        root = workspace / relative
+        if root.is_symlink():
+            paths.add(root)
+            continue
+        if not root.is_dir():
+            continue
+        for current, directories, files in os.walk(
+            root, followlinks=False, onerror=record_unreadable
+        ):
+            base = Path(current)
+            for name in directories + files:
+                path = base / name
+                if path.is_symlink() or path.is_file():
+                    paths.add(path)
+    return tuple(sorted(paths)), tuple(sorted(unreadable))
+
+
+def identity_scan(
     workspace: Path, identities: tuple[str, ...] | None = None
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[dict[str, str], ...]]:
     trusted = identities if identities is not None else identity_values(workspace)
     folded_identities = tuple(value.casefold() for value in trusted)
     leaks: set[str] = set()
-    for relative in (TRIAL_REDACTED, TRIAL_DRAFTS):
-        directory = workspace / relative
-        if not directory.is_dir():
-            continue
-        for path in sorted(item for item in directory.rglob("*") if item.is_file()):
+    findings: dict[str, str] = {}
+    root_fd = os.open(workspace, _directory_flags())
+    try:
+        artifact_paths, unreadable_paths = _identity_artifact_paths(workspace)
+        for path in unreadable_paths:
+            relative = _report_path(path.relative_to(workspace).as_posix(), trusted)
+            findings[relative] = "artifact-unreadable"
+        for path in artifact_paths:
+            relative_path = path.relative_to(workspace)
+            relative = _report_path(relative_path.as_posix(), trusted)
             try:
-                text = read_text_limited(
-                    path, "The identity-free artifact", ARTIFACT_LIMIT
+                state = path.lstat()
+            except OSError:
+                findings[relative] = "artifact-unreadable"
+                continue
+            if stat.S_ISLNK(state.st_mode) or not stat.S_ISREG(state.st_mode):
+                findings[relative] = "artifact-linked"
+                continue
+            if state.st_size > ARTIFACT_LIMIT:
+                findings[relative] = "artifact-too-large"
+                continue
+            descriptor = -1
+            parent = -1
+            try:
+                parent = _open_directory_chain(
+                    root_fd, relative_path.parts[:-1], create=False
                 )
-            except (OSError, UnicodeError, ValueError):
+                descriptor = _open_regular_at(parent, relative_path.name)
+                opened = os.fstat(descriptor)
+                if (opened.st_dev, opened.st_ino) != (state.st_dev, state.st_ino):
+                    findings[relative] = "artifact-unreadable"
+                    continue
+                source = _read_fd_limited(
+                    descriptor, "The identity-free artifact", ARTIFACT_LIMIT
+                )
+            except (OSError, ConformanceError):
+                findings[relative] = "artifact-unreadable"
+                continue
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+                if parent >= 0:
+                    os.close(parent)
+            try:
+                text = source.decode("utf-8")
+            except UnicodeError:
+                findings[relative] = "artifact-invalid-utf8"
                 continue
             folded = text.casefold()
             if any(value in folded for value in folded_identities):
-                leaks.add(_report_path(path.relative_to(workspace).as_posix(), trusted))
-    return tuple(sorted(leaks))
+                leaks.add(relative)
+    finally:
+        os.close(root_fd)
+    return (
+        tuple(sorted(leaks)),
+        tuple({"path": path, "code": code} for path, code in sorted(findings.items())),
+    )

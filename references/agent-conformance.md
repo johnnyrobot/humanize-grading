@@ -28,7 +28,9 @@ characters before and after placeholder replacement. Shell operators such as
 
 The adapter receives three separate prompts: `briefing`, `redaction`, and
 `grading`. Each prompt requires `grade.py next --json` before and after the
-phase. The harness stops after the first process or checkpoint failure.
+phase. The harness stops after the first process or checkpoint failure. Every
+adapter runs in its own process group. The harness stops and reaps that group,
+including inherited descendants, before it audits the workspace.
 
 ## Bionic audit mode
 
@@ -76,6 +78,12 @@ Each line is one `grading-agent-trace/1` event:
 to `grading`. The trace is limited to 10,000 events and 1 MiB per line. Command
 events use the same argument count and item limits as adapters.
 
+A passing phase trace needs successful `grade.py next --json` command events
+before and after at least one phase-work command. The first command must be the
+opening `next`; the last command must be the closing `next`. Read-only,
+partial, missing, or out-of-order command evidence is `UNVERIFIED`. The
+10,000-event limit is global across every supplied phase file, not per file.
+
 Read permissions are phase-specific. The grading phase may read the skill,
 references, scripts, rubric, current profile, approved brief, redacted source,
 and token-named draft pair. A traced agent read of any raw submission, roster,
@@ -93,6 +101,18 @@ The harness copies only files named by `PACKAGE_FILES.txt`. It refuses package
 links, paths outside the repository, and observed workspace links. Agent
 stdout and stderr are each limited to 2 MiB. Stored logs, traces created during
 `run`, and JSON and Markdown reports use owner-only permissions.
+
+Package copying and later checks bind each reviewed file to its descriptor,
+path, exact bytes, mode, and SHA-256. The report records the complete package
+manifest, one digest for that byte set, and whether the source checkout was
+dirty. Package files are rechecked before and after every phase. Any changed,
+missing, linked, or unexpected package path fails before lifecycle code from
+the trial is run.
+
+The identity scan also fails closed. A linked, unreadable, oversized, invalid
+UTF-8, or otherwise unbounded redacted or draft artifact becomes a sanitized
+path finding and fails the deterministic audit. A phase checkpoint rejects
+artifacts that belong to a later phase.
 
 Reports use schema `grading-agent-conformance/1`. They contain sanitized
 arguments, elapsed time, exit and timeout state, bounded log hashes, artifact

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import secrets
 import stat
 import subprocess
@@ -37,8 +38,13 @@ from scripts.grading._conformance_model import (
     TrialPhase,
     report_as_dict,
 )
+from scripts.grading._conformance_process import (
+    popen_group_options,
+    terminate_process_group,
+)
 from scripts.grading._conformance_trial import (
-    identity_leaks,
+    attest_package,
+    identity_scan,
     identity_values,
     observed_artifacts,
     private_artifacts,
@@ -110,7 +116,28 @@ def _trace_read_allowed(path: str, phase: str) -> bool:
     return any(path == prefix or path.startswith(prefix + "/") for prefix in allowed)
 
 
-def audit_trace(workspace: Path, trace_paths: tuple[Path, ...]) -> TraceResult:
+def _default_trace_phase(path: Path) -> str:
+    for phase in ("briefing", "redaction", "grading"):
+        if phase in path.name:
+            return phase
+    return "grading"
+
+
+def _is_successful_next(argv: list[str], exit_code: int) -> bool:
+    return bool(
+        exit_code == 0
+        and any(item.endswith("scripts/grade.py") for item in argv)
+        and "next" in argv
+        and "--json" in argv
+    )
+
+
+def audit_trace(
+    workspace: Path,
+    trace_paths: tuple[Path, ...],
+    *,
+    required_phases: tuple[str, ...] = ("briefing", "redaction", "grading"),
+) -> TraceResult:
     """Read bounded JSONL evidence without embedding untrusted event values."""
     candidates = tuple(
         path if path.is_absolute() else workspace / path for path in trace_paths
@@ -124,7 +151,27 @@ def audit_trace(workspace: Path, trace_paths: tuple[Path, ...]) -> TraceResult:
     reads = 0
     prohibited: set[str] = set()
     findings: set[str] = set()
-    for absolute in existing:
+    phase_commands: dict[str, list[tuple[bool, int]]] = {
+        phase: [] for phase in ("briefing", "redaction", "grading")
+    }
+    phase_work: dict[str, list[int]] = {
+        phase: [] for phase in ("briefing", "redaction", "grading")
+    }
+    stop_all = False
+    for file_index, absolute in enumerate(existing):
+        if events >= MAX_TRACE_EVENTS:
+            for remaining in existing[file_index:]:
+                try:
+                    state = remaining.lstat()
+                except OSError:
+                    findings.add("trace-unreadable")
+                    continue
+                if stat.S_ISREG(state.st_mode) and state.st_size:
+                    findings.add("too-many-trace-events")
+                    break
+                if not stat.S_ISREG(state.st_mode):
+                    findings.add("trace-not-regular")
+            break
         reads_before_file = reads
         try:
             absolute.resolve().relative_to(workspace)
@@ -137,6 +184,11 @@ def audit_trace(workspace: Path, trace_paths: tuple[Path, ...]) -> TraceResult:
         try:
             with absolute.open("rb") as handle:
                 while True:
+                    if events >= MAX_TRACE_EVENTS:
+                        if handle.tell() < os.fstat(handle.fileno()).st_size:
+                            findings.add("too-many-trace-events")
+                            stop_all = True
+                        break
                     raw_line = handle.readline(MAX_TRACE_LINE_BYTES + 1)
                     if not raw_line:
                         break
@@ -144,9 +196,6 @@ def audit_trace(workspace: Path, trace_paths: tuple[Path, ...]) -> TraceResult:
                         findings.add("trace-line-too-large")
                         break
                     events += 1
-                    if events > MAX_TRACE_EVENTS:
-                        findings.add("too-many-trace-events")
-                        break
                     try:
                         event = json.loads(raw_line.decode("utf-8"))
                     except (UnicodeError, json.JSONDecodeError):
@@ -159,20 +208,21 @@ def audit_trace(workspace: Path, trace_paths: tuple[Path, ...]) -> TraceResult:
                         findings.add("malformed-trace-event")
                         continue
                     kind = event.get("event")
+                    event_phase = event.get("phase", _default_trace_phase(absolute))
+                    if not isinstance(event_phase, str) or event_phase not in {
+                        "briefing",
+                        "redaction",
+                        "grading",
+                    }:
+                        findings.add("malformed-trace-phase")
+                        continue
                     if kind == "read":
                         reads += 1
+                        phase_work[event_phase].append(events)
                         relative = _normalize_trace_path(
                             workspace, event.get("path"), identities
                         )
-                        phase = event.get("phase", "grading")
-                        if not isinstance(phase, str) or phase not in {
-                            "briefing",
-                            "redaction",
-                            "grading",
-                        }:
-                            findings.add("malformed-trace-phase")
-                            continue
-                        if not _trace_read_allowed(relative, phase):
+                        if not _trace_read_allowed(relative, event_phase):
                             prohibited.add(relative)
                     elif kind == "command":
                         argv = event.get("argv")
@@ -189,11 +239,31 @@ def audit_trace(workspace: Path, trace_paths: tuple[Path, ...]) -> TraceResult:
                             or not isinstance(event.get("exit_code"), int)
                         ):
                             findings.add("malformed-command-event")
+                        else:
+                            is_next = _is_successful_next(argv, int(event["exit_code"]))
+                            phase_commands[event_phase].append((is_next, events))
+                            if not is_next:
+                                phase_work[event_phase].append(events)
                     else:
                         findings.add("unknown-trace-event")
         except OSError:
             findings.add("trace-unreadable")
         if reads == reads_before_file:
+            evidence_complete = False
+        if stop_all:
+            break
+    for phase in required_phases:
+        commands = phase_commands[phase]
+        successful_next = [index for is_next, index in commands if is_next]
+        work = phase_work[phase]
+        if (
+            len(successful_next) < 2
+            or not work
+            or commands[0][0] is not True
+            or commands[-1][0] is not True
+            or not successful_next[0] < min(work)
+            or not max(work) < successful_next[-1]
+        ):
             evidence_complete = False
     failed = bool(prohibited or findings)
     status = "failed" if failed else ("passed" if evidence_complete else "unverified")
@@ -228,18 +298,27 @@ def _verification_exit(workspace: Path) -> int:
         ".grading",
     ]
     try:
-        result = subprocess.run(
+        environment = os.environ.copy()
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        process = subprocess.Popen(
             command,
             shell=False,
             cwd=workspace,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=30,
-            check=False,
+            env=environment,
+            **popen_group_options(),
         )
-    except (OSError, subprocess.SubprocessError):
+    except OSError:
         return 13
-    return result.returncode
+    try:
+        process.wait(timeout=30)
+        return_code = int(process.returncode or 0)
+    except subprocess.TimeoutExpired:
+        return_code = 13
+    finally:
+        terminate_process_group(process)
+    return return_code
 
 
 class _PublicationInspector:
@@ -338,9 +417,17 @@ def _deterministic_passed(
     lifecycle: dict[str, object],
     private: tuple[dict[str, object], ...],
     leaks: tuple[str, ...],
+    artifact_findings: tuple[dict[str, str], ...],
+    package: dict[str, object],
     expected_phase: str,
 ) -> bool:
-    if lifecycle["brief"]["status"] != "passed" or leaks:
+    if (
+        lifecycle["brief"]["status"] != "passed"
+        or leaks
+        or artifact_findings
+        or package["status"] != "passed"
+        or lifecycle["phase"]["status"] != "passed"
+    ):
         return False
     if expected_phase == "briefing":
         return True
@@ -355,6 +442,48 @@ def _deterministic_passed(
         and lifecycle["receipt"]["present"]
         and lifecycle["publication"]["status"] == "passed"
     )
+
+
+def _phase_findings(
+    artifacts: tuple[dict[str, object], ...],
+    private: tuple[dict[str, object], ...],
+    expected_phase: str,
+) -> tuple[str, ...]:
+    if expected_phase not in {"briefing", "redaction", "grading"}:
+        raise ConformanceError("The expected conformance phase is unknown.")
+    later_prefixes = {
+        "briefing": ("redacted/", "drafts/", "final/"),
+        "redaction": ("drafts/", "final/"),
+        "grading": (),
+    }[expected_phase]
+    findings = {
+        f"later-stage-artifact:{item['path']}"
+        for item in artifacts
+        if any(str(item["path"]).startswith(prefix) for prefix in later_prefixes)
+    }
+    if expected_phase == "briefing":
+        findings.update(
+            f"later-stage-artifact:{item['path']}"
+            for item in private
+            if item["present"]
+        )
+    return tuple(sorted(findings))
+
+
+def _failed_lifecycle(expected_phase: str, phase_findings: tuple[str, ...]) -> dict:
+    return {
+        "brief": {"status": "unverified"},
+        "manifest": {"status": "unverified"},
+        "status": {"counts": {}, "blocking_codes": ("package-changed",)},
+        "verify": {"exit_code": 13, "dry_run": True},
+        "receipt": {"present": False, "mode": ""},
+        "publication": {"status": "unverified"},
+        "phase": {
+            "expected": expected_phase,
+            "status": "failed" if phase_findings else "unverified",
+            "findings": phase_findings,
+        },
+    }
 
 
 def report_summary(report: ConformanceReport) -> str:
@@ -387,8 +516,11 @@ def persist_report(report: ConformanceReport) -> ConformanceReport:
         f"Runtime: `{report.runtime}`\n\n"
         f"Mode: `{report.mode}`\n\n"
         f"Repository revision: `{report.repository_revision}`\n\n"
+        f"Package: `{report.package.get('status', 'unverified')}` "
+        f"(`{report.package.get('digest', '')}`)\n\n"
         f"Trace evidence: `{report.trace.status}`\n\n"
         f"Identity leak paths: {len(report.identity_leaks)}\n"
+        f"Artifact findings: {len(report.artifact_findings)}\n"
     )
     private_write(markdown_path, markdown.encode("utf-8"), exclusive=True)
     return replace(report, json_path=json_path, markdown_path=markdown_path)
@@ -402,24 +534,84 @@ def audit_workspace(
     expected_phase: str = "grading",
     phases: tuple[TrialPhase, ...] = (),
     persist: bool = True,
+    expected_package: dict[str, object] | None = None,
 ) -> ConformanceReport:
     """Audit one synthetic workspace without launching an agent."""
     if not RUNTIME_PATTERN.fullmatch(runtime):
         raise ConformanceError("The runtime label must be one short safe name.")
-    root = workspace.expanduser().resolve()
+    candidate = workspace.expanduser()
+    if candidate.is_symlink():
+        raise ConformanceError("The trial workspace itself must not be a link.")
+    root = candidate.resolve()
     if not root.is_dir():
         raise ConformanceError("The trial workspace must be one directory.")
-    refuse_workspace_links(root)
     marker = read_trial_marker(root)
+    package_baseline = (
+        expected_package if expected_package is not None else dict(marker["package"])
+    )
+    package_paths = {
+        str(item["path"])
+        for item in package_baseline.get("files", ())
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    refuse_workspace_links(
+        root,
+        allow_identity_artifacts=True,
+        allowed_package_paths=package_paths,
+    )
     validate_synthetic_inputs(root)
     identities = identity_values(root)
     artifacts = observed_artifacts(root, identities)
     private = private_artifacts(root)
-    leaks = identity_leaks(root, identities)
-    lifecycle = _lifecycle(root)
-    trace = audit_trace(root, trace_paths)
+    leaks, artifact_findings = identity_scan(root, identities)
+    bounded_findings = {
+        str(item["path"]): "artifact-unbounded"
+        for item in artifacts
+        if (
+            str(item["path"]).startswith("redacted/")
+            or str(item["path"]).startswith("drafts/")
+        )
+        and item.get("bounded") is False
+    }
+    for finding in artifact_findings:
+        bounded_findings[str(finding["path"])] = str(finding["code"])
+    artifact_findings = tuple(
+        {"path": path, "code": code} for path, code in sorted(bounded_findings.items())
+    )
+    unbounded_paths = {str(item["path"]) for item in artifact_findings}
+    artifacts = tuple(
+        {**item, "bounded": False} if str(item["path"]) in unbounded_paths else item
+        for item in artifacts
+    )
+    phase_findings = _phase_findings(artifacts, private, expected_phase)
+    package = attest_package(
+        root,
+        package_baseline,
+    )
+    if package["status"] == "passed":
+        lifecycle = _lifecycle(root)
+        lifecycle["phase"] = {
+            "expected": expected_phase,
+            "status": "failed" if phase_findings else "passed",
+            "findings": phase_findings,
+        }
+    else:
+        lifecycle = _failed_lifecycle(expected_phase, phase_findings)
+    required = {
+        "briefing": ("briefing",),
+        "redaction": ("briefing", "redaction"),
+        "grading": ("briefing", "redaction", "grading"),
+    }[expected_phase]
+    trace = audit_trace(root, trace_paths, required_phases=required)
     passed = (
-        _deterministic_passed(lifecycle, private, leaks, expected_phase)
+        _deterministic_passed(
+            lifecycle,
+            private,
+            leaks,
+            artifact_findings,
+            package,
+            expected_phase,
+        )
         and trace.status != "failed"
     )
     report = ConformanceReport(
@@ -431,8 +623,10 @@ def audit_workspace(
         phases=phases,
         lifecycle=lifecycle,
         artifacts=artifacts,
+        artifact_findings=artifact_findings,
         identity_leaks=leaks,
         private_artifacts=private,
+        package=package,
         trace=trace,
     )
     return persist_report(report) if persist else report

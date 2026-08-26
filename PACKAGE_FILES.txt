@@ -47,6 +47,7 @@ scripts/grade.py
 scripts/grading/__init__.py
 scripts/grading/_conformance_audit.py
 scripts/grading/_conformance_model.py
+scripts/grading/_conformance_process.py
 scripts/grading/_conformance_run.py
 scripts/grading/_conformance_trial.py
 scripts/grading/batch.py

@@ -112,8 +112,10 @@ class ConformanceReport:
     phases: tuple[TrialPhase, ...] = ()
     lifecycle: Mapping[str, object] = field(default_factory=dict)
     artifacts: tuple[Mapping[str, object], ...] = ()
+    artifact_findings: tuple[Mapping[str, object], ...] = ()
     identity_leaks: tuple[str, ...] = ()
     private_artifacts: tuple[Mapping[str, object], ...] = ()
+    package: Mapping[str, object] = field(default_factory=dict)
     trace: TraceResult = field(default_factory=lambda: TraceResult("unverified"))
     json_path: Path | None = None
     markdown_path: Path | None = None
@@ -123,8 +125,10 @@ class ConformanceReport:
         object.__setattr__(self, "phases", tuple(self.phases))
         object.__setattr__(self, "lifecycle", _freeze(self.lifecycle))
         object.__setattr__(self, "artifacts", _freeze(self.artifacts))
+        object.__setattr__(self, "artifact_findings", _freeze(self.artifact_findings))
         object.__setattr__(self, "identity_leaks", tuple(self.identity_leaks))
         object.__setattr__(self, "private_artifacts", _freeze(self.private_artifacts))
+        object.__setattr__(self, "package", _freeze(self.package))
 
 
 def utc_now() -> str:
@@ -192,8 +196,10 @@ def report_as_dict(report: ConformanceReport) -> dict[str, object]:
         ],
         "lifecycle": _thaw(report.lifecycle),
         "artifacts": _thaw(report.artifacts),
+        "artifact_findings": _thaw(report.artifact_findings),
         "identity_leaks": list(report.identity_leaks),
         "private_artifacts": _thaw(report.private_artifacts),
+        "package": _thaw(report.package),
         "trace": {
             "status": report.trace.status,
             "events": report.trace.events,

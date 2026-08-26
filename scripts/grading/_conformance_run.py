@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import os
-import signal
 import stat
 import subprocess
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -27,14 +27,20 @@ from scripts.grading._conformance_model import (
     TrialPhase,
     utc_now,
 )
+from scripts.grading._conformance_process import (
+    popen_group_options,
+    terminate_process_group,
+)
 from scripts.grading._conformance_trial import (
+    attest_package,
     create_trial,
     observed_artifacts,
+    open_workspace_directory,
     private_directory,
     read_trial_marker,
     refuse_workspace_links,
+    workspace_directory_matches,
 )
-from scripts.path_safety import read_bytes_limited
 
 
 def _phase_prompt(name: str, workspace: Path) -> str:
@@ -94,45 +100,188 @@ def _expanded_argv(
     return expanded, sanitized
 
 
-def _open_private_log(path: Path):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.parent.chmod(0o700)
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    path.chmod(0o600)
-    return os.fdopen(descriptor, "wb", buffering=0)
+class _BoundedLog:
+    """Write one process pipe through a pre-opened, no-follow descriptor."""
 
+    def __init__(self, directory_fd: int, name: str, relative: str, limit: int):
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+        self.fd = os.open(name, flags, 0o600, dir_fd=directory_fd)
+        self.directory_fd = directory_fd
+        self.name = name
+        self.relative = relative
+        self.limit = limit
+        self.identity = os.fstat(self.fd)
+        self.bytes = 0
+        self.digest = hashlib.sha256()
+        self.overflow = False
+        self.write_failed = False
 
-def _bound_child_files() -> None:
-    try:
-        import resource
+    def capture(self, pipe, overflow_event: threading.Event) -> None:
+        try:
+            while True:
+                chunk = pipe.read(64 * 1024)
+                if not chunk:
+                    return
+                remaining = self.limit - self.bytes
+                if remaining <= 0:
+                    self.overflow = True
+                    overflow_event.set()
+                    return
+                accepted = chunk[:remaining]
+                view = memoryview(accepted)
+                while view:
+                    written = os.write(self.fd, view)
+                    view = view[written:]
+                self.bytes += len(accepted)
+                self.digest.update(accepted)
+                if len(chunk) > remaining:
+                    self.overflow = True
+                    overflow_event.set()
+                    return
+        except OSError:
+            self.write_failed = True
+            overflow_event.set()
+        finally:
+            try:
+                pipe.close()
+            except OSError:
+                pass
 
-        resource.setrlimit(
-            resource.RLIMIT_FSIZE,
-            (max(MAX_STDOUT_BYTES, MAX_STDERR_BYTES) + 1,) * 2,
+    def result(self, *, directory_verified: bool) -> tuple[dict[str, object], bool]:
+        current = os.fstat(self.fd)
+        observed_digest = hashlib.sha256()
+        os.lseek(self.fd, 0, os.SEEK_SET)
+        observed = 0
+        while observed < current.st_size and observed <= self.limit:
+            chunk = os.read(self.fd, min(64 * 1024, current.st_size - observed))
+            if not chunk:
+                break
+            observed_digest.update(chunk)
+            observed += len(chunk)
+        path_verified = False
+        try:
+            path_state = os.stat(
+                self.name, dir_fd=self.directory_fd, follow_symlinks=False
+            )
+            path_verified = (
+                directory_verified
+                and stat.S_ISREG(path_state.st_mode)
+                and path_state.st_dev == self.identity.st_dev
+                and path_state.st_ino == self.identity.st_ino
+                and stat.S_IMODE(path_state.st_mode) == 0o600
+                and current.st_size == self.bytes
+                and current.st_nlink == 1
+                and observed_digest.hexdigest() == self.digest.hexdigest()
+            )
+        except OSError:
+            path_verified = False
+        if not path_verified:
+            try:
+                os.unlink(self.name, dir_fd=self.directory_fd)
+            except OSError:
+                pass
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+                restored = os.open(self.name, flags, 0o600, dir_fd=self.directory_fd)
+                try:
+                    os.lseek(self.fd, 0, os.SEEK_SET)
+                    remaining = self.bytes
+                    while remaining:
+                        chunk = os.read(self.fd, min(64 * 1024, remaining))
+                        if not chunk:
+                            break
+                        view = memoryview(chunk)
+                        while view:
+                            written = os.write(restored, view)
+                            view = view[written:]
+                        remaining -= len(chunk)
+                    os.fchmod(restored, 0o600)
+                finally:
+                    os.close(restored)
+            except OSError:
+                pass
+        return (
+            {
+                "path": self.relative,
+                "bytes": self.bytes,
+                "sha256": self.digest.hexdigest(),
+                "mode": f"{stat.S_IMODE(current.st_mode):04o}",
+                "limit_bytes": self.limit,
+                "path_verified": path_verified,
+            },
+            not path_verified,
         )
-        signal.signal(signal.SIGXFSZ, signal.SIG_DFL)
-    except (ImportError, OSError, ValueError):
-        pass
+
+    def close(self) -> None:
+        os.close(self.fd)
 
 
-def _log_result(workspace: Path, path: Path, limit: int) -> tuple[dict, bool]:
-    size = path.stat().st_size
-    overflow = size > limit
-    if overflow:
-        with path.open("r+b") as handle:
-            handle.truncate(limit)
-        size = limit
-    data = read_bytes_limited(path, "The bounded agent log", limit)
-    return (
-        {
-            "path": path.relative_to(workspace).as_posix(),
-            "bytes": size,
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "mode": f"{stat.S_IMODE(path.stat().st_mode):04o}",
-            "limit_bytes": limit,
-        },
-        overflow,
+def _run_bounded_process(
+    argv: tuple[str, ...],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout_seconds: float,
+    stdout_log: _BoundedLog,
+    stderr_log: _BoundedLog,
+) -> tuple[int | None, bool, str]:
+    try:
+        process = subprocess.Popen(
+            argv,
+            shell=False,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **popen_group_options(),
+        )
+    except OSError:
+        return None, False, "launch-failed"
+    assert process.stdout is not None
+    assert process.stderr is not None
+    overflow_event = threading.Event()
+    readers = (
+        threading.Thread(
+            target=stdout_log.capture,
+            args=(process.stdout, overflow_event),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=stderr_log.capture,
+            args=(process.stderr, overflow_event),
+            daemon=True,
+        ),
     )
+    for reader in readers:
+        reader.start()
+    deadline = time.monotonic() + timeout_seconds
+    timed_out = False
+    while process.poll() is None:
+        if overflow_event.is_set():
+            break
+        if time.monotonic() >= deadline:
+            timed_out = True
+            break
+        time.sleep(0.01)
+    terminate_process_group(process)
+    for reader in readers:
+        reader.join(timeout=1)
+    for pipe in (process.stdout, process.stderr):
+        try:
+            pipe.close()
+        except OSError:
+            pass
+    if any(reader.is_alive() for reader in readers):
+        return None if timed_out else process.returncode, timed_out, "capture-failed"
+    if stdout_log.overflow or stderr_log.overflow:
+        return process.returncode, False, "output-limit"
+    if stdout_log.write_failed or stderr_log.write_failed:
+        return process.returncode, False, "capture-failed"
+    if timed_out:
+        return None, True, "timeout"
+    return process.returncode, False, ""
 
 
 def run_trial(
@@ -166,17 +315,36 @@ def run_trial(
         raise ConformanceError("The agent command is not a bounded prompt argv.")
 
     trial = create_trial(repo_root, workspace)
+    trial_marker = read_trial_marker(trial)
+    expected_package = dict(trial_marker["package"])
+    expected_package_paths = {
+        str(item["path"])
+        for item in expected_package.get("files", ())
+        if isinstance(item, dict) and isinstance(item.get("path"), str)
+    }
+    package_result = attest_package(trial, expected_package)
+    if package_result["status"] != "passed":
+        raise ConformanceError("The copied package failed its initial attestation.")
     logs = private_directory(trial, Path(".grading/conformance/logs"))
     traces = private_directory(trial, Path(".grading/conformance/traces"))
+    log_directory_fd = open_workspace_directory(
+        trial, Path(".grading/conformance/logs")
+    )
+    log_directory_identity = os.fstat(log_directory_fd)
     phase_reports: list[TrialPhase] = []
     trace_paths: list[Path] = []
     latest_audit: ConformanceReport | None = None
 
     for index, name in enumerate(("briefing", "redaction", "grading"), start=1):
+        package_before = attest_package(trial, expected_package)
+        if package_before["status"] != "passed":
+            raise ConformanceError("The immutable package changed between phases.")
         prompt = _phase_prompt(name, trial)
         argv, sanitized = _expanded_argv(command, prompt, trial)
-        stdout_path = logs / f"{index}-{name}.stdout.log"
-        stderr_path = logs / f"{index}-{name}.stderr.log"
+        stdout_name = f"{index}-{name}.stdout.log"
+        stderr_name = f"{index}-{name}.stderr.log"
+        stdout_path = logs / stdout_name
+        stderr_path = logs / stderr_name
         trace_path = traces / f"{index}-{name}.jsonl"
         trace_paths.append(trace_path)
         before = observed_artifacts(trial)
@@ -187,52 +355,52 @@ def run_trial(
         error = ""
         env = os.environ.copy()
         env["GRADER_CONFORMANCE_TRACE"] = str(trace_path)
-        try:
-            with (
-                _open_private_log(stdout_path) as stdout,
-                _open_private_log(stderr_path) as stderr,
-            ):
-                completed = subprocess.run(
-                    argv,
-                    shell=False,
-                    cwd=trial,
-                    env=env,
-                    stdout=stdout,
-                    stderr=stderr,
-                    timeout=timeout_seconds,
-                    check=False,
-                    preexec_fn=_bound_child_files if os.name == "posix" else None,
-                )
-                exit_code = completed.returncode
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            error = "timeout"
-        except OSError:
-            error = "launch-failed"
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        stdout_log = _BoundedLog(
+            log_directory_fd,
+            stdout_name,
+            stdout_path.relative_to(trial).as_posix(),
+            MAX_STDOUT_BYTES,
+        )
+        stderr_log = _BoundedLog(
+            log_directory_fd,
+            stderr_name,
+            stderr_path.relative_to(trial).as_posix(),
+            MAX_STDERR_BYTES,
+        )
+        exit_code, timed_out, error = _run_bounded_process(
+            argv,
+            cwd=trial,
+            env=env,
+            timeout_seconds=timeout_seconds,
+            stdout_log=stdout_log,
+            stderr_log=stderr_log,
+        )
         elapsed = time.monotonic() - started
         ended_at = utc_now()
-        refuse_workspace_links(trial)
-        stdout_result, stdout_overflow = _log_result(
-            trial, stdout_path, MAX_STDOUT_BYTES
+        log_directory_verified = workspace_directory_matches(
+            trial,
+            Path(".grading/conformance/logs"),
+            log_directory_identity,
         )
-        stderr_result, stderr_overflow = _log_result(
-            trial, stderr_path, MAX_STDERR_BYTES
+        stdout_result, stdout_substituted = stdout_log.result(
+            directory_verified=log_directory_verified
         )
-        if exit_code == -getattr(signal, "SIGXFSZ", 25) or (
-            exit_code not in (None, 0)
-            and (
-                stdout_result["bytes"] == MAX_STDOUT_BYTES
-                or stderr_result["bytes"] == MAX_STDERR_BYTES
-            )
-        ):
-            stdout_overflow = stdout_overflow or (
-                stdout_result["bytes"] == MAX_STDOUT_BYTES
-            )
-            stderr_overflow = stderr_overflow or (
-                stderr_result["bytes"] == MAX_STDERR_BYTES
-            )
-        if stdout_overflow or stderr_overflow:
-            error = "output-limit"
+        stderr_result, stderr_substituted = stderr_log.result(
+            directory_verified=log_directory_verified
+        )
+        stdout_log.close()
+        stderr_log.close()
+        if stdout_substituted or stderr_substituted:
+            error = "log-substituted"
+        refuse_workspace_links(
+            trial,
+            allow_identity_artifacts=True,
+            allowed_package_paths=expected_package_paths,
+        )
+        package_result = attest_package(trial, expected_package)
+        if package_result["status"] != "passed":
+            error = "package-changed"
         if trace_path.exists() and not trace_path.is_symlink():
             trace_path.chmod(0o600)
 
@@ -245,6 +413,7 @@ def run_trial(
                 trace_paths=tuple(trace_paths),
                 expected_phase=name,
                 persist=False,
+                expected_package=expected_package,
             )
             checkpoint_passed = latest_audit.passed
             checks = (
@@ -288,6 +457,7 @@ def run_trial(
             passed=False,
             phases=tuple(phase_reports),
             trace=audit_trace(trial, tuple(trace_paths)),
+            package=package_result,
         )
     else:
         base = replace(
@@ -302,4 +472,5 @@ def run_trial(
             json_path=None,
             markdown_path=None,
         )
+    os.close(log_directory_fd)
     return persist_report(base)
