@@ -401,6 +401,10 @@ def _record_error(message: str, *, exit_code: int = EXIT_MALFORMED) -> int:
 def _cmd_record_prepare(args: argparse.Namespace) -> int:
     try:
         profile = load_profile(profile_path(args.course, args.root))
+        if profile.course != args.course:
+            return _record_error(
+                f"The profile belongs to {profile.course!r}, not {args.course!r}."
+            )
         rubric = load_rubric(args.rubric)
         drifted = profile.drift(rubric)
         if drifted:

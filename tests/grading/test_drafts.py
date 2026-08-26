@@ -2,6 +2,7 @@
 
 import re
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -210,6 +211,94 @@ def test_prepare_removes_the_first_member_when_the_second_install_fails(
         )
 
     assert list(drafts.iterdir()) == []
+
+
+def test_second_install_and_rollback_unlink_failures_raise_one_public_error(
+    tmp_path, phil210, monkeypatch
+):
+    source = tmp_path / "redacted" / "STUDENT_01.md"
+    source.parent.mkdir()
+    source.write_text("A safe redacted essay.", encoding="utf-8")
+    drafts = tmp_path / "drafts"
+    record = drafts / "STUDENT_01.json"
+    real_install = draft_module._install_without_overwrite
+    real_unlink = Path.unlink
+    installs = 0
+
+    def fail_second_install(staged, destination):
+        nonlocal installs
+        installs += 1
+        if installs == 2:
+            raise OSError("synthetic second install failure")
+        real_install(staged, destination)
+
+    def refuse_record_rollback(path, *args, **kwargs):
+        if path == record:
+            raise OSError("synthetic rollback unlink failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        draft_module, "_install_without_overwrite", fail_second_install
+    )
+    monkeypatch.setattr(Path, "unlink", refuse_record_rollback)
+
+    with pytest.raises(DraftPreparationError) as raised:
+        prepare_draft_pair(
+            batch="essay-2",
+            course="phil210",
+            source=source,
+            rubric=load_rubric(phil210 / "grading_rubric.md"),
+            profile=phil210 / "profile_phil210.md",
+            patterns=PATTERNS_PATH,
+            drafts=drafts,
+        )
+
+    assert "second install failure" in str(raised.value)
+    assert "rollback unlink failure" in str(raised.value)
+    assert str(record) in str(raised.value)
+    assert record.is_file()
+    assert not (drafts / "STUDENT_01.md").exists()
+    assert not list(drafts.glob(".draft-pair.*"))
+
+
+def test_staging_cleanup_failure_rolls_back_both_installed_destinations(
+    tmp_path, phil210, monkeypatch
+):
+    source = tmp_path / "redacted" / "STUDENT_01.md"
+    source.parent.mkdir()
+    source.write_text("A safe redacted essay.", encoding="utf-8")
+    drafts = tmp_path / "drafts"
+    real_unlink = Path.unlink
+    blocked_stage = None
+
+    def refuse_one_stage(path, *args, **kwargs):
+        nonlocal blocked_stage
+        if path.parent == drafts and path.name.startswith(".draft-pair."):
+            if blocked_stage is None:
+                blocked_stage = path
+            if path == blocked_stage:
+                raise OSError("synthetic staging cleanup failure")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", refuse_one_stage)
+
+    with pytest.raises(DraftPreparationError) as raised:
+        prepare_draft_pair(
+            batch="essay-2",
+            course="phil210",
+            source=source,
+            rubric=load_rubric(phil210 / "grading_rubric.md"),
+            profile=phil210 / "profile_phil210.md",
+            patterns=PATTERNS_PATH,
+            drafts=drafts,
+        )
+
+    assert blocked_stage is not None
+    assert "staging cleanup failure" in str(raised.value)
+    assert str(blocked_stage) in str(raised.value)
+    assert not (drafts / "STUDENT_01.json").exists()
+    assert not (drafts / "STUDENT_01.md").exists()
+    assert [path for path in drafts.iterdir()] == [blocked_stage]
 
 
 def test_feedback_without_protocol_sections_has_one_fallback_marker(

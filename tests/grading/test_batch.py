@@ -386,6 +386,38 @@ def test_record_prepare_preserves_an_existing_destination(
     assert not (drafts / "STUDENT_01.md").exists()
 
 
+def test_record_prepare_refuses_a_profile_for_another_course(
+    tmp_path, phil210, approved_brief
+):
+    root, redacted, source = _record_prepare_context(
+        tmp_path, phil210, approved_brief
+    )
+    profile = root / "profiles" / "phil210.md"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace(
+            "**Course**: phil210", "**Course**: another-course", 1
+        ),
+        encoding="utf-8",
+    )
+    brief = root / "assignments" / "essay-2.md"
+    brief.unlink()
+    approved_brief(
+        brief,
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+    )
+
+    result = _record_prepare_run(root, redacted, source, phil210)
+
+    _assert_plain_record_prepare_failure(result)
+    assert "another-course" in result.stderr
+    assert "phil210" in result.stderr
+    assert not (root / "drafts" / "essay-2" / "STUDENT_01.json").exists()
+    assert not (root / "drafts" / "essay-2" / "STUDENT_01.md").exists()
+
+
 def test_the_status_subcommand_lists_what_is_left(tmp_path):
     redacted, drafts = _batch(tmp_path)
     (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")

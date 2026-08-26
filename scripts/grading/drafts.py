@@ -29,6 +29,17 @@ class DraftPreparationError(ValueError):
     """A safe draft pair could not be prepared."""
 
 
+def _cleanup_paths(paths: list[Path], action: str) -> list[str]:
+    """Try every unlink and return path-specific errors without raising."""
+    failures: list[str] = []
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as error:
+            failures.append(f"{action} could not remove {path}: {error}")
+    return failures
+
+
 def _stage_text(directory: Path, *, suffix: str, text: str) -> Path:
     descriptor, name = tempfile.mkstemp(
         prefix=".draft-pair.", suffix=suffix, dir=directory
@@ -39,8 +50,12 @@ def _stage_text(directory: Path, *, suffix: str, text: str) -> Path:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-    except Exception:
-        path.unlink(missing_ok=True)
+    except Exception as error:
+        cleanup_failures = _cleanup_paths([path], "Staging cleanup")
+        if cleanup_failures:
+            raise DraftPreparationError(
+                f"Could not stage {path}: {error}; " + "; ".join(cleanup_failures)
+            ) from error
         raise
     return path
 
@@ -169,12 +184,23 @@ def prepare_draft_pair(
         _install_without_overwrite(staged_feedback, feedback)
         installed.append(feedback)
     except Exception as error:
-        for path in reversed(installed):
-            path.unlink(missing_ok=True)
+        cleanup_failures = _cleanup_paths(
+            list(reversed(installed)), "Rollback"
+        )
+        cleanup_failures.extend(_cleanup_paths(staged, "Staging cleanup"))
+        detail = f"Could not prepare the draft pair for {token}: {error}"
+        if cleanup_failures:
+            detail += "; " + "; ".join(cleanup_failures)
         raise DraftPreparationError(
-            f"Could not prepare the draft pair for {token}: {error}"
+            detail
         ) from error
-    finally:
-        for path in staged:
-            path.unlink(missing_ok=True)
+    staging_failures = _cleanup_paths(staged, "Staging cleanup")
+    if staging_failures:
+        rollback_failures = _cleanup_paths(
+            list(reversed(installed)), "Rollback"
+        )
+        raise DraftPreparationError(
+            f"Could not finish the draft pair for {token}: "
+            + "; ".join(staging_failures + rollback_failures)
+        )
     return DraftPair(record=record_path, feedback=feedback)
