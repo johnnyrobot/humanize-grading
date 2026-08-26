@@ -33,6 +33,7 @@ docs/superpowers/specs/2026-08-26-local-agent-compatibility-design.md
 docs/using-the-grader.md
 hooks/block-raw-reads.json
 hooks/block_raw_reads.py
+references/agent-conformance.md
 references/ai-patterns.md
 references/assignment-brief.md
 references/calibration.md
@@ -40,11 +41,17 @@ references/redaction.md
 references/rubric-format.md
 requirements-dev.txt
 scripts/__init__.py
+scripts/agent_conformance.py
 scripts/calibrate.py
 scripts/grade.py
 scripts/grading/__init__.py
+scripts/grading/_conformance_audit.py
+scripts/grading/_conformance_model.py
+scripts/grading/_conformance_run.py
+scripts/grading/_conformance_trial.py
 scripts/grading/batch.py
 scripts/grading/brief.py
+scripts/grading/conformance.py
 scripts/grading/consistency.py
 scripts/grading/density.py
 scripts/grading/drafts.py
@@ -87,6 +94,7 @@ tests/fixtures/phil210/ungraded/paper_8_ungraded_agricultural_right_to_repair.md
 tests/fixtures/phil210/ungraded/paper_9_ungraded_algorithmic_rent_fixing.md
 tests/grading/test_batch.py
 tests/grading/test_brief.py
+tests/grading/test_conformance.py
 tests/grading/test_consistency.py
 tests/grading/test_density.py
 tests/grading/test_drafts.py

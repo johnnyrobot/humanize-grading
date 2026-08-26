@@ -1,0 +1,50 @@
+"""Public interface for synthetic grading-agent conformance trials."""
+
+from scripts.grading._conformance_audit import (
+    audit_trace,
+    audit_workspace,
+    persist_report,
+    report_summary,
+)
+from scripts.grading._conformance_model import (
+    MAX_ARGV_ITEMS,
+    MAX_ARG_CHARS,
+    MAX_STDERR_BYTES,
+    MAX_STDOUT_BYTES,
+    MAX_TRACE_EVENTS,
+    MAX_TRACE_LINE_BYTES,
+    REPORT_SCHEMA,
+    TRACE_SCHEMA,
+    ConformanceError,
+    ConformanceReport,
+    TraceResult,
+    TrialPhase,
+    parse_command_json,
+    report_as_dict,
+)
+from scripts.grading._conformance_run import run_trial
+from scripts.grading._conformance_trial import create_trial
+
+
+__all__ = (
+    "MAX_ARGV_ITEMS",
+    "MAX_ARG_CHARS",
+    "MAX_STDERR_BYTES",
+    "MAX_STDOUT_BYTES",
+    "MAX_TRACE_EVENTS",
+    "MAX_TRACE_LINE_BYTES",
+    "REPORT_SCHEMA",
+    "TRACE_SCHEMA",
+    "ConformanceError",
+    "ConformanceReport",
+    "TraceResult",
+    "TrialPhase",
+    "audit_trace",
+    "audit_workspace",
+    "create_trial",
+    "parse_command_json",
+    "persist_report",
+    "report_as_dict",
+    "report_summary",
+    "run_trial",
+)
