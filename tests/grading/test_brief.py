@@ -1,5 +1,7 @@
 """Assignment briefs are explicit, inspectable grading approval state."""
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -19,6 +21,23 @@ def _answer(path: Path) -> None:
     path.write_text(
         text.replace(ANSWER_REQUIRED, "Instructor answer."), encoding="utf-8"
     )
+
+
+def _grade(*args: str):
+    return subprocess.run(
+        [sys.executable, "scripts/grade.py", *args],
+        capture_output=True,
+        text=True,
+    )
+
+
+def _brief_args(root: Path) -> list[str]:
+    return ["--batch", "essay-3", "--course", "phil210", "--root", str(root)]
+
+
+def _copy_profile(root: Path, profile: Path) -> None:
+    (root / "profiles").mkdir(parents=True)
+    (root / "profiles" / "phil210.md").write_bytes(profile.read_bytes())
 
 
 def _approved(path: Path, phil210: Path, profile: Path) -> None:
@@ -278,3 +297,130 @@ def test_reapproval_after_a_deliberate_edit_updates_the_bound_body(
         rubric=phil210 / "grading_rubric.md",
         profile=profile,
     ) == reapproved
+
+
+def test_brief_cli_prepares_approves_and_checks(tmp_path, phil210, profile):
+    root = tmp_path / ".grading"
+    _copy_profile(root, profile)
+    common = _brief_args(root)
+
+    prepared = _grade("brief", "prepare", *common, "--mode", "local")
+    assert prepared.returncode == 0, prepared.stderr
+    path = root / "assignments" / "essay-3.md"
+    _answer(path)
+
+    approved = _grade(
+        "brief",
+        "approve",
+        *common,
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--approval",
+        "Approve assignment brief for essay-3",
+    )
+    assert approved.returncode == 0, approved.stderr
+    checked = _grade(
+        "brief",
+        "check",
+        *common,
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert "approved assignment brief" in checked.stdout.lower()
+
+
+def test_brief_cli_preserves_missing_profile_exit_10(tmp_path, phil210):
+    root = tmp_path / ".grading"
+    common = _brief_args(root)
+    assert _grade("brief", "prepare", *common, "--mode", "local").returncode == 0
+    _answer(root / "assignments" / "essay-3.md")
+
+    result = _grade(
+        "brief",
+        "approve",
+        *common,
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--approval",
+        "Approve assignment brief for essay-3",
+    )
+
+    assert result.returncode == 10
+
+
+def test_brief_cli_preserves_rubric_drift_exit_11(tmp_path, phil210, profile):
+    root = tmp_path / ".grading"
+    _copy_profile(root, profile)
+    common = _brief_args(root)
+    assert _grade("brief", "prepare", *common, "--mode", "local").returncode == 0
+    _answer(root / "assignments" / "essay-3.md")
+    edited = tmp_path / "edited-rubric.md"
+    edited.write_text(
+        (phil210 / "grading_rubric.md")
+        .read_text(encoding="utf-8")
+        .replace("Formulates a sharp, defensible", "Formulates a clear"),
+        encoding="utf-8",
+    )
+
+    result = _grade(
+        "brief",
+        "approve",
+        *common,
+        "--rubric",
+        str(edited),
+        "--approval",
+        "Approve assignment brief for essay-3",
+    )
+
+    assert result.returncode == 11
+
+
+def test_brief_cli_refuses_a_stale_brief_with_exit_13(tmp_path, phil210, profile):
+    root = tmp_path / ".grading"
+    _copy_profile(root, profile)
+    common = _brief_args(root)
+    assert _grade("brief", "prepare", *common, "--mode", "local").returncode == 0
+    path = root / "assignments" / "essay-3.md"
+    _answer(path)
+    assert _grade(
+        "brief",
+        "approve",
+        *common,
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--approval",
+        "Approve assignment brief for essay-3",
+    ).returncode == 0
+    path.write_text(path.read_text(encoding="utf-8") + "changed\n", encoding="utf-8")
+
+    result = _grade(
+        "brief",
+        "check",
+        *common,
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+    )
+
+    assert result.returncode == 13
+    assert "ERROR assignment-brief:" in result.stderr
+
+
+def test_brief_cli_refuses_duplicate_preparation(tmp_path):
+    root = tmp_path / ".grading"
+    common = _brief_args(root)
+    assert _grade("brief", "prepare", *common, "--mode", "local").returncode == 0
+
+    result = _grade("brief", "prepare", *common, "--mode", "local")
+
+    assert result.returncode == 13
+    assert "ERROR assignment-brief:" in result.stderr
+
+
+def test_brief_cli_help_lists_every_action():
+    result = _grade("brief", "--help")
+
+    assert result.returncode == 0
+    assert "prepare" in result.stdout
+    assert "approve" in result.stdout
+    assert "check" in result.stdout

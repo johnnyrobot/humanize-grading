@@ -9,6 +9,7 @@ Subcommands:
     status       Show which submissions still need a draft.
     density      Count watched AI terms in one file.
     consistency  Flag outliers across a graded batch.
+    brief        Prepare, approve, or check an assignment brief.
 
 Exit codes: 0 clean, 10 no profile, 11 the rubric drifted since calibration,
 12 a draft failed verification, 13 malformed input.
@@ -32,6 +33,13 @@ from scripts.grading.batch import (  # noqa: E402
     GradingBatch,
     VerificationFailure,
     VerificationInputs,
+)
+from scripts.grading.brief import (  # noqa: E402
+    BriefError,
+    approve_brief,
+    brief_path,
+    check_brief,
+    prepare_brief,
 )
 from scripts.grading.density import scan  # noqa: E402
 from scripts.grading.profile import (  # noqa: E402
@@ -300,6 +308,77 @@ def _cmd_consistency(args: argparse.Namespace) -> int:
         return EXIT_FAILED
     return EXIT_OK
 
+
+def _brief_file(args: argparse.Namespace) -> Path:
+    return args.brief or brief_path(args.root, args.batch)
+
+
+def _brief_error(error: Exception) -> int:
+    print(f"ERROR assignment-brief: {error}", file=sys.stderr)
+    return EXIT_MALFORMED
+
+
+def _brief_profile_and_rubric(args: argparse.Namespace):
+    profile = _profile_or_exit(args)
+    rubric = load_rubric(args.rubric)
+    drifted = profile.drift(rubric)
+    if drifted:
+        print("ERROR assignment-brief: The rubric changed since calibration:", file=sys.stderr)
+        for name in drifted:
+            print(f"  {name}", file=sys.stderr)
+        raise SystemExit(EXIT_DRIFT)
+    return profile, rubric
+
+
+def _cmd_brief_prepare(args: argparse.Namespace) -> int:
+    try:
+        path = _brief_file(args)
+        brief = prepare_brief(
+            path,
+            batch=args.batch,
+            course=args.course,
+            mode=args.mode,
+        )
+    except (BriefError, OSError, UnicodeError, ValueError) as error:
+        return _brief_error(error)
+    print(f"Prepared draft assignment brief: {brief.path}")
+    return EXIT_OK
+
+
+def _cmd_brief_approve(args: argparse.Namespace) -> int:
+    try:
+        profile, rubric = _brief_profile_and_rubric(args)
+        path = _brief_file(args)
+        brief = approve_brief(
+            path,
+            batch=args.batch,
+            course=args.course,
+            rubric=rubric.path,
+            profile=profile.path,
+            approval=args.approval,
+        )
+    except (BriefError, OSError, UnicodeError, ValueError) as error:
+        return _brief_error(error)
+    print(f"Approved assignment brief: {brief.path}")
+    return EXIT_OK
+
+
+def _cmd_brief_check(args: argparse.Namespace) -> int:
+    try:
+        profile, rubric = _brief_profile_and_rubric(args)
+        path = _brief_file(args)
+        brief = check_brief(
+            path,
+            batch=args.batch,
+            course=args.course,
+            rubric=rubric.path,
+            profile=profile.path,
+        )
+    except (BriefError, OSError, UnicodeError, ValueError) as error:
+        return _brief_error(error)
+    print(f"Approved assignment brief is current: {brief.path}")
+    return EXIT_OK
+
 def _add_common(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--root", type=Path, default=Path(".grading"))
 
@@ -363,6 +442,42 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common(consistency)
     consistency.set_defaults(handler=_cmd_consistency)
+
+    brief = subparsers.add_parser("brief", help="Prepare or check an assignment brief")
+    brief_actions = brief.add_subparsers(dest="brief_action", required=True)
+
+    prepare = brief_actions.add_parser(
+        "prepare", help="Prepare a draft assignment brief"
+    )
+    prepare.add_argument("--batch", required=True, type=_component("The grading batch"))
+    prepare.add_argument("--course", required=True, type=_component("The course"))
+    prepare.add_argument("--mode", required=True, choices=("local", "cloud"))
+    prepare.add_argument("--brief", type=Path, default=None)
+    _add_common(prepare)
+    prepare.set_defaults(handler=_cmd_brief_prepare)
+
+    approve = brief_actions.add_parser(
+        "approve", help="Approve an answered assignment brief"
+    )
+    approve.add_argument("--batch", required=True, type=_component("The grading batch"))
+    approve.add_argument("--course", required=True, type=_component("The course"))
+    approve.add_argument("--rubric", required=True, type=Path)
+    approve.add_argument("--approval", required=True)
+    approve.add_argument("--brief", type=Path, default=None)
+    _add_common(approve)
+    approve.set_defaults(handler=_cmd_brief_approve)
+
+    brief_check = brief_actions.add_parser(
+        "check", help="Check an approved assignment brief"
+    )
+    brief_check.add_argument(
+        "--batch", required=True, type=_component("The grading batch")
+    )
+    brief_check.add_argument("--course", required=True, type=_component("The course"))
+    brief_check.add_argument("--rubric", required=True, type=Path)
+    brief_check.add_argument("--brief", type=Path, default=None)
+    _add_common(brief_check)
+    brief_check.set_defaults(handler=_cmd_brief_check)
     return parser
 
 
