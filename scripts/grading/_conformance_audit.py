@@ -127,13 +127,15 @@ def _default_trace_phase(path: Path) -> str:
     return "grading"
 
 
-def _is_successful_next(argv: list[str], exit_code: int) -> bool:
-    if exit_code != 0 or "--json" not in argv:
-        return False
+def _is_next_command(argv: list[str]) -> bool:
     return any(
         item.endswith("scripts/grade.py") and argv[index + 1] == "next"
         for index, item in enumerate(argv[:-1])
     )
+
+
+def _is_successful_next(argv: list[str], exit_code: int) -> bool:
+    return _is_next_command(argv) and "--json" in argv and exit_code == 0
 
 
 def audit_trace(
@@ -161,6 +163,7 @@ def audit_trace(
     phase_work: dict[str, list[int]] = {
         phase: [] for phase in ("briefing", "redaction", "grading")
     }
+    incomplete_next_phases: set[str] = set()
     stop_all = False
     for file_index, absolute in enumerate(existing):
         if events >= MAX_TRACE_EVENTS:
@@ -243,9 +246,12 @@ def audit_trace(
                         ):
                             findings.add("malformed-command-event")
                         else:
+                            is_next_command = _is_next_command(argv)
                             is_next = _is_successful_next(argv, int(event["exit_code"]))
                             phase_commands[event_phase].append((is_next, events))
-                            if not is_next and int(event["exit_code"]) == 0:
+                            if is_next_command and not is_next:
+                                incomplete_next_phases.add(event_phase)
+                            elif not is_next_command and int(event["exit_code"]) == 0:
                                 phase_work[event_phase].append(events)
                     else:
                         findings.add("unknown-trace-event")
@@ -266,6 +272,7 @@ def audit_trace(
             or commands[-1][0] is not True
             or not successful_next[0] < min(work)
             or not max(work) < successful_next[-1]
+            or phase in incomplete_next_phases
         ):
             evidence_complete = False
     failed = bool(prohibited or findings)

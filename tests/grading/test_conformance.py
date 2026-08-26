@@ -583,6 +583,88 @@ def test_trace_does_not_match_loose_next_argv_membership(tmp_path):
     assert result.status == "unverified"
 
 
+@pytest.mark.parametrize(
+    "middle_next",
+    [
+        _trace_event(
+            "grading",
+            "command",
+            argv=["python3", "scripts/grade.py", "next"],
+            exit_code=0,
+        ),
+        _trace_event(
+            "grading",
+            "command",
+            argv=["python3", "scripts/grade.py", "next", "--json"],
+            exit_code=12,
+        ),
+    ],
+    ids=("missing-json", "nonzero-next"),
+)
+def test_trace_malformed_or_failed_next_never_counts_as_phase_work(
+    tmp_path, middle_next
+):
+    workspace = _trial(tmp_path)
+    exact_next = _trace_event(
+        "grading",
+        "command",
+        argv=["python3", "scripts/grade.py", "next", "--json"],
+        exit_code=0,
+    )
+    trace = _write_trace(
+        workspace,
+        "bad-middle-next",
+        [
+            exact_next,
+            middle_next,
+            _trace_event("grading", "read", path="SKILL.md"),
+            exact_next,
+        ],
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "unverified"
+
+
+def test_trace_matches_absolute_grade_path_followed_immediately_by_next(tmp_path):
+    workspace = _trial(tmp_path)
+    absolute_grade = str(workspace / "scripts/grade.py")
+    next_event = _trace_event(
+        "grading",
+        "command",
+        argv=[sys.executable, absolute_grade, "next", "--json"],
+        exit_code=0,
+    )
+    trace = _write_trace(
+        workspace,
+        "absolute-next",
+        [
+            next_event,
+            _trace_event(
+                "grading",
+                "command",
+                argv=[sys.executable, absolute_grade, "status"],
+                exit_code=0,
+            ),
+            _trace_event("grading", "read", path="SKILL.md"),
+            next_event,
+        ],
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "passed"
+
+
 def test_trace_passes_with_exact_next_and_successful_work_command(tmp_path):
     workspace = _trial(tmp_path)
     trace = _write_trace(

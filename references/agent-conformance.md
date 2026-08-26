@@ -90,8 +90,9 @@ argument must be immediately followed by `next`, and the argv must contain
 `--json`. The first command must be the opening `next`; the last command must
 be the closing `next`. Reads do not count as phase work. Read-only, partial,
 missing, loosely matched, or out-of-order command evidence is `UNVERIFIED`.
-The 10,000-event limit is global across every supplied phase file, not per
-file.
+A structurally recognized `next` that omits `--json` or exits nonzero is never
+reclassified as a non-next work command. The 10,000-event limit is global
+across every supplied phase file, not per file.
 
 Read permissions are phase-specific. The grading phase may read the skill,
 references, scripts, rubric, current profile, approved brief, redacted source,
