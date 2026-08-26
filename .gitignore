@@ -10,6 +10,7 @@ calibration-inputs*.json
 /graded/
 .pytest_cache/
 .coverage
+.worktrees/
 
 .DS_Store
 __pycache__/
