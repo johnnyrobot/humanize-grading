@@ -25,13 +25,21 @@ Version 3.2.0 is synchronized across both skills, the plugin, README history,
 and package validation. The Grader and README now state the same receipt,
 legacy refusal, staged publication, safe force, and instructor sign-off rules.
 The walkthrough output was refreshed from a five-submission synthetic PHIL 210
-batch, including an 18-artifact verification receipt and a five-file
+batch, including a 19-artifact verification receipt and a five-file
 publication with its identity-free marker.
 
-Verification: 383 tests passed from the repository root. The leak and
+Verification: 427 tests passed from the repository root. The leak and
 end-to-end tests also passed together, 20 tests total. Bytecode compilation and
 the package validator passed. The required default Skills CLI check passed for
 the root Grader; the documented `--full-depth` check found both `grader` and
-`humanizer`. Claude plugin validation passed with two optional metadata
-warnings. `git diff --check` passed. Final Standards and Spec reviews reported
-no findings.
+`humanizer`. Claude plugin validation passed without warnings.
+`git diff --check` passed.
+
+The public-release audit then reviewed all 95 tracked files and found 17
+security and integrity gaps. The release hardening keeps identity-bearing review
+data outside model context, removes untrusted inline calibration annotations,
+binds the token map to an exact redaction manifest, reruns semantic verification
+before rehydration, rejects unsafe paths and collisions, bounds every public
+input role, tightens feedback and record validation, and adds an explicit
+package inventory. The full synthetic walkthrough was reproduced again with a
+19-artifact receipt, five rehydrated drafts, safe force, and rehydrated status.
