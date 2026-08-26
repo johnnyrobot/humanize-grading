@@ -25,6 +25,9 @@ only replaces an unchanged publication recognized by its identity-free marker;
 it refuses changed, unrelated, or unrecognized output and uses a recoverable
 staged swap.
 
+The legacy short rehydration command remains available for the documented
+default layout. Custom layouts must pass their trusted context explicitly.
+
 ```
 /grade calibrate --course phil210      # learn the instructor's standards
 /grade submissions/essay-3 --course phil210

@@ -873,11 +873,28 @@ def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
     map_path = tmp_path / "maps" / "essay-2.json"
     token_map.save(map_path)
     target = tmp_path / "final"
+    (tmp_path / "grading_rubric.md").write_bytes(
+        (phil210 / "grading_rubric.md").read_bytes()
+    )
+    record_path = drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.rubric = str(tmp_path / "grading_rubric.md")
+    record.save(record_path)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=tmp_path / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
 
     result = subprocess.run(
         [
             sys.executable,
-            "scripts/rehydrate.py",
+            str(Path("scripts/rehydrate.py").resolve()),
             str(drafts),
             "--map",
             str(map_path),
@@ -886,6 +903,7 @@ def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
         ],
         capture_output=True,
         text=True,
+        cwd=tmp_path,
     )
 
     assert result.returncode == 0, result.stdout + result.stderr

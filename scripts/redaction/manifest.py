@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from scripts.path_safety import read_text_limited
+    from scripts.path_safety import read_bytes_limited, read_text_limited
 except ModuleNotFoundError:  # direct scripts/redact.py execution
-    from path_safety import read_text_limited
+    from path_safety import read_bytes_limited, read_text_limited
+from .private_files import write_private_text
 
 SCHEMA = "redaction-batch/1"
 NAME = "_redaction.json"
@@ -30,7 +31,11 @@ class RedactionManifest:
             sorted(
                 (
                     path.name,
-                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                    hashlib.sha256(
+                        read_bytes_limited(
+                            path, "The redacted submission", 25 * 1024 * 1024
+                        )
+                    ).hexdigest(),
                 )
                 for path in outputs
             )
@@ -39,7 +44,8 @@ class RedactionManifest:
 
     def save(self, directory: Path) -> Path:
         path = directory / NAME
-        path.write_text(
+        write_private_text(
+            path,
             json.dumps(
                 {
                     "schema": SCHEMA,
@@ -54,7 +60,6 @@ class RedactionManifest:
                 sort_keys=True,
             )
             + "\n",
-            encoding="utf-8",
         )
         return path
 
@@ -105,5 +110,10 @@ class RedactionManifest:
             raise ValueError("The redaction manifest output membership changed.")
         for name, digest in self.outputs:
             path = directory / name
-            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            actual_digest = hashlib.sha256(
+                read_bytes_limited(
+                    path, "The redacted submission", 25 * 1024 * 1024
+                )
+            ).hexdigest()
+            if actual_digest != digest:
                 raise ValueError(f"The redaction manifest does not match {name}.")

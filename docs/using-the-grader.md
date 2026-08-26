@@ -361,6 +361,12 @@ renders all five drafts in a sibling staging directory. A missing, stale,
 malformed, or self-authored receipt, an unmapped token, or a rendering failure
 exits 5 and leaves the destination unchanged.
 
+The older `DRAFTS --map M --out O` form remains compatible only with the safe
+default layout: `redacted/`, `grading_rubric.md`, and
+`.grading/profiles/<course>.md` in the current directory. It never recovers
+those trusted paths from receipt-controlled locators. Use the explicit form
+above for any custom layout.
+
 A legacy batch with no receipt cannot be published. Run verification again to
 produce current evidence for the whole batch.
 

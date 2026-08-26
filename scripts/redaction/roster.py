@@ -24,11 +24,16 @@ the student never wrote.
 from __future__ import annotations
 
 import csv
+import io
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .tokens import TokenMap
+try:
+    from scripts.path_safety import read_text_limited
+except ModuleNotFoundError:  # direct scripts/redact.py execution
+    from path_safety import read_text_limited
 
 CONTEXT_WIDTH = 40
 
@@ -62,16 +67,16 @@ class RosterResult:
 
 def load_roster(path: Path) -> list[RosterEntry]:
     """Read a roster CSV with name, student_id, and email columns."""
-    with path.open(newline="", encoding="utf-8") as handle:
-        return [
-            RosterEntry(
-                row["name"].strip(),
-                (row.get("student_id") or "").strip(),
-                (row.get("email") or "").strip(),
-            )
-            for row in csv.DictReader(handle)
-            if (row.get("name") or "").strip()
-        ]
+    text = read_text_limited(path, "The roster", 5 * 1024 * 1024)
+    return [
+        RosterEntry(
+            row["name"].strip(),
+            (row.get("student_id") or "").strip(),
+            (row.get("email") or "").strip(),
+        )
+        for row in csv.DictReader(io.StringIO(text, newline=""))
+        if (row.get("name") or "").strip()
+    ]
 
 
 def full_name_variants(name: str) -> list[str]:

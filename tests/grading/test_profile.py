@@ -58,6 +58,23 @@ def test_a_changed_letter_scale_is_reported_as_rubric_drift(
     assert "grading scale or feedback protocol" in drifted
 
 
+def test_a_corrupt_whole_rubric_digest_is_reported(profile, phil210, tmp_path):
+    broken = tmp_path / "profile.md"
+    broken.write_text(
+        profile.read_text(encoding="utf-8").replace(
+            "**Rubric digest**: 58a64521abb1",
+            "**Rubric digest**: 000000000000",
+        ),
+        encoding="utf-8",
+    )
+
+    drifted = load_profile(broken).drift(
+        load_rubric(phil210 / "grading_rubric.md")
+    )
+
+    assert drifted == ["whole rubric fingerprint"]
+
+
 def test_a_removed_criterion_is_named_as_drifted(profile, phil210, tmp_path):
     lines = (phil210 / "grading_rubric.md").read_text(encoding="utf-8").splitlines()
     kept = [line for line in lines if not line.startswith("| **3.")]

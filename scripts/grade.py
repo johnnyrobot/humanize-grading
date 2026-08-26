@@ -41,7 +41,11 @@ from scripts.grading.profile import (  # noqa: E402
 )
 from scripts.grading.records import RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
-from scripts.path_safety import is_within, require_component  # noqa: E402
+from scripts.path_safety import (  # noqa: E402
+    is_within,
+    read_text_limited,
+    require_component,
+)
 from scripts.redaction.manifest import RedactionManifest  # noqa: E402
 
 EXIT_OK = 0
@@ -210,7 +214,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     )
     if counts["orphan"]:
         print(
-            "An orphaned artifact has no redacted submission. It is usually a "
+            "An orphaned artifact has no redacted submission. It is usually "
             "an earlier grading batch's output. Move it out before grading.",
             file=sys.stderr,
         )
@@ -244,7 +248,12 @@ def _cmd_density(args: argparse.Namespace) -> int:
         return EXIT_MALFORMED
     terms = load_terms(args.patterns)
     try:
-        result = scan(args.path.read_text(encoding="utf-8"), terms)
+        result = scan(
+            read_text_limited(
+                args.path, "The redacted submission", 25 * 1024 * 1024
+            ),
+            terms,
+        )
     except (OSError, UnicodeError) as error:
         print(f"Cannot read redacted submission: {error}", file=sys.stderr)
         return EXIT_MALFORMED

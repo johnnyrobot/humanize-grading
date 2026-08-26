@@ -22,14 +22,19 @@ from pathlib import Path
 from typing import Protocol
 
 from scripts.grading.consistency import Outlier, review
-from scripts.grading.density import load_terms
+from scripts.grading.density import PATTERNS_PATH, load_terms
 from scripts.grading.profile import ProfileError, load_profile
 from scripts.grading.records import GradeRecord, RecordError
 from scripts.grading.rubric import RubricError, load_rubric
 from scripts.grading.verify import ERROR, verify_draft
 from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
 from scripts.redaction.manifest import RedactionManifest
-from scripts.path_safety import has_symlink_component, read_text_limited
+from scripts.path_safety import (
+    has_symlink_component,
+    read_bytes_limited,
+    read_text_limited,
+    require_component,
+)
 
 
 class Progress(str, Enum):
@@ -178,18 +183,21 @@ class RenderResult:
     error: str = ""
 
 
-class RehydrationRenderer(Protocol):
-    """Write identity-bearing output without returning its text."""
+class PublicationInspector(Protocol):
+    """Check a publication without loading or returning identity-bearing text."""
 
     batch: str
     run_id: str
 
+    def hash_output(self, path: Path) -> str: ...
+
+
+class RehydrationRenderer(PublicationInspector, Protocol):
+    """Write identity-bearing output without returning its text."""
+
     def render(
         self, source: Path, destination: Path, expected_sha256: str
     ) -> RenderResult: ...
-
-    def hash_output(self, path: Path) -> str: ...
-
 
 @dataclass(frozen=True)
 class PublicationReport:
@@ -234,12 +242,10 @@ class VerifiedBatch:
     def _create(cls, paths: BatchPaths, receipt: Path) -> "VerifiedBatch":
         digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
         manifest = RedactionManifest.load(paths.redacted)
-        payload = json.loads(
-            read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
-        )
+        decoded = _decode_receipt(receipt)
         draft_digests = {
             Path(item["path"]).name: item["sha256"]
-            for item in payload.get("artifacts", [])
+            for item in decoded.artifacts
             if isinstance(item, dict)
             and item.get("role") == "draft"
             and isinstance(item.get("path"), str)
@@ -616,6 +622,13 @@ class _ReceiptValidation:
 
 
 @dataclass(frozen=True)
+class _DecodedReceipt:
+    batch: str
+    course: str
+    artifacts: tuple[object, ...]
+
+
+@dataclass(frozen=True)
 class GradingBatch:
     """Own the lifecycle rules for one grading batch."""
 
@@ -630,7 +643,7 @@ class GradingBatch:
         *,
         require_verified: bool = False,
         publication: Path | None = None,
-        renderer: RehydrationRenderer | None = None,
+        renderer: PublicationInspector | None = None,
     ) -> StatusReport:
         report = self._status(
             check_receipt=True,
@@ -1008,6 +1021,7 @@ class GradingBatch:
                     )
                 )
             staged: list[tuple[Path, Path, Path]] = []
+            preserved_backups: set[Path] = set()
             try:
                 if not blocking:
                     for path, record in records:
@@ -1049,7 +1063,11 @@ class GradingBatch:
                             try:
                                 backup.replace(path)
                             except OSError as restore_error:
-                                restore_errors.append(str(restore_error))
+                                preserved_backups.add(backup)
+                                restore_errors.append(
+                                    f"{path.name} remains at {backup.name}: "
+                                    f"{restore_error}"
+                                )
                         detail = f"Could not commit verified records: {error}"
                         if restore_errors:
                             detail += "; restore failed: " + "; ".join(restore_errors)
@@ -1061,10 +1079,19 @@ class GradingBatch:
                             )
                         )
                         receipt = None
+            except OSError as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="record-commit-failed",
+                        message=f"Could not stage verified records: {error}",
+                        token="",
+                    )
+                )
+                receipt = None
             finally:
                 for _, temporary, backup in staged:
                     for transient in (temporary, backup):
-                        if transient.exists():
+                        if transient.exists() and transient not in preserved_backups:
                             transient.unlink()
         failure = None
         if blocking:
@@ -1156,22 +1183,26 @@ def _verification_digests(
     status: StatusReport,
 ) -> dict[Path, str]:
     """Snapshot every byte sequence that verification and its receipt bind."""
-    artifact_paths: list[Path] = []
+    artifacts: list[tuple[Path, str, int]] = []
     for entry in status.entries:
-        artifact_paths.extend(
-            path for _, path in _participant_paths(entry) if path is not None
-        )
-    artifact_paths.extend(
+        for role, path in _participant_paths(entry):
+            if path is None:
+                continue
+            limit = 25 * 1024 * 1024 if role == "redacted-submission" else 1_048_576
+            artifacts.append((path, role, limit))
+    artifacts.extend(
         [
-            paths.redacted / REDACTION_MANIFEST_NAME,
-            inputs.rubric,
-            inputs.profile,
-            inputs.patterns,
+            (paths.redacted / REDACTION_MANIFEST_NAME, "redaction manifest", 1_048_576),
+            (inputs.rubric, "rubric", 5 * 1024 * 1024),
+            (inputs.profile, "calibration profile", 5 * 1024 * 1024),
+            (inputs.patterns, "pattern reference", 5 * 1024 * 1024),
         ]
     )
     return {
-        path.resolve(): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in artifact_paths
+        path.resolve(): hashlib.sha256(
+            read_bytes_limited(path, f"The {label}", limit)
+        ).hexdigest()
+        for path, label, limit in artifacts
     }
 
 
@@ -1280,57 +1311,49 @@ def _context_from_receipt(
     drafts: Path,
 ) -> tuple[BatchPaths, VerificationInputs]:
     receipt = drafts / RECEIPT_NAME
+    decoded = _decode_receipt(receipt)
+    require_component(decoded.batch, "The grading batch")
+    require_component(decoded.course, "The course")
+    redacted = Path("redacted").resolve()
+    profile = (Path(".grading") / "profiles" / f"{decoded.course}.md").resolve()
+    rubric = Path("grading_rubric.md").resolve()
+    return (
+        BatchPaths(
+            batch=decoded.batch,
+            redacted=redacted,
+            drafts=drafts.resolve(),
+        ),
+        VerificationInputs(
+            course=decoded.course,
+            rubric=rubric,
+            profile=profile,
+            patterns=PATTERNS_PATH,
+        ),
+    )
+
+
+def _decode_receipt(receipt: Path) -> _DecodedReceipt:
     payload = json.loads(
         read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
     )
-    if not isinstance(payload, dict) or payload.get("schema") != RECEIPT_SCHEMA:
-        raise ValueError("The verification receipt has an unknown schema.")
+    if not isinstance(payload, dict):
+        raise ValueError("The verification receipt must be a JSON object.")
+    if payload.get("schema") != RECEIPT_SCHEMA:
+        raise ValueError(
+            f"Unknown verification receipt schema {payload.get('schema')!r}."
+        )
     batch = payload.get("batch")
     course = payload.get("course")
+    artifacts = payload.get("artifacts")
     if not isinstance(batch, str) or not batch:
         raise ValueError("The verification receipt needs a grading batch.")
     if not isinstance(course, str) or not course:
         raise ValueError("The verification receipt needs a course.")
-    artifacts = payload.get("artifacts")
+    if payload.get("hash") != "sha256":
+        raise ValueError("The verification receipt must use SHA-256.")
     if not isinstance(artifacts, list):
-        raise ValueError("The verification receipt needs an artifact list.")
-
-    def paths_for(role: str) -> list[Path]:
-        paths: list[Path] = []
-        for item in artifacts:
-            if not isinstance(item, dict) or item.get("role") != role:
-                continue
-            locator = item.get("path")
-            if not isinstance(locator, str) or not locator:
-                raise ValueError(f"The receipt has an invalid {role} path.")
-            path = Path(locator)
-            paths.append(
-                path.resolve()
-                if path.is_absolute()
-                else (receipt.parent / path).resolve()
-            )
-        return paths
-
-    redacted = paths_for("redacted-submission")
-    parents = {path.parent for path in redacted}
-    if not redacted or len(parents) != 1:
-        raise ValueError("The receipt must name one redacted directory.")
-
-    def one(role: str) -> Path:
-        matched = paths_for(role)
-        if len(matched) != 1:
-            raise ValueError(f"The receipt must name one {role} file.")
-        return matched[0]
-
-    return (
-        BatchPaths(batch=batch, redacted=parents.pop(), drafts=drafts.resolve()),
-        VerificationInputs(
-            course=course,
-            rubric=one("rubric"),
-            profile=one("calibration-profile"),
-            patterns=one("pattern-reference"),
-        ),
-    )
+        raise ValueError("The verification receipt artifacts must be a list.")
+    return _DecodedReceipt(batch=batch, course=course, artifacts=tuple(artifacts))
 
 
 def _publication_backup(target: Path) -> Path:
@@ -1472,7 +1495,7 @@ def _recover_publication_transaction(
 
 def _validate_existing_publication(
     target: Path,
-    renderer: RehydrationRenderer,
+    renderer: PublicationInspector,
     batch: str,
     receipt_digest: str,
     status: StatusReport,
@@ -1610,10 +1633,8 @@ def _validate_verification_receipt(
     if not receipt.is_file():
         return _ReceiptValidation(present=False, valid=False, findings=())
     try:
-        payload = json.loads(
-            read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
-        )
-        artifacts = _validated_receipt_artifacts(payload, paths)
+        decoded = _decode_receipt(receipt)
+        artifacts = _validated_receipt_artifacts(decoded, paths)
         expected = _expected_participant_artifacts(status, receipt.parent)
         actual = {
             (item["role"], item["token"], item["path"])
@@ -1631,7 +1652,22 @@ def _validate_verification_receipt(
                 )
             if not artifact_path.is_file():
                 raise _StaleReceipt(f"A verified artifact is missing: {item['path']}")
-            digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+            limits = {
+                "redacted-submission": 25 * 1024 * 1024,
+                "draft": 1_048_576,
+                "grade-record": 1_048_576,
+                "redaction-manifest": 1_048_576,
+                "rubric": 5 * 1024 * 1024,
+                "calibration-profile": 5 * 1024 * 1024,
+                "pattern-reference": 5 * 1024 * 1024,
+            }
+            digest = hashlib.sha256(
+                read_bytes_limited(
+                    artifact_path,
+                    f"The {item['role']} receipt artifact",
+                    limits[item["role"]],
+                )
+            ).hexdigest()
             if digest != item["sha256"]:
                 raise _StaleReceipt(f"A verified artifact changed: {item['path']}")
     except _StaleReceipt as error:
@@ -1666,24 +1702,13 @@ class _StaleReceipt(Exception):
 
 
 def _validated_receipt_artifacts(
-    payload: object, paths: BatchPaths
+    receipt: _DecodedReceipt, paths: BatchPaths
 ) -> list[dict[str, str]]:
-    if not isinstance(payload, dict):
-        raise ValueError("The verification receipt must be a JSON object.")
-    if payload.get("schema") != RECEIPT_SCHEMA:
-        raise ValueError(f"Unknown verification receipt schema {payload.get('schema')!r}.")
-    if payload.get("batch") != paths.batch:
+    if receipt.batch != paths.batch:
         raise _StaleReceipt("The verification receipt belongs to another grading batch.")
-    if not isinstance(payload.get("course"), str) or not payload["course"]:
-        raise ValueError("The verification receipt needs a course.")
-    if payload.get("hash") != "sha256":
-        raise ValueError("The verification receipt must use SHA-256.")
-    artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise ValueError("The verification receipt artifacts must be a list.")
     validated: list[dict[str, str]] = []
     seen: set[tuple[str, str, str]] = set()
-    for artifact in artifacts:
+    for artifact in receipt.artifacts:
         if not isinstance(artifact, dict):
             raise ValueError("Each verification receipt artifact must be an object.")
         role = artifact.get("role")

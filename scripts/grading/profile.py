@@ -87,6 +87,8 @@ class Profile:
                 drifted.append(f"{number}. {criterion.name}")
         if self.rubric_context_digest != rubric.context_digest:
             drifted.append("grading scale or feedback protocol")
+        if self.rubric_digest != rubric.digest and not drifted:
+            drifted.append("whole rubric fingerprint")
         return drifted
 
 

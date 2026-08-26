@@ -34,10 +34,15 @@ def package_files() -> set[Path]:
         if (ROOT / "PACKAGE_FILES.txt").is_file():
             tracked.add(Path("PACKAGE_FILES.txt"))
         return tracked
+    generated_directories = {".git", ".pytest_cache", "__pycache__"}
+    generated_files = {".DS_Store", ".coverage"}
     return {
         path.relative_to(ROOT)
         for path in ROOT.rglob("*")
-        if path.is_file() and ".git" not in path.parts
+        if path.is_file()
+        and not (generated_directories & set(path.relative_to(ROOT).parts))
+        and path.name not in generated_files
+        and path.suffix != ".pyc"
     }
 
 

@@ -9,7 +9,7 @@ Exit codes: 0 clean, 2 unmatched roster entry, 3 unreviewed candidates,
 7 participant collision. A non-zero exit must
 stop the cloud path. There is no override for 2, 3, or 4 -- if this prints
 anything other than a clean exit for one of those, fix the input and run it
-again rather than forcing the cloud path open. Exit 5 exists only to stop a
+again rather than forcing the cloud path open. Exit 5 exists only to stop
 stale files from an earlier redaction silently mixing into a new one; pass --force
 to overwrite the earlier redaction's token-named outputs (nothing else in the
 directory is touched).
