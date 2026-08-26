@@ -12,6 +12,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SKILL_PATH = ROOT / "SKILL.md"
 SKILL = SKILL_PATH.read_text(encoding="utf-8")
+HUMANIZER_SKILL = (ROOT / "skills" / "humanizer" / "SKILL.md").read_text(
+    encoding="utf-8"
+)
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 AGENTS = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 PLUGIN = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
@@ -19,7 +22,7 @@ PLUGIN = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding
 
 def package_files() -> set[Path]:
     """Return the files a Git release would ship, or archive contents."""
-    if (ROOT / ".git").is_dir():
+    if (ROOT / ".git").exists():
         result = subprocess.run(
             ["git", "ls-files", "-z"],
             cwd=ROOT,
@@ -104,12 +107,28 @@ skill_version = require_match(
     re.search(r'(?m)^\s+version:\s*["\']([^"\']+)["\']\s*$', yaml_metadata),
     "Add metadata.version to SKILL.md",
 ).group(1)
+humanizer_yaml_metadata = require_match(
+    re.match(r"\A---\n(.*?)\n---\n", HUMANIZER_SKILL, re.DOTALL),
+    "skills/humanizer/SKILL.md must begin with YAML metadata",
+).group(1)
+humanizer_version = require_match(
+    re.search(
+        r'(?m)^\s+version:\s*["\']([^"\']+)["\']\s*$',
+        humanizer_yaml_metadata,
+    ),
+    "Add metadata.version to skills/humanizer/SKILL.md",
+).group(1)
 readme_version = require_match(
     re.search(r"(?m)^- \*\*([0-9]+\.[0-9]+\.[0-9]+)\*\*", README),
     "Add a version entry to README.md",
 ).group(1)
 
-package_versions = {skill_version, readme_version, str(PLUGIN.get("version", ""))}
+package_versions = {
+    skill_version,
+    humanizer_version,
+    readme_version,
+    str(PLUGIN.get("version", "")),
+}
 if len(package_versions) != 1:
     raise SystemExit(
         f"Use one package version in all files: {sorted(package_versions)}"
@@ -160,6 +179,7 @@ if readme_numbers != set(range(1, 36)):
 
 required_references = {
     "ai-patterns.md",
+    "assignment-brief.md",
     "calibration.md",
     "redaction.md",
     "rubric-format.md",
@@ -181,6 +201,20 @@ missing_rules = [rule for rule in hard_rules if rule not in SKILL]
 if missing_rules:
     raise SystemExit(
         "Keep the four hard rules in SKILL.md: " + "; ".join(missing_rules)
+    )
+
+assignment_brief_workflow = (
+    "Approve assignment brief for <batch>",
+    "python3 scripts/grade.py brief prepare",
+    "python3 scripts/grade.py brief approve",
+)
+missing_assignment_brief_workflow = [
+    text for text in assignment_brief_workflow if text not in SKILL
+]
+if missing_assignment_brief_workflow:
+    raise SystemExit(
+        "Document the assignment brief workflow in SKILL.md: "
+        + "; ".join(missing_assignment_brief_workflow)
     )
 
 if (ROOT / "hooks" / "hooks.json").exists():

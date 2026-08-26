@@ -12,6 +12,11 @@ _Avoid_: Anonymized submission, raw submission
 A set of redacted submissions for one assignment, together with their draft feedback and grade records.
 _Avoid_: Job, run, folder
 
+**Assignment brief**:
+An identity-free, instructor-approved record of how the rubric and calibration
+profile apply to one grading batch. Verification binds the exact approved file.
+_Avoid_: Prompt, config, approval receipt
+
 **Verified draft**:
 Draft feedback and its grade record after every required check has passed against the redacted submission, rubric, and calibration profile.
 _Avoid_: Approved feedback, final grade

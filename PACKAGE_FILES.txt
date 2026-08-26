@@ -10,9 +10,6 @@
 .scratch/grading-batch-lifecycle/issues/07-contract-legacy-batch-interface.md
 .scratch/grading-batch-lifecycle/issues/08-ship-and-verify-version-3-2-0.md
 .scratch/grading-batch-lifecycle/spec.md
-.superpowers/sdd/.gitignore
-.superpowers/sdd/2026-08-26-assignment-briefing/progress.md
-.superpowers/sdd/2026-08-26-assignment-briefing/task-1-brief.md
 AGENTS.md
 CONTEXT.md
 LICENSE
@@ -21,6 +18,7 @@ README.md
 SKILL.md
 agents/openai.yaml
 docs/adr/0001-verification-receipts-gate-atomic-rehydration.md
+docs/adr/0002-approved-assignment-briefs-gate-grading.md
 docs/agents/domain.md
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md
@@ -34,6 +32,7 @@ docs/using-the-grader.md
 hooks/block-raw-reads.json
 hooks/block_raw_reads.py
 references/ai-patterns.md
+references/assignment-brief.md
 references/calibration.md
 references/redaction.md
 references/rubric-format.md

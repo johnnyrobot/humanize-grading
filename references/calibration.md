@@ -23,6 +23,21 @@ The profile at `.grading/profiles/<course>.md`, and a holdout report.
 **The report is the deliverable, not the profile.** A bad profile must
 surface in the first minute rather than on the fortieth essay.
 
+## Handoff to assignment briefing
+
+Calibration sets reusable course standards: rubric interpretation, scoring
+habits, feedback structure, voice, and phrases to avoid. It does not decide how
+those standards apply to every future assignment.
+
+Before each grading batch, the assignment brief confirms how the current
+profile applies to that assignment. It records assignment-specific priorities,
+required evidence, expected mistakes, feedback behavior, boundaries, and host
+mode. These notes may clarify the rubric but must not change its points or add
+criteria. Read `assignment-brief.md` before preparing one.
+
+When the rubric or profile changes, approve the assignment brief again before
+grading and verify the whole batch again.
+
 ## The seven sections
 
 | Section | Holds |

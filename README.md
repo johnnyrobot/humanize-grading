@@ -25,20 +25,59 @@ Instructor -> AI agent -> local safety scripts -> verified draft -> instructor a
 ```
 
 In cloud mode, the model receives only tokenized submissions, the rubric, the
-calibration profile and identity-free verification evidence. Raw submissions,
-the roster, the private review file, the token map and rehydrated drafts stay
-outside model context.
+calibration profile, the identity-free assignment brief and identity-free
+verification evidence. Raw submissions, the roster, the private review file,
+the token map and rehydrated drafts stay outside model context.
 
 In this README, **publication** means writing one complete batch of draft
 feedback to a local `final/<batch>/` directory. It does not mean publishing to
 the internet or sending anything to an LMS. After identities are restored, the
 agent must not open the rehydrated files; the instructor reviews them locally.
 
+## How the agent walks an instructor through grading
+
+1. **Choose local or cloud.** The agent asks before it reads any file. Fully
+   local model inference and agent execution are recommended. A cloud run still
+   requires redaction and institutional permission.
+2. **Calibrate once, or when the rubric changes.** Calibration builds a reusable
+   course profile for scoring standards and feedback voice. It stays local
+   because the source samples still carry student identity.
+3. **Answer assignment-specific questions.** For each batch, the agent asks
+   about the assignment, profile fit, learning goals, required evidence, common
+   mistakes, feedback behavior, boundaries and host mode. It may read the
+   rubric, profile, assignment prompt and instructor-authored course material,
+   but it must not read submissions, the roster, the redaction review file or
+   the token map yet.
+4. **Approve the exact summary.** The agent prepares an identity-free assignment
+   brief, summarizes it and waits for the exact batch-specific phrase. A casual
+   “yes” does not approve anything.
+5. **Let the agent redact, grade and verify.** Only after approval does the agent
+   read submissions through the redaction workflow. Whole-batch verification
+   binds the exact approved brief in a schema 2 receipt.
+6. **Review the rehydrated drafts and submit them yourself.** Rehydration restores
+   identities on the instructor's machine. The agent must not reopen those
+   files, and the package never sends grades to an LMS.
+
+A short approval exchange looks like this:
+
+```text
+Agent: For essay-3, I will use the current PHIL 210 profile, prioritize the
+       required source analysis, keep feedback direct and under 350 words, and
+       use the cloud path after local redaction. Approve this assignment brief?
+Instructor: Approve assignment brief for essay-3
+```
+
+The agent records that message with `brief approve`, then confirms it with
+`brief check`. Approval is workflow evidence, not a signature, human
+authentication or privacy permission. The instructor must approve again if the
+brief body, course, batch, host mode, rubric or calibration profile changes.
+
 ## Who does what
 
 | AI agent | Instructor |
 | --- | --- |
 | Loads the Grader or Humanizer skill | Chooses local or cloud operation |
+| Prepares and checks an identity-free assignment brief | Approves the exact batch summary |
 | Runs redaction, grading, verification and consistency commands | Inspects the private review file outside the AI conversation |
 | Reads only tokenized submissions from `redacted/` | Decides whether institutional policy permits cloud processing |
 | Writes draft feedback and structured grade records | Reviews, edits and signs off on every draft |
@@ -59,18 +98,23 @@ This is a cloud-model run.
 The agent then follows this sequence:
 
 1. Confirm the course profile still matches the rubric.
-2. Run local redaction. Names, IDs, emails, filenames and document metadata
+2. Ask the assignment-specific questions, prepare the identity-free brief and
+   wait for `Approve assignment brief for essay-2`. Run `brief approve` and
+   `brief check` only after that exact message.
+3. Run local redaction. Names, IDs, emails, filenames and document metadata
    become stable tokens such as `STUDENT_03`.
-3. Pause while the instructor inspects the private review file locally. The
+4. Pause while the instructor inspects the private review file locally. The
    agent must never read that identity-bearing file.
-4. Grade only the pending files under `redacted/`. For each rubric criterion,
+5. Grade only the pending files under `redacted/`. For each rubric criterion,
    write a score and a supporting quote into the grade record under
    `.grading/drafts/<batch>/`.
-5. Verify the whole grading batch. A failed quote, total, letter grade,
-   feedback section, density measurement or file binding blocks publication.
-6. Show the instructor the advisory consistency flags across the batch.
-7. Rehydrate the verified drafts locally. Real names return only after the
-   receipt, redaction manifest, token map and output set all match.
+6. Verify the whole grading batch. A missing, unapproved or stale brief, failed
+   quote, total, letter grade, feedback section, density measurement or file
+   binding blocks publication.
+7. Show the instructor the advisory consistency flags across the batch.
+8. Rehydrate the verified drafts locally. Real names return only after the
+   schema 2 receipt, approved brief, redaction manifest, token map and output
+   set all match.
 
 For the repository's five-submission synthetic example, verification reports:
 
@@ -142,23 +186,41 @@ Grader keeps student identity out of a cloud model's context. It redacts names,
 IDs, emails, filenames, and document metadata to stable tokens on your machine,
 grades the redacted copy, and reattaches real names locally at the end.
 
-Verification covers the whole grading batch and writes an identity-free receipt
-that binds the inputs and drafts that passed. Rehydration requires the trusted
-batch, course, rubric, profile and redacted paths, then reruns semantic
-verification instead of trusting receipt hashes alone. It also requires the
-token map's redaction-run ID to match the receipt-bound manifest. It stages every
-draft before publishing and leaves the destination unchanged if staging fails. Every
-rehydrated feedback file remains a draft pending instructor sign-off. `--force`
-only replaces an unchanged publication recognized by its identity-free marker;
-it refuses changed, unrelated, or unrecognized output and uses a recoverable
-staged swap.
+Verification covers the whole grading batch and writes an identity-free schema
+2 receipt. The receipt binds the exact approved assignment brief, redacted
+submissions, drafts, grade records, rubric, profile, redaction manifest and
+pattern reference that passed. Rehydration uses either a complete trusted
+context, including the brief path, or the complete context recovered from that
+receipt. It reruns semantic verification instead of trusting hashes alone and
+requires the token map's redaction-run ID to match the receipt-bound manifest.
+It stages every draft before publishing and leaves the destination unchanged if
+staging fails. Every rehydrated feedback file remains a draft pending instructor
+sign-off. `--force` only replaces an unchanged publication recognized by its
+identity-free marker; it refuses changed, unrelated or unrecognized output and
+uses a recoverable staged swap.
 
-The legacy short rehydration command remains available for the documented
-default layout. Custom layouts must pass their trusted context explicitly.
+The short rehydration command may omit all six context options when a current
+schema 2 receipt can recover them. Otherwise pass the complete trusted context,
+including the assignment brief path. Do not mix a partial explicit context with
+receipt recovery.
 
 ```
 /grade calibrate --course phil210      # learn the instructor's standards
 /grade submissions/essay-3 --course phil210
+```
+
+For each batch, the agent runs the local assignment-brief commands before
+redaction:
+
+```bash
+python3 scripts/grade.py brief prepare \
+  --batch essay-3 --course phil210 --mode local
+# The agent fills the draft and waits for the exact instructor message.
+python3 scripts/grade.py brief approve \
+  --batch essay-3 --course phil210 --rubric grading_rubric.md \
+  --approval "Approve assignment brief for essay-3"
+python3 scripts/grade.py brief check \
+  --batch essay-3 --course phil210 --rubric grading_rubric.md
 ```
 
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
@@ -343,6 +405,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
+- **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.
 - **3.0.0** — Grader becomes the package. Humanizer moves to `skills/humanizer/` and the 35 patterns move to `references/ai-patterns.md`.

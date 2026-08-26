@@ -13,7 +13,7 @@ with that corpus before you point this at anything of your own.
 | --- | --- | --- |
 | `scripts/redact.py` | Replaces student identity with stable tokens | Your machine only |
 | `scripts/calibrate.py` | Builds calibration inputs, reports the holdout delta | Your machine only |
-| `scripts/grade.py` | Owns grading-batch status, verification receipts, pattern counts and consistency flags | Your machine only |
+| `scripts/grade.py` | Owns assignment briefs, grading-batch status, verification receipts, pattern counts and consistency flags | Your machine only |
 | `scripts/rehydrate.py` | Requires a current receipt, then stages and publishes rehydrated draft feedback | Your machine only |
 | `SKILL.md` | The grader. Reads the rubric and the profile, scores the work, drafts the feedback | Local or cloud model |
 | `skills/humanizer/SKILL.md` | The finishing pass that keeps feedback from reading like a chatbot | Local or cloud model |
@@ -50,8 +50,10 @@ short version:
   Verification binds the manifest, and rehydration refuses a stale same-label
   map from another redaction result.
 - **Verification produces the evidence gate.** `_verification.json` binds the
-  exact redacted submissions, drafts, grade records, rubric, calibration
-  profile and pattern reference that passed. Any later edit makes it stale.
+  exact approved assignment brief, redacted submissions, drafts, grade records,
+  rubric, calibration profile, redaction manifest and pattern reference that
+  passed. Schema 2 makes the approved brief required evidence. Any later edit
+  makes the receipt stale.
 - **Publication is staged.** Rehydration changes the destination only after
   every draft renders without an unmapped token. `_publication.json` records
   the receipt digest and output hashes without holding real identities.
@@ -142,6 +144,10 @@ first minute, not on the fortieth essay. If the gap is wide or none of your
 phrasing came through, edit the profile and run it again. Profiles are plain
 Markdown, dated, and yours to hand-edit.
 
+The profile is reusable course guidance. It records your standards and voice.
+Before each grading batch, an assignment brief confirms how that profile
+applies to the current assignment. It does not replace calibration.
+
 ## Part 2 — Grade a batch
 
 ### 2.1 Answer the gate
@@ -154,7 +160,70 @@ Cloud means redaction is mandatory. Local means redaction is on by default and
 opting out takes an explicit flag. The skill cannot detect its own host, so this
 answer is yours to give honestly.
 
-### 2.2 Redact
+### 2.2 Confirm the profile is current
+
+```bash
+python3 scripts/grade.py profile --course phil210 --rubric grading_rubric.md
+```
+
+```
+Profile for phil210 is current, calibrated 2026-08-24 from 4 samples.
+```
+
+If you have edited the rubric since calibrating, this names the drifted criteria
+and exits 11, because grading against a changed criterion applies standards
+calibrated for different words. Recalibrate before preparing the assignment
+brief.
+
+### 2.3 Prepare and approve the assignment brief
+
+Read `references/assignment-brief.md` before starting. For this batch, the agent
+asks about the assignment and paths, profile fit, learning goals and rubric
+priorities, required evidence and common mistakes, feedback behavior, things to
+avoid, and the local or cloud privacy consequence.
+
+Before approval, the agent may read the rubric, profile, assignment prompt and
+instructor-authored course material. It must not read submissions, the roster,
+the redaction review file or the token map.
+
+Prepare the owner-only local draft:
+
+```bash
+python3 scripts/grade.py brief prepare \
+  --batch essay-2 \
+  --course phil210 \
+  --mode cloud
+```
+
+The default path is `.grading/assignments/essay-2.md`. The agent fills every
+`<!-- answer-required -->` marker, then shows you one short identity-free
+summary. If it matches your instructions, respond with exactly:
+
+```text
+Approve assignment brief for essay-2
+```
+
+The agent then records and checks that approval:
+
+```bash
+python3 scripts/grade.py brief approve \
+  --batch essay-2 \
+  --course phil210 \
+  --rubric grading_rubric.md \
+  --approval "Approve assignment brief for essay-2"
+
+python3 scripts/grade.py brief check \
+  --batch essay-2 \
+  --course phil210 \
+  --rubric grading_rubric.md
+```
+
+On resume, run `brief check`; do not repeat the interview when the approved
+inputs have not changed. A change to the brief body, course, batch, host mode,
+rubric or profile requires approval again. Chat approval records workflow state.
+It is not a signature, human authentication or privacy permission.
+
+### 2.4 Redact
 
 ```bash
 python3 scripts/redact.py submissions/essay-2 \
@@ -198,21 +267,7 @@ Exit 2 is common and benign — it means your roster is bigger than the batch.
 Trim the roster to who actually submitted, or accept that those students are
 missing.
 
-### 2.3 Confirm the profile is current
-
-```bash
-python3 scripts/grade.py profile --course phil210 --rubric grading_rubric.md
-```
-
-```
-Profile for phil210 is current, calibrated 2026-08-24 from 4 samples.
-```
-
-If you have edited the rubric since calibrating, this names the drifted criteria
-and exits 11, because grading against a changed criterion applies standards
-calibrated for different words.
-
-### 2.4 See what the batch owes
+### 2.5 See what the batch owes
 
 ```bash
 python3 scripts/grade.py status --batch essay-2 --redacted redacted
@@ -236,7 +291,7 @@ say which one to send. This is also how an interrupted batch resumes.
 usually an earlier grading batch's output. `incomplete` means a draft or a record but not
 both.
 
-### 2.5 Grade each pending submission
+### 2.6 Grade each pending submission
 
 The skill reads one file at a time from `redacted/` and writes two files to
 `.grading/drafts/<batch>/`:
@@ -244,6 +299,10 @@ The skill reads one file at a time from `redacted/` and writes two files to
 - `STUDENT_03.md` — the feedback you will read
 - `STUDENT_03.json` — the record, holding per-criterion scores, the quotes
   behind them, the total, and the pattern-density evidence
+
+It uses the approved assignment brief for priorities, required evidence,
+expected mistakes, feedback behavior and boundaries. The brief may clarify the
+rubric but cannot change points or add criteria.
 
 For criterion-4 evidence it runs:
 
@@ -261,7 +320,7 @@ python3 scripts/grade.py density redacted/STUDENT_02.md --json
 }
 ```
 
-### 2.6 Verify
+### 2.7 Verify
 
 Nothing reaches a student until this passes.
 
@@ -280,7 +339,9 @@ STUDENT_05: 0 errors, 0 warnings
 All 5 drafts verified. Offsets and verification receipt written.
 ```
 
-It checks every quote against the source, the arithmetic against itself, the
+Before it reads any redacted submission or draft, verification checks
+`.grading/assignments/essay-2.md` against the current rubric and profile. It
+then checks every quote against the source, the arithmetic against itself, the
 letter against your scale, the structure against your rubric's feedback
 protocol, the phrasing against your never-use list, and the density figures
 against a fresh count. Then it writes the located offsets back into each record,
@@ -292,10 +353,10 @@ so the positions were computed rather than guessed:
 ```
 
 The same successful run writes `.grading/drafts/essay-2/_verification.json`.
-For this five-submission batch it holds schema `grading-batch-verification/1`
-and 19 artifact entries: three per submission plus the redaction manifest,
-rubric, profile and pattern reference. It holds paths, stable tokens and hashes,
-never source text or real identities.
+For this five-submission batch it holds schema `grading-batch-verification/2`
+and 20 artifact entries: three per submission plus the token-free assignment
+brief, redaction manifest, rubric, profile and pattern reference. It holds
+paths, stable tokens and hashes, never source text or real identities.
 
 Status now shows the receipt-derived state:
 
@@ -309,11 +370,12 @@ Status now shows the receipt-derived state:
 0 pending, 0 drafted, 0 incomplete, 0 orphaned, 5 verified, 0 rehydrated.
 ```
 
-Exit 12 means at least one draft failed. A failed batch writes neither offsets
-nor a receipt. Fix it and run verification again. `--no-write` checks the batch
-but writes neither artifact.
+Exit 12 means the assignment brief or at least one draft failed. A failed batch
+writes neither offsets nor a receipt. Approve a missing, unapproved or stale
+brief, or fix the draft, then run verification again. `--no-write` checks the
+batch but writes neither artifact.
 
-### 2.7 Look at the outliers
+### 2.8 Look at the outliers
 
 ```bash
 python3 scripts/grade.py consistency --batch essay-2 --redacted redacted
@@ -338,7 +400,7 @@ letter, which is exactly what this tool exists to avoid.
 Outliers are found with the median, not the mean, because one extreme score
 inflates a standard deviation enough to hide itself.
 
-### 2.8 Reattach real names
+### 2.9 Reattach real names
 
 ```bash
 python3 scripts/rehydrate.py .grading/drafts/essay-2 \
@@ -347,6 +409,7 @@ python3 scripts/rehydrate.py .grading/drafts/essay-2 \
   --rubric grading_rubric.md \
   --profile .grading/profiles/phil210.md \
   --redacted redacted \
+  --brief .grading/assignments/essay-2.md \
   --map .grading/maps/essay-2.json \
   --out final/essay-2
 ```
@@ -361,14 +424,15 @@ renders all five drafts in a sibling staging directory. A missing, stale,
 malformed, or self-authored receipt, an unmapped token, or a rendering failure
 exits 5 and leaves the destination unchanged.
 
-The older `DRAFTS --map M --out O` form remains compatible only with the safe
-default layout: `redacted/`, `grading_rubric.md`, and
-`.grading/profiles/<course>.md` in the current directory. It never recovers
-those trusted paths from receipt-controlled locators. Use the explicit form
-above for any custom layout.
+You may instead omit all six context options—`--batch`, `--course`, `--rubric`,
+`--profile`, `--redacted` and `--brief`—and let a current schema 2 receipt
+recover the complete trusted context. Do not pass only part of the context. Use
+the explicit form above when you want each trusted path visible in the command.
 
-A legacy batch with no receipt cannot be published. Run verification again to
-produce current evidence for the whole batch.
+A legacy batch with no receipt cannot be published. A schema 1 receipt also
+cannot publish because it predates assignment briefing. Prepare and approve the
+brief, then run verification again to produce schema 2 evidence for the whole
+batch.
 
 The successful output contains `STUDENT_01.md` through `STUDENT_05.md` and the
 identity-free `grading-batch-publication/1` marker `_publication.json`. Grade
@@ -383,6 +447,7 @@ python3 scripts/rehydrate.py .grading/drafts/essay-2 \
   --rubric grading_rubric.md \
   --profile .grading/profiles/phil210.md \
   --redacted redacted \
+  --brief .grading/assignments/essay-2.md \
   --map .grading/maps/essay-2.json \
   --out final/essay-2 \
   --force
@@ -437,10 +502,13 @@ guard that blocks every tool call would also block the calls needed to fix it.
 | Command | Purpose |
 | --- | --- |
 | `redact.py SOURCE --roster R --batch B` | Tokenize identity, write the map and review file |
-| `rehydrate.py DRAFTS --batch B --course C --rubric R --profile P --redacted D --map M --out O [--force]` | Rerun trusted verification, then stage and publish rehydrated draft feedback |
+| `rehydrate.py DRAFTS --batch B --course C --rubric R --profile P --redacted D --brief A --map M --out O [--force]` | Rerun trusted verification, then stage and publish rehydrated draft feedback |
 | `calibrate.py inputs --rubric R --samples D --roster C --holdout N --out F` | Build the name-free calibration packet |
 | `calibrate.py holdout --record J --draft M --sample S` | Report the holdout delta |
 | `grade.py profile --course C --rubric R` | Confirm a profile exists and the rubric has not drifted |
+| `grade.py brief prepare --batch B --course C --mode local\|cloud` | Create an identity-free draft assignment brief |
+| `grade.py brief approve --batch B --course C --rubric R --approval TEXT` | Bind the answered brief to the current rubric and profile |
+| `grade.py brief check --batch B --course C --rubric R` | Confirm the exact approved brief is current |
 | `grade.py status --batch B` | Show what still needs grading |
 | `grade.py density FILE [--json]` | Count watched AI terms |
 | `grade.py verify --batch B --course C --rubric R` | Check every draft; write offsets and the verification receipt |
@@ -457,8 +525,8 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 | 5 | `rehydrate.py` | Receipt, map, rendering, token mapping or publication failure |
 | 10 | `grade.py` | No profile for this course |
 | 11 | `grade.py` | The rubric drifted since calibration |
-| 12 | `grade.py` | A draft failed verification |
-| 13 | both CLIs | Malformed input |
+| 12 | `grade.py verify` | The assignment brief or a draft failed verification |
+| 13 | both CLIs | Malformed input; `grade.py brief` also uses it for a missing, unapproved or stale brief |
 
 ## What this does not do
 
