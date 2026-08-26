@@ -1,8 +1,9 @@
 # Humanizer
 
-[![skills.sh installs](https://skills.sh/b/blader/humanizer)](https://skills.sh/blader/humanizer)
-
 Humanizer rewrites AI-sounding text so it reads like a person wrote it, without changing what it says. Because it is just Markdown, it works with any agent that supports skills.
+
+This package builds on [Siqi Chen's Humanizer](https://github.com/blader/humanizer),
+preserves its MIT license, and adds the identity-safe Grader skill.
 
 ## Two skills in one package
 
@@ -249,7 +250,7 @@ MIT
 Install Grader and Humanizer with the Skills CLI:
 
 ```bash
-npx skills add blader/humanizer --full-depth --global
+npx skills add johnnyrobot/humanize-grading --full-depth --global
 ```
 
 The root Grader skill otherwise shadows the nested Humanizer skill during
@@ -262,7 +263,7 @@ reload their skills.
 Claude Code 2.1.142 or newer can install the plugin instead:
 
 ```text
-/plugin marketplace add blader/humanizer
+/plugin marketplace add johnnyrobot/humanize-grading
 /plugin install humanizer@humanizer
 ```
 
