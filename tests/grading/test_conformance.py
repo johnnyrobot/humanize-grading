@@ -489,6 +489,54 @@ def test_audit_keeps_a_read_only_trace_unverified(tmp_path):
 
     assert report.passed is True
     assert report.trace.status == "unverified"
+    assert report.trace.findings == ("missing-command-evidence",)
+
+
+def test_trace_empty_file_is_unverified_with_missing_command_evidence(tmp_path):
+    workspace = _trial(tmp_path)
+    trace = _write_trace(workspace, "empty", [])
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "unverified"
+    assert result.events == 0
+    assert result.findings == ("missing-command-evidence",)
+
+
+def test_trace_only_malformed_or_failed_next_commands_is_unverified(tmp_path):
+    workspace = _trial(tmp_path)
+    trace = _write_trace(
+        workspace,
+        "unusable-commands",
+        [
+            _trace_event(
+                "grading",
+                "command",
+                argv=["python3", "scripts/grade.py", "next"],
+                exit_code=0,
+            ),
+            _trace_event(
+                "grading",
+                "command",
+                argv=["python3", "scripts/grade.py", "next", "--json"],
+                exit_code=12,
+            ),
+        ],
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "unverified"
+    assert result.events == 2
+    assert result.findings == ("missing-command-evidence",)
 
 
 def test_audit_keeps_out_of_order_next_commands_unverified(tmp_path):

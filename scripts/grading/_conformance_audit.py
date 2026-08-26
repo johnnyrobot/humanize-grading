@@ -265,6 +265,11 @@ def audit_trace(
         commands = phase_commands[phase]
         successful_next = [index for is_next, index in commands if is_next]
         work = phase_work[phase]
+        if not commands or (not successful_next and not work):
+            if not prohibited and not (findings - {"missing-command-evidence"}):
+                findings.add("missing-command-evidence")
+            evidence_complete = False
+            continue
         if (
             len(successful_next) < 2
             or not work
@@ -275,7 +280,8 @@ def audit_trace(
             or phase in incomplete_next_phases
         ):
             evidence_complete = False
-    failed = bool(prohibited or findings)
+    blocking_findings = findings - {"missing-command-evidence"}
+    failed = bool(prohibited or blocking_findings)
     status = "failed" if failed else ("passed" if evidence_complete else "unverified")
     return TraceResult(
         status=status,
