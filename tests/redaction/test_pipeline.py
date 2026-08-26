@@ -14,6 +14,7 @@ from scripts.redaction.pipeline import (
     EXIT_UNREADABLE,
     run,
 )
+from scripts.redaction.manifest import RedactionManifest
 from scripts.redaction.roster import RosterEntry
 from scripts.redaction.tokens import TokenMap
 
@@ -21,6 +22,62 @@ from scripts.redaction.tokens import TokenMap
 def _write(directory, name, body):
     directory.mkdir(parents=True, exist_ok=True)
     (directory / name).write_text(body, encoding="utf-8")
+
+
+def _write_schema_one_manifest(directory):
+    output = directory / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2", "run-identifier-1234", [output], reviewed=True
+    ).save(directory)
+    path = directory / "_redaction.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema"] = "redaction-batch/1"
+    payload.pop("reviewed")
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return directory
+
+
+def test_manifest_round_trip_persists_reviewed_state(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    (redacted / "STUDENT_01.md").write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2", "run-identifier-1234", [redacted / "STUDENT_01.md"],
+        reviewed=True,
+    ).save(redacted)
+
+    loaded = RedactionManifest.load(redacted)
+
+    assert loaded.reviewed is True
+    assert (
+        json.loads((redacted / "_redaction.json").read_text(encoding="utf-8"))["schema"]
+        == "redaction-batch/2"
+    )
+
+
+def test_legacy_manifest_is_treated_as_unreviewed(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+
+    assert RedactionManifest.load(_write_schema_one_manifest(redacted)).reviewed is False
+
+
+@pytest.mark.parametrize("reviewed", [False, True])
+def test_pipeline_persists_the_instructor_review_decision(tmp_path, reviewed):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Maya Lin argues that platforms curate.")
+
+    run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+        reviewed=reviewed,
+    )
+
+    assert RedactionManifest.load(tmp_path / "out").reviewed is reviewed
 
 
 def test_a_clean_batch_exits_zero(tmp_path):

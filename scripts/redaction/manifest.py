@@ -13,7 +13,8 @@ except ModuleNotFoundError:  # direct scripts/redact.py execution
     from path_safety import read_bytes_limited, read_text_limited
 from .private_files import write_private_text
 
-SCHEMA = "redaction-batch/1"
+SCHEMA = "redaction-batch/2"
+LEGACY_SCHEMA = "redaction-batch/1"
 NAME = "_redaction.json"
 
 
@@ -21,12 +22,15 @@ NAME = "_redaction.json"
 class RedactionManifest:
     batch: str
     run_id: str
+    reviewed: bool
     outputs: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def create(
-        cls, batch: str, run_id: str, outputs: list[Path]
+        cls, batch: str, run_id: str, outputs: list[Path], *, reviewed: bool
     ) -> "RedactionManifest":
+        if not isinstance(reviewed, bool):
+            raise ValueError("The redaction manifest needs a reviewed decision.")
         bound = tuple(
             sorted(
                 (
@@ -40,7 +44,7 @@ class RedactionManifest:
                 for path in outputs
             )
         )
-        return cls(batch=batch, run_id=run_id, outputs=bound)
+        return cls(batch=batch, run_id=run_id, reviewed=reviewed, outputs=bound)
 
     def save(self, directory: Path) -> Path:
         path = directory / NAME
@@ -51,6 +55,7 @@ class RedactionManifest:
                     "schema": SCHEMA,
                     "batch": self.batch,
                     "run_id": self.run_id,
+                    "reviewed": self.reviewed,
                     "outputs": [
                         {"path": path, "sha256": digest}
                         for path, digest in self.outputs
@@ -67,7 +72,16 @@ class RedactionManifest:
     def load(cls, directory: Path) -> "RedactionManifest":
         path = directory / NAME
         payload = json.loads(read_text_limited(path, "The redaction manifest", 1_048_576))
-        if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
+        if not isinstance(payload, dict):
+            raise ValueError("The redaction manifest has an unknown schema.")
+        schema = payload.get("schema")
+        if schema == SCHEMA:
+            reviewed = payload.get("reviewed")
+            if not isinstance(reviewed, bool):
+                raise ValueError("The redaction manifest needs a reviewed decision.")
+        elif schema == LEGACY_SCHEMA:
+            reviewed = False
+        else:
             raise ValueError("The redaction manifest has an unknown schema.")
         batch = payload.get("batch")
         run_id = payload.get("run_id")
@@ -96,7 +110,12 @@ class RedactionManifest:
                 raise ValueError("The redaction manifest has a malformed output.")
             seen.add(name)
             outputs.append((name, digest))
-        return cls(batch=batch, run_id=run_id, outputs=tuple(sorted(outputs)))
+        return cls(
+            batch=batch,
+            run_id=run_id,
+            reviewed=reviewed,
+            outputs=tuple(sorted(outputs)),
+        )
 
     def validate(self, directory: Path) -> None:
         """Require the exact token-named file set and bytes from redaction."""

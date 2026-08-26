@@ -328,6 +328,7 @@ def run(
         batch,
         tmap.run_id,
         [file.output for file in result.files if file.output is not None],
+        reviewed=reviewed,
     ).save(destination)
     tmap.save(map_path)
 

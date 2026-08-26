@@ -376,15 +376,21 @@ def _replace_approved_brief(
     )
 
 
-def _refresh_redaction_manifest(redacted, batch="essay-2"):
+def _refresh_redaction_manifest(redacted, batch="essay-2", reviewed=None):
     try:
-        run_id = RedactionManifest.load(redacted).run_id
+        manifest = RedactionManifest.load(redacted)
+        run_id = manifest.run_id
+        if reviewed is None:
+            reviewed = manifest.reviewed
     except (OSError, ValueError, json.JSONDecodeError):
         run_id = "test-redaction-run"
+        if reviewed is None:
+            reviewed = True
     RedactionManifest.create(
         batch,
         run_id,
         [path for path in redacted.iterdir() if not path.name.startswith("_")],
+        reviewed=reviewed,
     ).save(redacted)
 
 
@@ -470,6 +476,42 @@ def test_assignment_brief_gate_runs_before_batch_status(
     assert [finding.code for finding in report.blocking_findings] == [
         "malformed-assignment-brief"
     ]
+
+
+def test_unreviewed_redaction_stops_verification_before_entry_loads(
+    tmp_path, phil210, approved_brief, monkeypatch
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    _refresh_redaction_manifest(redacted, reviewed=False)
+    record = drafts / "STUDENT_01.json"
+    before = record.read_bytes()
+
+    def fail_entry_load(*args, **kwargs):
+        raise AssertionError("verification read a draft before redaction review")
+
+    monkeypatch.setattr("scripts.grading.batch._load_entry", fail_entry_load)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "redaction-review-required"
+    ]
+    assert report.checked_tokens == ()
+    assert report.receipt is None
+    assert report.persisted is False
+    assert report.failure is VerificationFailure.FAILED
+    assert record.read_bytes() == before
+    assert not (drafts / "_verification.json").exists()
 
 
 @pytest.mark.parametrize("changed", ["brief", "rubric", "profile"])

@@ -862,6 +862,29 @@ class GradingBatch:
         status = self._status(check_receipt=False, require_manifest=True)
         blocking = list(status.blocking_findings)
         try:
+            manifest = RedactionManifest.load(self.paths.redacted)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+            manifest = None
+        if manifest is not None and not manifest.reviewed:
+            blocking.append(
+                BlockingFinding(
+                    code="redaction-review-required",
+                    message=(
+                        "The instructor must review the redaction result before "
+                        "verification reads draft feedback."
+                    ),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.FAILED,
+            )
+        try:
             initial_digests = _verification_digests(self.paths, inputs, status)
         except OSError:
             initial_digests = {}
