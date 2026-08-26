@@ -45,6 +45,10 @@ short version:
   ever loads it.
 - **Redaction fails closed.** A non-zero exit means the batch is not safe to
   send. There is no override flag.
+- **The map is bound without exposing it.** `redacted/_redaction.json` holds a
+  random redaction-run ID and no identities. The token map holds the same ID.
+  Verification binds the manifest, and rehydration refuses a stale same-label
+  map from another redaction result.
 - **Verification produces the evidence gate.** `_verification.json` binds the
   exact redacted submissions, drafts, grade records, rubric, calibration
   profile and pattern reference that passed. Any later edit makes it stale.
@@ -168,21 +172,27 @@ Read 5 files. Wrote redacted. Map at .grading/maps/essay-2.json.
 Pass `--instructor` with your own name so you are never redacted. Repeat the
 flag for more than one name.
 
-**Read the review file.** It lives beside the map, not in `redacted/`, because
-it holds the very names redaction just removed. It lists candidate names for
-your judgement, passages that may identify their author, bare surnames that were
-substituted, and any submission that was empty. Then re-run with `--reviewed`.
+**Inspect the review file locally, outside any model conversation.** It lives
+beside the map, not in `redacted/`, because it holds the very names redaction
+just removed. It lists candidate names for your judgement, passages that may
+identify their author, bare surnames that were substituted, and any submission
+that was empty. Confirm the local review, then re-run with `--reviewed`. Never
+paste or ask an agent to read this file.
 
 Output files are named by token, so a filename can never carry a name.
+The identity-free `_redaction.json` manifest beside them binds this exact
+redaction result to its private token map.
 
-**A non-zero exit stops the run.** The codes:
+**A non-zero exit stops redaction.** The codes:
 
 | Exit | Meaning |
 | --- | --- |
 | 2 | A roster entry never appeared in any file — usually someone did not submit |
 | 3 | Layer-4 candidates need review; re-run with `--reviewed` |
-| 4 | A file could not be read |
-| 5 | The destination is not empty; use `--force` to clear the prior run's outputs |
+| 4 | A file could not be read or exceeded an input limit |
+| 5 | The destination is not empty; use `--force` to clear the prior redaction outputs |
+| 6 | A batch name or private/output path is unsafe or overlaps another role |
+| 7 | Two source files resolve to the same grading-batch participant |
 
 Exit 2 is common and benign — it means your roster is bigger than the batch.
 Trim the roster to who actually submitted, or accept that those students are
@@ -223,7 +233,7 @@ been graded, and regrading produces a second, different grade with nothing to
 say which one to send. This is also how an interrupted batch resumes.
 
 `orphan` means a draft or grade record with no matching redacted submission,
-usually a prior run's output. `incomplete` means a draft or a record but not
+usually an earlier grading batch's output. `incomplete` means a draft or a record but not
 both.
 
 ### 2.5 Grade each pending submission
@@ -283,9 +293,9 @@ so the positions were computed rather than guessed:
 
 The same successful run writes `.grading/drafts/essay-2/_verification.json`.
 For this five-submission batch it holds schema `grading-batch-verification/1`
-and 18 artifact entries: three per submission plus the rubric, profile and
-pattern reference. It holds paths, stable tokens and hashes, never source text
-or real identities.
+and 19 artifact entries: three per submission plus the redaction manifest,
+rubric, profile and pattern reference. It holds paths, stable tokens and hashes,
+never source text or real identities.
 
 Status now shows the receipt-derived state:
 
@@ -332,6 +342,11 @@ inflates a standard deviation enough to hide itself.
 
 ```bash
 python3 scripts/rehydrate.py .grading/drafts/essay-2 \
+  --batch essay-2 \
+  --course phil210 \
+  --rubric grading_rubric.md \
+  --profile .grading/profiles/phil210.md \
+  --redacted redacted \
   --map .grading/maps/essay-2.json \
   --out final/essay-2
 ```
@@ -340,10 +355,11 @@ python3 scripts/rehydrate.py .grading/drafts/essay-2 \
 Wrote final/essay-2. Every rehydrated feedback file is a DRAFT pending your sign-off.
 ```
 
-Local only. It first revalidates the receipt, then loads the local token map and
-renders all five drafts in a sibling staging directory. A missing, stale or
-malformed receipt, an unmapped token, or a rendering failure exits 5 and leaves
-the destination unchanged.
+Local only. It first checks the receipt against the trusted paths in this
+command and reruns semantic verification. It then loads the local token map and
+renders all five drafts in a sibling staging directory. A missing, stale,
+malformed, or self-authored receipt, an unmapped token, or a rendering failure
+exits 5 and leaves the destination unchanged.
 
 A legacy batch with no receipt cannot be published. Run verification again to
 produce current evidence for the whole batch.
@@ -356,6 +372,11 @@ To replace that exact unchanged publication, run:
 
 ```bash
 python3 scripts/rehydrate.py .grading/drafts/essay-2 \
+  --batch essay-2 \
+  --course phil210 \
+  --rubric grading_rubric.md \
+  --profile .grading/profiles/phil210.md \
+  --redacted redacted \
   --map .grading/maps/essay-2.json \
   --out final/essay-2 \
   --force
@@ -379,9 +400,10 @@ never pasted work, never echo the map, and refuse to grade without a profile.
 Those are instructions, and a model can violate an instruction. Markdown cannot
 close that gap.
 
-`hooks/block-raw-reads.json` is a `PreToolUse` hook that denies reads of
-`submissions/`, the token map, the review file, and the roster. It is the
-difference between a rule and a guarantee. Merge its `hooks` key into your
+`hooks/block-raw-reads.json` is a `PreToolUse` hook that blocks common direct
+reads of `submissions/`, the token map, the review file, and the roster. It is
+defense against accidents and instruction drift, not an adversarial sandbox.
+Merge its `hooks` key into your
 `.claude/settings.json`:
 
 ```bash
@@ -399,7 +421,7 @@ guard that blocks every tool call would also block the calls needed to fix it.
 | Command | Purpose |
 | --- | --- |
 | `redact.py SOURCE --roster R --batch B` | Tokenize identity, write the map and review file |
-| `rehydrate.py DRAFTS --map M --out O [--force]` | Require a current receipt, then stage and publish rehydrated draft feedback |
+| `rehydrate.py DRAFTS --batch B --course C --rubric R --profile P --redacted D --map M --out O [--force]` | Rerun trusted verification, then stage and publish rehydrated draft feedback |
 | `calibrate.py inputs --rubric R --samples D --roster C --holdout N --out F` | Build the name-free calibration packet |
 | `calibrate.py holdout --record J --draft M --sample S` | Report the holdout delta |
 | `grade.py profile --course C --rubric R` | Confirm a profile exists and the rubric has not drifted |
@@ -415,7 +437,7 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 | Code | Script | Meaning |
 | --- | --- | --- |
 | 0 | both | Clean |
-| 2, 3, 4, 5 | `redact.py` | Unmatched roster entry / unreviewed candidates / unreadable file / destination not empty |
+| 2, 3, 4, 5, 6, 7 | `redact.py` | Unmatched roster entry / unreviewed candidates / unreadable or oversized input / destination not empty / unsafe path / participant collision |
 | 5 | `rehydrate.py` | Receipt, map, rendering, token mapping or publication failure |
 | 10 | `grade.py` | No profile for this course |
 | 11 | `grade.py` | The rubric drifted since calibration |
@@ -437,6 +459,6 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 Everything above has been validated against synthetic data only. The PHIL 210
 corpus, its students, and its instructor are fictional.
 
-Run one real batch without `--reviewed` first, so the review file has to be read
-before anything proceeds. Read `references/redaction.md` end to end. Then decide
+Run one real batch without `--reviewed` first, so you must inspect the review
+locally before anything proceeds. Read `references/redaction.md` end to end. Then decide
 whether your institution's policy allows the cloud path at all.

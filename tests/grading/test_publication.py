@@ -17,9 +17,10 @@ from scripts.grading.batch import (
     VerifiedBatch,
     VerificationInputs,
 )
-from scripts.grading.density import PATTERNS_PATH
+from scripts.grading.density import PATTERNS_PATH, load_terms, scan
 from scripts.grading.records import GradeRecord
 from scripts.redaction.tokens import TokenMap
+from scripts.redaction.manifest import RedactionManifest
 from tests.grading.test_verify import _write_batch
 
 
@@ -28,21 +29,28 @@ class FakeRenderer:
         self,
         batch: str = "essay-2",
         *,
+        run_id: str = "test-redaction-run",
         identity: str = "Maya Lin",
         unmapped: dict[str, tuple[str, ...]] | None = None,
         errors: dict[str, str] | None = None,
     ) -> None:
         self.batch = batch
+        self.run_id = run_id
         self.identity = identity
         self.rendered: list[str] = []
         self.unmapped = unmapped or {}
         self.errors = errors or {}
 
-    def render(self, source: Path, destination: Path) -> RenderResult:
+    def render(
+        self, source: Path, destination: Path, expected_sha256: str
+    ) -> RenderResult:
         self.rendered.append(source.name)
         if source.name in self.errors:
             return RenderResult(error=self.errors[source.name])
-        text = self.identity + "\n\n" + source.read_text(encoding="utf-8")
+        source_bytes = source.read_bytes()
+        if hashlib.sha256(source_bytes).hexdigest() != expected_sha256:
+            return RenderResult(error=f"{source.name} changed before rendering")
+        text = self.identity + "\n\n" + source_bytes.decode("utf-8")
         destination.write_text(text, encoding="utf-8")
         return RenderResult(
             sha256=hashlib.sha256(destination.read_bytes()).hexdigest(),
@@ -51,6 +59,14 @@ class FakeRenderer:
 
     def hash_output(self, path: Path) -> str:
         return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class MutatingRenderer(FakeRenderer):
+    def render(
+        self, source: Path, destination: Path, expected_sha256: str
+    ) -> RenderResult:
+        source.write_text("changed after revalidation", encoding="utf-8")
+        return super().render(source, destination, expected_sha256)
 
 
 def _add_second_draft(redacted: Path, drafts: Path) -> None:
@@ -63,6 +79,13 @@ def _add_second_draft(redacted: Path, drafts: Path) -> None:
     record.token = "STUDENT_02"
     record.source = str(second_source)
     record.save(drafts / "STUDENT_02.json")
+
+
+def _refresh_density(redacted: Path, drafts: Path, token: str) -> None:
+    record = GradeRecord.load(drafts / f"{token}.json")
+    source = (redacted / f"{token}.md").read_text(encoding="utf-8")
+    record.pattern_density = scan(source, load_terms(PATTERNS_PATH)).as_dict()
+    record.save(drafts / f"{token}.json")
 
 
 def _verified_fixture(tmp_path, phil210):
@@ -79,6 +102,52 @@ def _verified_fixture(tmp_path, phil210):
     ).verified_batch
     assert verified is not None
     return redacted, drafts, verified
+
+
+def _resume(redacted: Path, drafts: Path, root: Path, phil210: Path):
+    return VerifiedBatch.resume(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts),
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        ),
+    )
+
+
+def _matching_map(redacted: Path, batch: str = "essay-2") -> TokenMap:
+    manifest = RedactionManifest.load(redacted)
+    return TokenMap(batch, run_id=manifest.run_id)
+
+
+def _rehydrate_command(
+    drafts: Path,
+    map_path: Path,
+    target: Path,
+    redacted: Path,
+    root: Path,
+    rubric: Path,
+) -> list[str]:
+    return [
+        sys.executable,
+        "scripts/rehydrate.py",
+        str(drafts),
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(rubric),
+        "--profile",
+        str(root / "profiles" / "phil210.md"),
+        "--redacted",
+        str(redacted),
+        "--map",
+        str(map_path),
+        "--out",
+        str(target),
+    ]
 
 
 def _write_transaction_marker(directory: Path, target: Path) -> None:
@@ -120,6 +189,59 @@ def test_only_persisted_verification_returns_verified_batch(tmp_path, phil210):
         VerifiedBatch(batch.paths, "not-trusted", object())
 
 
+def test_publication_setup_failures_return_a_finding_instead_of_raising(
+    tmp_path, phil210
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+    parent = tmp_path / "not-a-directory"
+    parent.write_text("occupied", encoding="utf-8")
+
+    report = verified.publish(parent / "final", FakeRenderer())
+
+    assert [finding.code for finding in report.findings] == ["publication-failed"]
+
+
+def test_status_derives_rehydrated_progress_from_current_publication(
+    tmp_path, phil210
+):
+    redacted, drafts, verified = _verified_fixture(tmp_path, phil210)
+    renderer = FakeRenderer()
+    target = tmp_path / "final"
+    assert verified.publish(target, renderer).progress is Progress.REHYDRATED
+
+    status = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status(publication=target, renderer=renderer)
+
+    assert {entry.progress for entry in status.entries} == {Progress.REHYDRATED}
+    assert status.blocking_findings == ()
+
+
+def test_same_label_map_from_another_redaction_result_is_refused(
+    tmp_path, phil210
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+
+    report = verified.publish(
+        tmp_path / "final",
+        FakeRenderer(batch="essay-2", run_id="another-redaction-run"),
+    )
+
+    assert [finding.code for finding in report.findings] == [
+        "renderer-redaction-mismatch"
+    ]
+
+
+def test_draft_change_after_revalidation_is_not_published(tmp_path, phil210):
+    _, _, verified = _verified_fixture(tmp_path, phil210)
+    target = tmp_path / "final"
+
+    report = verified.publish(target, MutatingRenderer())
+
+    assert [finding.code for finding in report.findings] == ["render-failed"]
+    assert not target.exists()
+
+
 def test_verified_batch_resume_requires_a_current_receipt(tmp_path, phil210):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     GradingBatch.open(
@@ -133,9 +255,9 @@ def test_verified_batch_resume_requires_a_current_receipt(tmp_path, phil210):
         )
     )
 
-    current = VerifiedBatch.resume(drafts)
+    current = _resume(redacted, drafts, root, phil210)
     (drafts / "_verification.json").unlink()
-    missing = VerifiedBatch.resume(drafts)
+    missing = _resume(redacted, drafts, root, phil210)
 
     assert isinstance(current.verified_batch, VerifiedBatch)
     assert current.findings == ()
@@ -177,10 +299,40 @@ def test_verified_batch_resume_rejects_untrusted_receipts(
         payload["schema"] = "grading-batch-verification/99"
         receipt.write_text(json.dumps(payload), encoding="utf-8")
 
-    resumed = VerifiedBatch.resume(drafts)
+    resumed = _resume(redacted, drafts, root, phil210)
 
     assert resumed.verified_batch is None
     assert [finding.code for finding in resumed.findings] == [expected_code]
+
+
+def test_resume_reruns_semantic_verification_instead_of_trusting_forged_hashes(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+    )
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(inputs)
+    draft = drafts / "STUDENT_01.md"
+    draft.write_text("unchecked feedback", encoding="utf-8")
+    receipt = drafts / "_verification.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    for artifact in payload["artifacts"]:
+        if artifact["role"] == "draft":
+            artifact["sha256"] = hashlib.sha256(draft.read_bytes()).hexdigest()
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    resumed = VerifiedBatch.resume(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts), inputs
+    )
+
+    assert resumed.verified_batch is None
+    assert any(finding.code == "section-missing" for finding in resumed.findings)
 
 
 def test_verified_batch_publishes_complete_first_destination(tmp_path, phil210):
@@ -612,6 +764,7 @@ def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
         ),
         encoding="utf-8",
     )
+    _refresh_density(redacted, drafts, "STUDENT_01")
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -622,22 +775,16 @@ def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
             patterns=PATTERNS_PATH,
         )
     )
-    token_map = TokenMap("essay-2")
+    token_map = _matching_map(redacted)
     token_map.allocate("STUDENT", "Maya Lin", "paper.md")
     map_path = tmp_path / "maps" / "essay-2.json"
     token_map.save(map_path)
     target = tmp_path / "final"
 
     result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/rehydrate.py",
-            str(drafts),
-            "--map",
-            str(map_path),
-            "--out",
-            str(target),
-        ],
+        _rehydrate_command(
+            drafts, map_path, target, redacted, root, phil210 / "grading_rubric.md"
+        ),
         capture_output=True,
         text=True,
     )
@@ -661,19 +808,13 @@ def test_rehydrate_cli_safe_force_replaces_recognized_publication(tmp_path, phil
             patterns=PATTERNS_PATH,
         )
     )
-    token_map = TokenMap("essay-2")
+    token_map = _matching_map(redacted)
     map_path = tmp_path / "maps" / "essay-2.json"
     token_map.save(map_path)
     target = tmp_path / "final"
-    command = [
-        sys.executable,
-        "scripts/rehydrate.py",
-        str(drafts),
-        "--map",
-        str(map_path),
-        "--out",
-        str(target),
-    ]
+    command = _rehydrate_command(
+        drafts, map_path, target, redacted, root, phil210 / "grading_rubric.md"
+    )
     subprocess.run(command, capture_output=True, text=True, check=True)
 
     result = subprocess.run(
@@ -692,15 +833,14 @@ def test_rehydrate_cli_requires_receipt_before_loading_map(tmp_path):
     (drafts / "STUDENT_01.md").write_text("feedback", encoding="utf-8")
 
     result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/rehydrate.py",
-            str(drafts),
-            "--map",
-            str(tmp_path / "missing-map.json"),
-            "--out",
-            str(tmp_path / "final"),
-        ],
+        _rehydrate_command(
+            drafts,
+            tmp_path / "missing-map.json",
+            tmp_path / "final",
+            tmp_path / "redacted",
+            tmp_path / ".grading",
+            tmp_path / "rubric.md",
+        ),
         capture_output=True,
         text=True,
     )
@@ -726,15 +866,14 @@ def test_rehydrate_cli_reports_unreadable_map_as_failure(tmp_path, phil210):
     target = tmp_path / "final"
 
     result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/rehydrate.py",
-            str(drafts),
-            "--map",
-            str(tmp_path / "missing-map.json"),
-            "--out",
-            str(target),
-        ],
+        _rehydrate_command(
+            drafts,
+            tmp_path / "missing-map.json",
+            target,
+            redacted,
+            root,
+            phil210 / "grading_rubric.md",
+        ),
         capture_output=True,
         text=True,
     )
@@ -751,16 +890,17 @@ def test_rehydrate_cli_leaves_destination_absent_for_unmapped_token(
     redacted, drafts, root = _write_batch(tmp_path, phil210)
     source = redacted / "STUDENT_01.md"
     source.write_text(
-        source.read_text(encoding="utf-8") + "\nSTUDENT_99\n",
+        source.read_text(encoding="utf-8") + "\nSTUDENT_01\n",
         encoding="utf-8",
     )
     draft = drafts / "STUDENT_01.md"
     draft.write_text(
         draft.read_text(encoding="utf-8").replace(
-            "Your central claim holds.", "STUDENT_99, your central claim holds."
+            "Your central claim holds.", "STUDENT_01, your central claim holds."
         ),
         encoding="utf-8",
     )
+    _refresh_density(redacted, drafts, "STUDENT_01")
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -771,26 +911,20 @@ def test_rehydrate_cli_leaves_destination_absent_for_unmapped_token(
             patterns=PATTERNS_PATH,
         )
     )
-    token_map = TokenMap("essay-2")
+    token_map = _matching_map(redacted)
     map_path = tmp_path / "maps" / "essay-2.json"
     token_map.save(map_path)
     target = tmp_path / "final"
 
     result = subprocess.run(
-        [
-            sys.executable,
-            "scripts/rehydrate.py",
-            str(drafts),
-            "--map",
-            str(map_path),
-            "--out",
-            str(target),
-        ],
+        _rehydrate_command(
+            drafts, map_path, target, redacted, root, phil210 / "grading_rubric.md"
+        ),
         capture_output=True,
         text=True,
     )
 
     assert result.returncode == 5
     assert "unmapped-token" in result.stderr
-    assert "STUDENT_99" in result.stderr
+    assert "STUDENT_01" in result.stderr
     assert not target.exists()

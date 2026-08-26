@@ -34,7 +34,7 @@ Keep the skill portable. Do not write instructions that limit it to one or two a
 Keep `SKILL.md` and `README.md` in sync.
 
 - **Patterns:** The 35 numbered patterns live in `references/ai-patterns.md`. If you add, remove, or renumber a pattern, update that file, the README table, the validator, and every pattern reference.
-- **Invariants:** The token map is the only artifact holding real identities. Nothing under `scripts/grading/` may load it. The model reads only from `redacted/`. Calibration and grading stay separate commands.
+- **Invariants:** The token map is the only artifact that reversibly maps stable tokens to real identities. Nothing under `scripts/grading/` may load it. The model reads only from `redacted/`. Calibration and grading stay separate commands.
 - **Tests:** Run `python3 -m pytest tests/` from the repo root, so `scripts.` imports resolve. The leak test and the end-to-end test are the two that matter; the rest support them.
 - **Version:** Keep the same version in `SKILL.md` under `metadata.version`, the first README version entry, and `.claude-plugin/plugin.json`. Do not add a top-level `version` field to the skill.
 - **Compatibility:** Keep install and use instructions neutral across agents. Names such as Claude Code, OpenCode, and Codex are examples, not limits.

@@ -40,12 +40,20 @@ from scripts.grading.profile import (  # noqa: E402
 )
 from scripts.grading.records import RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
+from scripts.path_safety import is_within, require_component  # noqa: E402
 
 EXIT_OK = 0
 EXIT_NO_PROFILE = 10
 EXIT_DRIFT = 11
 EXIT_FAILED = 12
 EXIT_MALFORMED = 13
+
+
+def _component(label: str):
+    def parse(value: str) -> str:
+        return require_component(value, label)
+
+    return parse
 
 
 def _drafts_dir(args: argparse.Namespace) -> Path:
@@ -181,7 +189,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if counts["orphan"]:
         print(
             "An orphaned artifact has no redacted submission. It is usually a "
-            "prior run's output. Move it out before grading.",
+            "earlier grading batch's output. Move it out before grading.",
             file=sys.stderr,
         )
     if counts["incomplete"]:
@@ -200,8 +208,24 @@ def _cmd_status(args: argparse.Namespace) -> int:
 
 
 def _cmd_density(args: argparse.Namespace) -> int:
+    if (
+        args.path.is_symlink()
+        or not is_within(args.path, args.redacted, follow_symlinks=False)
+        or not is_within(args.path, args.redacted, follow_symlinks=True)
+        or args.path.resolve().parent != args.redacted.resolve()
+    ):
+        print(
+            "Density accepts only a regular file directly inside the configured "
+            "redacted directory.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
     terms = load_terms(args.patterns)
-    result = scan(args.path.read_text(encoding="utf-8"), terms)
+    try:
+        result = scan(args.path.read_text(encoding="utf-8"), terms)
+    except (OSError, UnicodeError) as error:
+        print(f"Cannot read redacted submission: {error}", file=sys.stderr)
+        return EXIT_MALFORMED
     if args.json:
         import json
 
@@ -251,14 +275,14 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     check = subparsers.add_parser("profile", help="Check the profile and rubric drift")
-    check.add_argument("--course", required=True)
+    check.add_argument("--course", required=True, type=_component("The course"))
     check.add_argument("--rubric", type=Path, required=True)
     _add_common(check)
     check.set_defaults(handler=_cmd_profile)
 
     verify = subparsers.add_parser("verify", help="Check every draft in a batch")
-    verify.add_argument("--batch", required=True)
-    verify.add_argument("--course", required=True)
+    verify.add_argument("--batch", required=True, type=_component("The grading batch"))
+    verify.add_argument("--course", required=True, type=_component("The course"))
     verify.add_argument("--rubric", type=Path, required=True)
     verify.add_argument("--redacted", type=Path, default=Path("redacted"))
     verify.add_argument("--drafts", type=Path, default=None)
@@ -272,7 +296,7 @@ def build_parser() -> argparse.ArgumentParser:
     verify.set_defaults(handler=_cmd_verify)
 
     status = subparsers.add_parser("status", help="Show what a batch still owes")
-    status.add_argument("--batch", required=True)
+    status.add_argument("--batch", required=True, type=_component("The grading batch"))
     status.add_argument("--redacted", type=Path, default=Path("redacted"))
     status.add_argument("--drafts", type=Path, default=None)
     _add_common(status)
@@ -280,6 +304,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     density = subparsers.add_parser("density", help="Count watched AI terms in a file")
     density.add_argument("path", type=Path)
+    density.add_argument("--redacted", type=Path, default=Path("redacted"))
     density.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
     density.add_argument("--json", action="store_true")
     _add_common(density)
@@ -287,7 +312,7 @@ def build_parser() -> argparse.ArgumentParser:
     consistency = subparsers.add_parser(
         "consistency", help="Flag outliers across a graded batch"
     )
-    consistency.add_argument("--batch", required=True)
+    consistency.add_argument("--batch", required=True, type=_component("The grading batch"))
     consistency.add_argument("--redacted", type=Path, default=Path("redacted"))
     consistency.add_argument("--drafts", type=Path, default=None)
     consistency.add_argument("--threshold", type=float, default=2.0)

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
 from pathlib import Path
 
 
@@ -14,6 +15,49 @@ SKILL = SKILL_PATH.read_text(encoding="utf-8")
 README = (ROOT / "README.md").read_text(encoding="utf-8")
 AGENTS = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 PLUGIN = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+
+
+def package_files() -> set[Path]:
+    """Return the files a Git release would ship, or archive contents."""
+    if (ROOT / ".git").is_dir():
+        result = subprocess.run(
+            ["git", "ls-files", "-z"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+        )
+        return {
+            Path(raw.decode("utf-8"))
+            for raw in result.stdout.split(b"\0")
+            if raw
+        }
+    return {
+        path.relative_to(ROOT)
+        for path in ROOT.rglob("*")
+        if path.is_file() and ".git" not in path.parts
+    }
+
+
+def is_synthetic_fixture(path: Path) -> bool:
+    return path.parts[:3] == ("tests", "fixtures", "phil210")
+
+
+for packaged_path in package_files():
+    sensitive_name = (
+        packaged_path.name == "roster.csv"
+        or packaged_path.name.endswith(".roster.csv")
+        or packaged_path.name.startswith("calibration-inputs")
+        or packaged_path.name in {"_verification.json", "_publication.json"}
+    )
+    sensitive_directory = bool(
+        {".grading", "submissions", "redacted", "final"} & set(packaged_path.parts)
+    )
+    if (sensitive_name or sensitive_directory) and not is_synthetic_fixture(
+        packaged_path
+    ):
+        raise SystemExit(
+            f"Remove sensitive local grading artifact from the package: {packaged_path}"
+        )
 
 
 def require_match(match: re.Match[str] | None, message: str) -> re.Match[str]:

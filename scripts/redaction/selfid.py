@@ -9,6 +9,7 @@ edits.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 
 FIRST_PERSON = re.compile(r"\b(?:I|I'm|I've|my|me|mine)\b", re.IGNORECASE)
@@ -91,6 +92,7 @@ def find_self_identifying(text: str) -> list[SelfIdWarning]:
     changes string length but not which newlines precede a given point.
     """
     masked = _mask_abbreviations(text)
+    newlines = [index for index, character in enumerate(masked) if character == "\n"]
     warnings: list[SelfIdWarning] = []
 
     for match in SENTENCE.finditer(masked):
@@ -106,7 +108,7 @@ def find_self_identifying(text: str) -> list[SelfIdWarning]:
         if YEAR.search(sentence):
             reasons = reasons + ("year",)
 
-        line = masked.count("\n", 0, match.start()) + 1
+        line = bisect_right(newlines, match.start()) + 1
         warnings.append(SelfIdWarning(line, sentence, reasons))
 
     return warnings

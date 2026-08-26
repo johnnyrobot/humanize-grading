@@ -25,6 +25,7 @@ from scripts.grading.records import (
 )
 from scripts.grading.rubric import load_rubric
 from scripts.grading.verify import errors, verify_draft
+from scripts.redaction.manifest import RedactionManifest
 
 SOURCE = """# Essay 2
 
@@ -233,8 +234,26 @@ def test_invented_density_figures_fail(rubric, loaded_profile, terms):
     assert any(finding.code == "density-mismatch" for finding in errors(findings))
 
 
+def test_every_density_field_must_match_the_fresh_scan(rubric, loaded_profile, terms):
+    record = _record()
+    record.pattern_density["per_thousand"] = 999.0
+    findings = verify_draft(record, FEEDBACK, SOURCE, rubric, loaded_profile, terms)
+    assert any(finding.code == "density-mismatch" for finding in errors(findings))
+
+
 def test_a_missing_feedback_section_fails(rubric, loaded_profile, terms):
     broken = FEEDBACK.replace("**What Worked**", "**Nice Things**")
+    findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
+    assert any(finding.code == "section-missing" for finding in errors(findings))
+
+
+def test_section_names_in_prose_do_not_satisfy_the_protocol(
+    rubric, loaded_profile, terms
+):
+    broken = FEEDBACK.replace(
+        "**What Worked**",
+        "This paragraph says What Worked, but it is not a section heading.",
+    )
     findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
     assert any(finding.code == "section-missing" for finding in errors(findings))
 
@@ -251,6 +270,16 @@ def test_missing_inline_annotations_fail(rubric, loaded_profile, terms):
     assert any(finding.code == "no-annotations" for finding in errors(findings))
 
 
+def test_bracketed_filler_inside_prose_is_not_an_inline_annotation(
+    rubric, loaded_profile, terms
+):
+    broken = "\n".join(FEEDBACK.splitlines()[2:]).replace(
+        "Your central claim holds.", "Your central claim holds [generic filler text]."
+    )
+    findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
+    assert any(finding.code == "no-annotations" for finding in errors(findings))
+
+
 def test_a_never_use_phrase_fails(rubric, loaded_profile, terms):
     broken = FEEDBACK.replace("Your central claim holds.", "Great job! Your claim holds.")
     findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
@@ -261,6 +290,22 @@ def test_a_token_the_source_never_held_fails(rubric, loaded_profile, terms):
     broken = FEEDBACK.replace("Your central claim", "STUDENT_09, your central claim")
     findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
     assert any(finding.code == "stray-token" for finding in errors(findings))
+
+
+def test_a_foreign_source_token_cannot_be_copied_into_feedback(
+    rubric, loaded_profile, terms
+):
+    source = SOURCE + "\nA classmate appears as STUDENT_02.\n"
+    broken = FEEDBACK.replace("Your central claim", "STUDENT_02, your central claim")
+    findings = verify_draft(_record(), broken, source, rubric, loaded_profile, terms)
+    assert any(finding.code == "foreign-token" for finding in errors(findings))
+
+
+def test_an_unknown_rubric_level_fails(rubric, loaded_profile, terms):
+    record = _record()
+    record.criteria[0].level = "Invented Level"
+    findings = verify_draft(record, FEEDBACK, SOURCE, rubric, loaded_profile, terms)
+    assert any(finding.code == "level" for finding in errors(findings))
 
 
 def test_watched_terms_in_the_feedback_are_a_warning_not_an_error(
@@ -281,6 +326,7 @@ def _write_batch(tmp_path, phil210, feedback=FEEDBACK):
     redacted.mkdir()
     drafts.mkdir()
     (redacted / "STUDENT_01.md").write_text(SOURCE, encoding="utf-8")
+    RedactionManifest(batch="essay-2", run_id="test-redaction-run").save(redacted)
     (drafts / "STUDENT_01.md").write_text(feedback, encoding="utf-8")
     root = tmp_path / ".grading"
     (root / "profiles").mkdir(parents=True)
@@ -321,6 +367,36 @@ def test_grading_batch_verifies_and_persists_a_clean_batch(tmp_path, phil210):
     assert report.persisted is True
     payload = json.loads((drafts / "STUDENT_01.json").read_text(encoding="utf-8"))
     assert payload["criteria"][0]["justifications"][0]["offset"] >= 0
+
+
+def test_a_batch_change_during_record_staging_prevents_receipt_commit(
+    tmp_path, phil210, monkeypatch
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    draft = drafts / "STUDENT_01.md"
+    original_save = GradeRecord.save
+
+    def save_and_change_draft(record, path):
+        original_save(record, path)
+        if path.name.endswith(".verified.tmp"):
+            draft.write_text("changed during verification", encoding="utf-8")
+
+    monkeypatch.setattr(GradeRecord, "save", save_and_change_draft)
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert any(finding.code == "batch-changed" for finding in report.blocking_findings)
+    assert not (drafts / "_verification.json").exists()
+    payload = json.loads((drafts / "STUDENT_01.json").read_text(encoding="utf-8"))
+    assert "offset" not in payload["criteria"][0]["justifications"][0]
 
 
 def test_persisted_verification_writes_one_versioned_receipt(tmp_path, phil210):
@@ -394,6 +470,7 @@ def test_receipt_binds_every_identity_free_artifact_with_sha256(tmp_path, phil21
         "grade-record",
         "pattern-reference",
         "redacted-submission",
+        "redaction-manifest",
         "rubric",
     ]
     participant_roles = {"draft", "grade-record", "redacted-submission"}
@@ -571,6 +648,7 @@ def test_any_receipt_bound_artifact_change_invalidates_verified_progress(
         "rubric",
         "calibration-profile",
         "pattern-reference",
+        "redaction-manifest",
     ],
 )
 def test_edit_to_each_bound_artifact_role_invalidates_receipt(tmp_path, phil210, role):
@@ -600,6 +678,7 @@ def test_edit_to_each_bound_artifact_role_invalidates_receipt(tmp_path, phil210,
         "rubric": rubric,
         "calibration-profile": inputs.profile,
         "pattern-reference": patterns,
+        "redaction-manifest": redacted / "_redaction.json",
     }
 
     changed = artifacts[role]
@@ -724,6 +803,59 @@ def test_grading_batch_reports_every_grading_context_mismatch(tmp_path, phil210)
     ]
     assert all(finding.token == "STUDENT_01" for finding in report.blocking_findings)
     assert report.persisted is False
+
+
+def test_loaded_profile_must_name_the_requested_course(tmp_path, phil210):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.write_text(
+        profile_path.read_text(encoding="utf-8").replace(
+            "**Course**: phil210", "**Course**: eng999"
+        ),
+        encoding="utf-8",
+    )
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=profile_path,
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert any(
+        finding.code == "profile-course-mismatch"
+        for finding in report.blocking_findings
+    )
+
+
+def test_independent_course_evidence_failures_are_reported_together(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.unlink()
+    rubric_path = tmp_path / "broken-rubric.md"
+    rubric_path.write_text("not a rubric", encoding="utf-8")
+    patterns_path = tmp_path / "broken-patterns.md"
+    patterns_path.write_bytes(b"\xff")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=rubric_path,
+            profile=profile_path,
+            patterns=patterns_path,
+        )
+    )
+
+    codes = {finding.code for finding in report.blocking_findings}
+    assert {"no-profile", "malformed-rubric", "malformed-patterns"} <= codes
 
 
 def test_grading_batch_accepts_equivalent_normalized_paths(tmp_path, phil210):

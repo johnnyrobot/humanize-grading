@@ -32,7 +32,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.grading.holdout import compare, render  # noqa: E402
 from scripts.grading.records import GradeRecord, RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
-from scripts.grading.samples import SampleError, load_sample, scrub_names  # noqa: E402
+from scripts.grading.samples import (  # noqa: E402
+    SampleError,
+    load_sample,
+    scrub_private_data,
+)
 from scripts.redaction.roster import load_roster  # noqa: E402
 
 EXIT_OK = 0
@@ -77,14 +81,14 @@ def _inputs(args: argparse.Namespace) -> int:
 
     def packet(index: int, path: Path) -> dict:
         sample = load_sample(path)
-        comments, found = scrub_names(sample.comments_only(), roster)
-        annotations, _ = scrub_names(
+        comments, found = scrub_private_data(sample.comments_only(), roster)
+        annotations, _ = scrub_private_data(
             "\n".join(a.text for a in sample.annotations), roster
         )
         # This packet is the artifact that keeps names out of the profile, so
         # it must not itself carry them: record how many name forms were
         # scrubbed, never which ones. The filename is left out for the same
-        # reason -- scrub_names cannot reliably clean it (case-sensitive,
+        # reason -- identity scrubbing does not reliably clean it
         # and \b never fires inside an underscore-joined "Lastname_First"
         # name), and gradebook exports routinely embed the student's name
         # in the filename itself. A position label carries no identity.
@@ -103,6 +107,8 @@ def _inputs(args: argparse.Namespace) -> int:
         "rubric": {
             "path": str(args.rubric),
             "title": rubric.title,
+            "digest": rubric.digest,
+            "context_digest": rubric.context_digest,
             "total_points": rubric.total_points,
             "criteria": [
                 {
@@ -177,7 +183,9 @@ def main(argv: list[str] | None = None) -> int:
     inputs.add_argument("--samples", type=Path, required=True)
     inputs.add_argument("--roster", type=Path, required=True)
     inputs.add_argument("--holdout", required=True, help="Filename to hold back")
-    inputs.add_argument("--out", type=Path, default=Path("calibration-inputs.json"))
+    inputs.add_argument(
+        "--out", type=Path, default=Path(".grading/calibration-inputs.json")
+    )
     inputs.set_defaults(handler=_inputs)
 
     holdout = subparsers.add_parser("holdout", help="Report the holdout delta")

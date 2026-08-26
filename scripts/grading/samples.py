@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from scripts.redaction.patterns import scrub_structured
 from scripts.redaction.roster import RosterEntry, bare_name_variants, full_name_variants
 
 PLACEHOLDER = "[STUDENT]"
@@ -36,19 +37,6 @@ _GRADE = re.compile(r"^\*\*Grade\*\*\s*:\s*(\d+)\s*/\s*(\d+)\s*\(([^)]+)\)")
 _LABEL = re.compile(r"^\*\*(.+?)\*\*\s*:?\s*(.*)$")
 _BULLET = re.compile(r"^\*\s+(.+)$")
 _SIGN_OFF = re.compile(r"^\s*[—–-]{1,2}\s*(.+?)\s*$")
-_ANNOTATION = re.compile(r"\[([^\[\]]{10,})\]")
-
-# A bracketed span that is a bibliographic citation is the student's writing,
-# not the instructor's. Brackets are the rubric's marker for instructor
-# annotations, so the span stays an annotation unless it looks like a citation:
-# an author-year reference, or a page marker.
-_CITATION_SPAN = re.compile(
-    r"^\s*[A-Z][\w'-]*(?:\s+(?:et\s+al\.?|and|&)\s+[A-Z][\w'-]*)*,?\s*(?:19|20)\d{2}\b"
-    r"|\bpp?\.\s*\d",
-    re.IGNORECASE,
-)
-
-
 class SampleError(Exception):
     """The graded sample does not have the shape calibration needs."""
 
@@ -102,18 +90,24 @@ def _split_sections(text: str) -> tuple[str, str, str]:
     """Return the header block, the essay, and the feedback."""
     lines = text.splitlines()
     submission_at: int | None = None
-    feedback_at: int | None = None
+    feedback_lines: list[int] = []
     for index, line in enumerate(lines):
         if submission_at is None and _SUBMISSION_HEADING.match(line):
             submission_at = index
-        elif _FEEDBACK_HEADING.match(line):
-            feedback_at = index
-            break
-    if feedback_at is None:
+        if _FEEDBACK_HEADING.match(line):
+            feedback_lines.append(index)
+    if not feedback_lines:
         raise SampleError(
             "The sample has no instructor feedback section. Add a "
             "'### Instructor Feedback & Grading' heading."
         )
+    if len(feedback_lines) != 1:
+        raise SampleError(
+            "The sample must have exactly one instructor feedback section. "
+            "Student prose can imitate a heading, so resolve the extra heading "
+            "before calibration."
+        )
+    feedback_at = feedback_lines[0]
     start = 0 if submission_at is None else submission_at + 1
     header = "\n".join(lines[: submission_at if submission_at is not None else 0])
     essay = "\n".join(lines[start:feedback_at])
@@ -206,16 +200,14 @@ def load_sample(path: Path) -> GradedSample:
     text = path.read_text(encoding="utf-8")
     header_block, essay, feedback = _split_sections(text)
     parsed = _parse_feedback(feedback)
-    annotations = tuple(
-        Annotation(text=match.group(1).strip(), offset=match.start())
-        for match in _ANNOTATION.finditer(essay)
-        if not _CITATION_SPAN.search(match.group(1))
-    )
     return GradedSample(
         path=path,
         header=_parse_header(header_block),
         essay=essay,
-        annotations=annotations,
+        # Inline brackets sit inside student-authored prose, so syntax alone
+        # cannot prove that an instructor wrote them. Only the feedback
+        # section crosses the calibration boundary.
+        annotations=(),
         score=int(parsed["score"]),
         possible=int(parsed["possible"]),
         letter=str(parsed["letter"]),
@@ -252,8 +244,20 @@ def scrub_names(
     for entry in roster:
         forms.extend(bare_name_variants(entry.name))
     for form in forms:
-        pattern = re.compile(rf"\b{re.escape(form)}\b")
+        pattern = re.compile(rf"\b{re.escape(form)}\b", re.IGNORECASE)
         scrubbed, count = pattern.subn(placeholder, scrubbed)
         if count:
             found.append(form)
+    return scrubbed, found
+
+
+def scrub_private_data(
+    text: str,
+    roster: list[RosterEntry],
+    placeholder: str = PLACEHOLDER,
+) -> tuple[str, list[str]]:
+    """Remove roster names and structured identity from calibration comments."""
+    scrubbed, found = scrub_names(text, roster, placeholder)
+    scrubbed, structured = scrub_structured(scrubbed)
+    found.extend(structured)
     return scrubbed, found

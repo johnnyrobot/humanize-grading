@@ -1,5 +1,6 @@
 {
   "name": "humanizer",
+  "description": "Humanizer prose rewriting and identity-safe rubric grading skills.",
   "owner": { "name": "blader" },
   "plugins": [
     {

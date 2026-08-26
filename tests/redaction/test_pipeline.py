@@ -6,9 +6,11 @@ import pytest
 
 from scripts.redaction.pipeline import (
     EXIT_CANDIDATES,
+    EXIT_COLLISION,
     EXIT_DESTINATION_NOT_EMPTY,
     EXIT_OK,
     EXIT_ROSTER,
+    EXIT_UNSAFE_PATH,
     EXIT_UNREADABLE,
     run,
 )
@@ -44,9 +46,34 @@ def test_output_is_named_by_token_and_holds_no_name(tmp_path):
         roster=[RosterEntry("Maya Lin")],
         batch="essay-1",
     )
-    written = list((tmp_path / "out").iterdir())
+    written = [p for p in (tmp_path / "out").iterdir() if not p.name.startswith("_")]
     assert [p.name for p in written] == ["STUDENT_01.md"]
     assert "Maya" not in written[0].read_text(encoding="utf-8")
+    assert result.exit_code == EXIT_OK
+
+
+@pytest.mark.parametrize("written_name", ["maya lin", "MAYA LIN", "Maya lin"])
+def test_case_variants_of_roster_names_never_survive_a_clean_batch(
+    tmp_path, written_name
+):
+    source = tmp_path / "in"
+    _write(
+        source,
+        "paper.md",
+        f"Student: {written_name}\nEmail: mlin@example.edu\nThe argument holds.",
+    )
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin", "S1000431", "mlin@example.edu")],
+        batch="essay-1",
+    )
+
+    output = (tmp_path / "out" / "STUDENT_01.md").read_text(encoding="utf-8")
+    assert written_name not in output
+    assert result.files[0].token == "STUDENT_01"
     assert result.exit_code == EXIT_OK
 
 
@@ -115,6 +142,46 @@ def test_an_unreadable_file_fails_closed(tmp_path):
     assert result.exit_code == EXIT_UNREADABLE
 
 
+def test_submission_symlinks_are_refused(tmp_path):
+    outside = tmp_path / "private.md"
+    outside.write_text("Maya Lin secret", encoding="utf-8")
+    source = tmp_path / "in"
+    source.mkdir()
+    (source / "paper.md").symlink_to(outside)
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNREADABLE
+    assert not list((tmp_path / "out").glob("*.md"))
+
+
+def test_a_batch_with_more_than_five_hundred_files_is_refused_before_reading(
+    tmp_path,
+):
+    source = tmp_path / "in"
+    source.mkdir()
+    for index in range(501):
+        (source / f"paper-{index:03d}.md").touch()
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNREADABLE
+    assert "500 files" in result.message
+    assert not (tmp_path / "out").exists()
+
+
 def test_the_map_is_written_owner_only(tmp_path):
     source = tmp_path / "in"
     _write(source, "paper.md", "Maya Lin argues that platforms curate.")
@@ -147,7 +214,7 @@ def test_the_docx_author_is_tokenized_not_dropped(tmp_path):
         batch="essay-1",
     )
 
-    written = list((tmp_path / "out").iterdir())
+    written = [p for p in (tmp_path / "out").iterdir() if not p.name.startswith("_")]
     assert len(written) == 1
     assert "Maya" not in written[0].read_text(encoding="utf-8")
     assert result.files[0].token == "STUDENT_01"
@@ -192,7 +259,7 @@ def test_force_clears_stale_token_outputs(tmp_path):
         ],
         batch="essay-1",
     )
-    assert sorted(p.name for p in destination.iterdir()) == [
+    assert sorted(p.name for p in destination.iterdir() if not p.name.startswith("_")) == [
         "STUDENT_01.md",
         "STUDENT_02.md",
         "STUDENT_03.md",
@@ -209,7 +276,7 @@ def test_force_clears_stale_token_outputs(tmp_path):
         force=True,
     )
 
-    written = sorted(p.name for p in destination.iterdir())
+    written = sorted(p.name for p in destination.iterdir() if not p.name.startswith("_"))
     assert written == ["STUDENT_01.md"]
     content = (destination / "STUDENT_01.md").read_text(encoding="utf-8")
     assert "infrastructure debt" in content
@@ -251,6 +318,47 @@ def test_an_empty_destination_needs_no_force(tmp_path):
     )
 
     assert result.exit_code == EXIT_OK
+
+
+@pytest.mark.parametrize("private_name", ["map.json", "review.json"])
+def test_private_state_cannot_be_written_inside_redacted_output(
+    tmp_path, private_name
+):
+    source = tmp_path / "in"
+    destination = tmp_path / "out"
+    _write(source, "paper.md", "Maya Lin argues that platforms curate.")
+    private_path = destination / private_name
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=private_path if private_name == "map.json" else tmp_path / "map.json",
+        review_path=(
+            private_path if private_name == "review.json" else tmp_path / "review.json"
+        ),
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNSAFE_PATH
+    assert not private_path.exists()
+
+
+def test_two_sources_cannot_overwrite_one_students_redacted_submission(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "first.md", "Maya Lin argues the first position.")
+    _write(source, "second.md", "Maya Lin argues the second position.")
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_COLLISION
+    assert "duplicate output" in result.message.lower()
 
 
 def test_authorship_does_not_depend_on_roster_order(tmp_path):
@@ -313,7 +421,9 @@ def test_skipped_empty_is_reported(tmp_path):
         batch="essay-1",
     )
     assert result.exit_code == EXIT_OK
-    written = [p.name for p in (tmp_path / "out").iterdir()]
+    written = [
+        p.name for p in (tmp_path / "out").iterdir() if not p.name.startswith("_")
+    ]
     assert written == ["STUDENT_01.md"]
     review = json.loads(
         (tmp_path / "reviews" / "essay-1.json").read_text(encoding="utf-8")

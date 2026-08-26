@@ -1,15 +1,17 @@
 """Allocate stable tokens for redacted values and store the mapping.
 
-The saved map is the only artifact that holds real identities. Local scripts
-write and read it. Nothing else must load it.
+The saved map is the only artifact that reversibly maps stable tokens to real
+identities. Local scripts write and read it. Nothing else must load it.
 """
 
 from __future__ import annotations
 
 import json
-import os
+import secrets
 from dataclasses import dataclass
 from pathlib import Path
+
+from .private_files import write_private_text
 
 KINDS = ("STUDENT", "PERSON", "EMAIL", "PHONE", "ID", "URL")
 
@@ -27,8 +29,9 @@ class Entity:
 class TokenMap:
     """Hand out stable tokens and remember what each one replaced."""
 
-    def __init__(self, batch: str) -> None:
+    def __init__(self, batch: str, *, run_id: str | None = None) -> None:
         self.batch = batch
+        self.run_id = run_id or secrets.token_hex(16)
         self._by_key: dict[tuple[str, str], Entity] = {}
         self._by_token: dict[str, Entity] = {}
 
@@ -61,19 +64,22 @@ class TokenMap:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "batch": self.batch,
+            "run_id": self.run_id,
             "entities": {
                 token: {"kind": e.kind, "value": e.value, "file": e.file}
                 for token, e in self._by_token.items()
             },
         }
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
-        os.chmod(path, 0o600)
+        write_private_text(path, json.dumps(payload, indent=2, sort_keys=True))
 
     @classmethod
     def load(cls, path: Path) -> "TokenMap":
         """Read a saved map."""
         payload = json.loads(path.read_text(encoding="utf-8"))
-        tmap = cls(payload["batch"])
+        run_id = payload.get("run_id")
+        if not isinstance(run_id, str) or len(run_id) < 16:
+            raise ValueError("The token map has no valid redaction-run ID.")
+        tmap = cls(payload["batch"], run_id=run_id)
         for token, record in payload["entities"].items():
             entity = Entity(token, record["kind"], record["value"], record["file"])
             tmap._by_token[token] = entity

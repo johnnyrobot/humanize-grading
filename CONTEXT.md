@@ -9,7 +9,7 @@ Student work with identifying content replaced by stable tokens. It is the only 
 _Avoid_: Anonymized submission, raw submission
 
 **Grading batch**:
-A set of redacted submissions for one assignment run, together with their draft feedback and grade records.
+A set of redacted submissions for one assignment, together with their draft feedback and grade records.
 _Avoid_: Job, run, folder
 
 **Verified draft**:

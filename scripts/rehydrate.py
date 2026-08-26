@@ -18,7 +18,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.grading.batch import RenderResult, VerifiedBatch  # noqa: E402
+from scripts.grading.batch import (  # noqa: E402
+    BatchPaths,
+    RenderResult,
+    VerifiedBatch,
+    VerificationInputs,
+)
+from scripts.grading.density import PATTERNS_PATH  # noqa: E402
+from scripts.path_safety import require_component  # noqa: E402
 from scripts.redaction.rehydrate import rehydrate_text  # noqa: E402
 from scripts.redaction.tokens import TokenMap  # noqa: E402
 
@@ -28,6 +35,7 @@ class TokenMapRenderer:
 
     def __init__(self, token_map: TokenMap) -> None:
         self.batch = token_map.batch
+        self.run_id = token_map.run_id
         self._token_map = token_map
 
     @classmethod
@@ -35,9 +43,19 @@ class TokenMapRenderer:
         """Load the identity map inside the local renderer adapter."""
         return cls(TokenMap.load(map_path))
 
-    def render(self, source: Path, destination: Path) -> RenderResult:
+    def render(
+        self, source: Path, destination: Path, expected_sha256: str
+    ) -> RenderResult:
         try:
-            text = source.read_text(encoding="utf-8")
+            source_bytes = source.read_bytes()
+            if hashlib.sha256(source_bytes).hexdigest() != expected_sha256:
+                return RenderResult(
+                    error=(
+                        f"{source.name} changed after publication validation. "
+                        "Run verification again."
+                    )
+                )
+            text = source_bytes.decode("utf-8")
             rendered, unmapped = rehydrate_text(text, self._token_map)
             destination.write_text(rendered, encoding="utf-8")
             digest = hashlib.sha256(destination.read_bytes()).hexdigest()
@@ -56,6 +74,20 @@ class TokenMapRenderer:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("drafts", type=Path, help="Folder of tokenized drafts")
+    parser.add_argument(
+        "--batch",
+        required=True,
+        type=lambda value: require_component(value, "The grading batch"),
+    )
+    parser.add_argument(
+        "--course",
+        required=True,
+        type=lambda value: require_component(value, "The course"),
+    )
+    parser.add_argument("--rubric", type=Path, required=True)
+    parser.add_argument("--profile", type=Path, required=True)
+    parser.add_argument("--redacted", type=Path, required=True)
+    parser.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("final"))
     parser.add_argument(
@@ -65,7 +97,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    resumed = VerifiedBatch.resume(args.drafts)
+    resumed = VerifiedBatch.resume(
+        BatchPaths(
+            batch=args.batch,
+            redacted=args.redacted,
+            drafts=args.drafts,
+        ),
+        VerificationInputs(
+            course=args.course,
+            rubric=args.rubric,
+            profile=args.profile,
+            patterns=args.patterns,
+        ),
+    )
     if resumed.verified_batch is None:
         for finding in resumed.findings:
             print(f"  ERROR {finding.code}: {finding.message}", file=sys.stderr)
@@ -76,7 +120,13 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
         print(f"  ERROR map-unreadable: {error}", file=sys.stderr)
         return 5
-    report = resumed.verified_batch.publish(args.out, renderer, force=args.force)
+    try:
+        report = resumed.verified_batch.publish(
+            args.out, renderer, force=args.force
+        )
+    except (OSError, UnicodeError, ValueError, TypeError) as error:
+        print(f"  ERROR publication-failed: {error}", file=sys.stderr)
+        return 5
     if report.findings:
         for finding in report.findings:
             where = f" [{finding.token}]" if finding.token else ""

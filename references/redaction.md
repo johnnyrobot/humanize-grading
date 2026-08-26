@@ -43,7 +43,8 @@ The tool flags names that appear in personal contexts: "my landlord, Elena
 Vasquez", "I spoke with Elena", "Professor Alvarez". It deliberately misses
 "Elena raised me" and "According to Elena", because no rule separates those
 from ordinary academic prose without also flagging every scholar the essay
-cites. Read the review file. Treat it as a prompt to look, not a complete list.
+cites. Inspect the review file locally, outside any model conversation. Treat
+it as a prompt to look, not a complete list.
 
 ### A cited scholar's name is treated as subject matter
 
@@ -64,7 +65,7 @@ deliberate, not an oversight.
 
 ## What this means for you
 
-Read the review file before you send anything to a cloud model. It lists the
+Inspect the review file locally before you send anything to a cloud model. It lists the
 names flagged for your judgement, the passages that may identify their author,
 and every bare surname the tool substituted.
 

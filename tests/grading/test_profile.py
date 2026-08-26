@@ -46,6 +46,18 @@ def test_an_edited_criterion_is_named_as_drifted(profile, phil210, tmp_path):
     assert drifted == ["1. Thesis & Theoretical Framing"]
 
 
+def test_a_changed_letter_scale_is_reported_as_rubric_drift(
+    profile, phil210, tmp_path
+):
+    text = (phil210 / "grading_rubric.md").read_text(encoding="utf-8")
+    edited = tmp_path / "edited.md"
+    edited.write_text(text.replace("93–100 (A)", "94–100 (A)"), encoding="utf-8")
+
+    drifted = load_profile(profile).drift(load_rubric(edited))
+
+    assert "grading scale or feedback protocol" in drifted
+
+
 def test_a_removed_criterion_is_named_as_drifted(profile, phil210, tmp_path):
     lines = (phil210 / "grading_rubric.md").read_text(encoding="utf-8").splitlines()
     kept = [line for line in lines if not line.startswith("| **3.")]
@@ -106,3 +118,8 @@ def test_a_profile_without_a_fingerprint_is_refused(profile, tmp_path):
 def test_the_default_path_is_under_the_grading_directory(tmp_path):
     assert profile_path("eng101", tmp_path).name == "eng101.md"
     assert profile_path("eng101", tmp_path).parent.name == "profiles"
+
+
+def test_course_names_cannot_escape_the_profile_directory(tmp_path):
+    with pytest.raises(ValueError, match="course"):
+        profile_path("../other-course", tmp_path)

@@ -132,6 +132,25 @@ def test_a_record_missing_a_required_field_is_refused(tmp_path):
         GradeRecord.load(path)
 
 
+def test_assessable_must_be_a_json_boolean(tmp_path):
+    payload = _record().as_dict()
+    payload["criteria"][0]["assessable"] = "false"
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RecordError, match="assessable.*boolean"):
+        GradeRecord.load(path)
+
+
+def test_a_grade_record_over_one_megabyte_is_refused_before_parsing(tmp_path):
+    path = tmp_path / "oversized.json"
+    with path.open("wb") as handle:
+        handle.truncate(1_048_577)
+
+    with pytest.raises(RecordError, match="too large"):
+        GradeRecord.load(path)
+
+
 def test_a_record_that_is_not_json_is_refused(tmp_path):
     path = tmp_path / "junk.json"
     path.write_text("not json at all", encoding="utf-8")

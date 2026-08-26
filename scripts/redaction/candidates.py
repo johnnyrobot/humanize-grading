@@ -18,6 +18,7 @@ one, the heuristics below still produce flags. A flag must never be dropped.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 
 CONTEXT_WIDTH = 60
@@ -169,12 +170,13 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
     """
     scholars = _cited_names(text)
     masked = _mask(text, protected)
+    newlines = [index for index, character in enumerate(masked) if character == "\n"]
     found: list[Candidate] = []
 
     for sentence_match in SENTENCE.finditer(masked):
         if not sentence_match.group(0).strip():
             continue
-        line = masked.count("\n", 0, sentence_match.start()) + 1
+        line = bisect_right(newlines, sentence_match.start()) + 1
         sentence = sentence_match.group(0).replace(_DOT, ".")
         cited = _cited_names(sentence)
 

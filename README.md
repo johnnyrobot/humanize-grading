@@ -15,9 +15,11 @@ IDs, emails, filenames, and document metadata to stable tokens on your machine,
 grades the redacted copy, and reattaches real names locally at the end.
 
 Verification covers the whole grading batch and writes an identity-free receipt
-that binds the inputs and drafts that passed. Rehydration refuses a legacy batch
-with no receipt, a stale receipt, or a malformed receipt. It stages every draft
-before publishing and leaves the destination unchanged if staging fails. Every
+that binds the inputs and drafts that passed. Rehydration requires the trusted
+batch, course, rubric, profile and redacted paths, then reruns semantic
+verification instead of trusting receipt hashes alone. It also requires the
+token map's redaction-run ID to match the receipt-bound manifest. It stages every
+draft before publishing and leaves the destination unchanged if staging fails. Every
 rehydrated feedback file remains a draft pending instructor sign-off. `--force`
 only replaces an unchanged publication recognized by its identity-free marker;
 it refuses changed, unrelated, or unrecognized output and uses a recoverable
@@ -40,9 +42,10 @@ whether student work may leave your machine.
 ### The optional hook
 
 Grader's read rules are instructions in `SKILL.md`, and a model can violate an
-instruction. `hooks/block-raw-reads.json` is a `PreToolUse` hook that denies
-reads of `submissions/`, the token map, and the roster. It is the difference
-between a rule and a guarantee.
+instruction. `hooks/block-raw-reads.json` is a `PreToolUse` hook that blocks
+common direct reads of `submissions/`, the token map, the review file, and the
+roster. It is defense against accidents and instruction drift, not an
+adversarial sandbox.
 
 It is opt-in. Merge it into `.claude/settings.json` yourself:
 
@@ -204,7 +207,7 @@ Humanizer follows the sample's rhythm, word choice, punctuation, and deliberate 
 <details>
 <summary>Show release notes</summary>
 
-- **3.2.0** — Grading now verifies each batch against its configured redacted submissions, writes no offsets when any draft fails, records a versioned identity-free verification receipt, publishes or safely replaces rehydrated drafts through a staged verified-batch gate, and runs consistency from the same authoritative batch inventory. Skills CLI installation now discovers both packaged skills.
+- **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.
 - **3.0.0** — Grader becomes the package. Humanizer moves to `skills/humanizer/` and the 35 patterns move to `references/ai-patterns.md`.
 - **2.11.2** - Removed the plugin symlink and separate Claude Desktop package. Current Claude Code loads the root `SKILL.md` directly, so GitHub's source ZIP now works in Claude Desktop. No change to the 35 patterns.

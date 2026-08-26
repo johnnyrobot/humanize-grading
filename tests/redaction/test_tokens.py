@@ -41,6 +41,21 @@ def test_saved_map_is_owner_only(tmp_path):
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+def test_saving_a_map_replaces_a_symlink_without_touching_its_target(tmp_path):
+    target = tmp_path / "unrelated.json"
+    target.write_text("leave me alone", encoding="utf-8")
+    path = tmp_path / "essay-1.json"
+    path.symlink_to(target)
+    tmap = TokenMap("essay-1")
+    tmap.allocate("STUDENT", "Maya Lin", "paper_1.md")
+
+    tmap.save(path)
+
+    assert not path.is_symlink()
+    assert target.read_text(encoding="utf-8") == "leave me alone"
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
 def test_round_trip_preserves_values(tmp_path):
     tmap = TokenMap("essay-1")
     token = tmap.allocate("STUDENT", "Maya Lin", "paper_1.md")
@@ -49,6 +64,7 @@ def test_round_trip_preserves_values(tmp_path):
 
     loaded = TokenMap.load(path)
     assert loaded.batch == "essay-1"
+    assert loaded.run_id == tmap.run_id
     assert loaded.value_for(token) == "Maya Lin"
 
 

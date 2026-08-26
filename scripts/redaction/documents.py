@@ -18,8 +18,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from zipfile import BadZipFile, ZipFile
 
 TEXT_SUFFIXES = {".md", ".txt"}
+MAX_FILE_BYTES = 25 * 1024 * 1024
+MAX_DOCX_EXPANDED_BYTES = 100 * 1024 * 1024
+MAX_DOCX_MEMBERS = 10_000
+MAX_DOCX_COMPRESSION_RATIO = 100
+MAX_EXTRACTED_CHARACTERS = 5_000_000
+MAX_TABLE_DEPTH = 8
 
 
 @dataclass(frozen=True)
@@ -86,6 +93,23 @@ def _extract_docx(path: Path) -> Extracted:
             error="Reading .docx needs python-docx. Install it or convert to Markdown."
         )
     try:
+        with ZipFile(path) as archive:
+            members = archive.infolist()
+            if len(members) > MAX_DOCX_MEMBERS:
+                return Extracted(error=f"{path.name} has too many DOCX parts.")
+            expanded = sum(member.file_size for member in members)
+            if expanded > MAX_DOCX_EXPANDED_BYTES:
+                return Extracted(error=f"{path.name} expands beyond the DOCX limit.")
+            if any(
+                member.file_size
+                and member.file_size / max(member.compress_size, 1)
+                > MAX_DOCX_COMPRESSION_RATIO
+                for member in members
+            ):
+                return Extracted(error=f"{path.name} has an unsafe compression ratio.")
+    except (BadZipFile, OSError) as exc:
+        return Extracted(error=f"Could not read {path.name}: {exc}")
+    try:
         document = docx.Document(str(path))
     except Exception as exc:  # noqa: BLE001 - report any container failure
         return Extracted(error=f"Could not read {path.name}: {exc}")
@@ -98,8 +122,10 @@ def _extract_docx(path: Path) -> Extracted:
             elif isinstance(child, CT_Tbl):
                 yield Table(child, document)
 
-    def table_text(table) -> str:
+    def table_text(table, depth: int = 0) -> str:
         """Render a table as readable lines, skipping repeats from merged cells."""
+        if depth > MAX_TABLE_DEPTH:
+            raise ValueError(f"{path.name} nests tables too deeply.")
         lines = []
         for row in table.rows:
             seen_cells: set[int] = set()
@@ -114,7 +140,7 @@ def _extract_docx(path: Path) -> Extracted:
                     piece = (
                         block.text.strip()
                         if isinstance(block, Paragraph)
-                        else table_text(block)  # a table nested inside a cell
+                        else table_text(block, depth + 1)
                     )
                     if piece:
                         parts.append(piece)
@@ -124,12 +150,21 @@ def _extract_docx(path: Path) -> Extracted:
                 lines.append(line)
         return "\n".join(lines)
 
-    body_parts = []
-    for block in blocks(document.element.body):
-        piece = block.text.strip() if isinstance(block, Paragraph) else table_text(block)
-        if piece:
-            body_parts.append(piece)
-    text = "\n\n".join(body_parts)
+    try:
+        body_parts = []
+        for block in blocks(document.element.body):
+            piece = (
+                block.text.strip()
+                if isinstance(block, Paragraph)
+                else table_text(block)
+            )
+            if piece:
+                body_parts.append(piece)
+        text = "\n\n".join(body_parts)
+    except ValueError as exc:
+        return Extracted(error=str(exc))
+    if len(text) > MAX_EXTRACTED_CHARACTERS:
+        return Extracted(error=f"{path.name} has too much extracted text.")
 
     metadata = _docx_metadata(document)
     return Extracted(text=text, metadata=metadata, empty_body=text.strip() == "")
@@ -138,6 +173,16 @@ def _extract_docx(path: Path) -> Extracted:
 def extract(path: Path) -> Extracted:
     """Return the text of a submission, or an error explaining why not."""
     suffix = path.suffix.lower()
+
+    try:
+        if path.is_symlink():
+            return Extracted(error=f"{path.name} is a symbolic link, not a submission.")
+        if path.stat().st_size > MAX_FILE_BYTES:
+            return Extracted(
+                error=f"{path.name} is too large. The limit is 25 MiB per file."
+            )
+    except OSError as exc:
+        return Extracted(error=f"Could not read {path.name}: {exc}")
 
     if suffix in TEXT_SUFFIXES:
         try:

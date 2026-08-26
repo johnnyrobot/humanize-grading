@@ -1,11 +1,11 @@
-"""Say what a batch still owes, so an interrupted run resumes instead of restarting.
+"""Say what a grading batch still owes, so interrupted work resumes safely.
 
 Regrading a submission that already has a draft is not merely wasted work. It
 produces a second, different grade for the same student, and nothing in the
 output says which one the instructor should send.
 
 A draft or grade record with no redacted submission is orphaned and reported.
-It usually means a prior run's output was left in the drafts directory, and
+It usually means an earlier grading batch's output was left in the drafts directory, and
 grading on top of it would mix two batches.
 """
 
@@ -27,6 +27,8 @@ from scripts.grading.profile import ProfileError, load_profile
 from scripts.grading.records import GradeRecord, RecordError
 from scripts.grading.rubric import RubricError, load_rubric
 from scripts.grading.verify import ERROR, verify_draft
+from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
+from scripts.redaction.manifest import RedactionManifest
 
 
 class Progress(str, Enum):
@@ -46,7 +48,10 @@ TRANSACTION_NAME = "_transaction.json"
 TRANSACTION_SCHEMA = "grading-batch-publication-transaction/1"
 _PARTICIPANT_ROLES = {"draft", "grade-record", "redacted-submission"}
 _COURSE_EVIDENCE_ROLES = {"calibration-profile", "pattern-reference", "rubric"}
-_RECEIPT_ROLES = _PARTICIPANT_ROLES | _COURSE_EVIDENCE_ROLES
+_BATCH_EVIDENCE_ROLES = {"redaction-manifest"}
+_RECEIPT_ROLES = (
+    _PARTICIPANT_ROLES | _COURSE_EVIDENCE_ROLES | _BATCH_EVIDENCE_ROLES
+)
 
 _MALFORMED_CODES = {
     "malformed-record",
@@ -174,8 +179,11 @@ class RehydrationRenderer(Protocol):
     """Write identity-bearing output without returning its text."""
 
     batch: str
+    run_id: str
 
-    def render(self, source: Path, destination: Path) -> RenderResult: ...
+    def render(
+        self, source: Path, destination: Path, expected_sha256: str
+    ) -> RenderResult: ...
 
     def hash_output(self, path: Path) -> str: ...
 
@@ -194,10 +202,20 @@ class PublicationReport:
 class VerifiedBatch:
     """A grading batch whose current verification receipt has been trusted."""
 
-    __slots__ = ("_paths", "_receipt_digest")
+    __slots__ = (
+        "_paths",
+        "_receipt_digest",
+        "_redaction_run_id",
+        "_draft_digests",
+    )
 
     def __init__(
-        self, paths: BatchPaths, receipt_digest: str, key: object
+        self,
+        paths: BatchPaths,
+        receipt_digest: str,
+        key: object,
+        redaction_run_id: str = "",
+        draft_digests: dict[str, str] | None = None,
     ) -> None:
         if key is not _VERIFIED_BATCH_KEY:
             raise TypeError(
@@ -206,42 +224,35 @@ class VerifiedBatch:
             )
         self._paths = paths
         self._receipt_digest = receipt_digest
+        self._redaction_run_id = redaction_run_id
+        self._draft_digests = dict(draft_digests or {})
 
     @classmethod
     def _create(cls, paths: BatchPaths, receipt: Path) -> "VerifiedBatch":
         digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
-        return cls(paths, digest, _VERIFIED_BATCH_KEY)
+        manifest = RedactionManifest.load(paths.redacted)
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        draft_digests = {
+            Path(item["path"]).name: item["sha256"]
+            for item in payload.get("artifacts", [])
+            if isinstance(item, dict)
+            and item.get("role") == "draft"
+            and isinstance(item.get("path"), str)
+            and isinstance(item.get("sha256"), str)
+        }
+        return cls(
+            paths,
+            digest,
+            _VERIFIED_BATCH_KEY,
+            redaction_run_id=manifest.run_id,
+            draft_digests=draft_digests,
+        )
 
     @classmethod
-    def resume(cls, drafts: Path) -> VerifiedBatchResume:
-        receipt = drafts / RECEIPT_NAME
-        if not receipt.is_file():
-            return VerifiedBatchResume(
-                verified_batch=None,
-                findings=(
-                    BlockingFinding(
-                        code="verification-required",
-                        message=(
-                            "This grading batch has no verification receipt. Run "
-                            "verification before publication."
-                        ),
-                        token="",
-                    ),
-                ),
-            )
-        try:
-            paths = _paths_from_receipt(drafts, receipt)
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, KeyError, ValueError) as error:
-            return VerifiedBatchResume(
-                verified_batch=None,
-                findings=(
-                    BlockingFinding(
-                        code="malformed-verification-receipt",
-                        message=f"{error} Run verification again before publication.",
-                        token="",
-                    ),
-                ),
-            )
+    def resume(
+        cls, paths: BatchPaths, inputs: VerificationInputs
+    ) -> VerifiedBatchResume:
+        receipt = paths.drafts / RECEIPT_NAME
         status = GradingBatch.open(paths).status(require_verified=True)
         if status.blocking_findings:
             return VerifiedBatchResume(
@@ -255,6 +266,18 @@ class VerifiedBatch:
                         ),
                     )
                     for finding in status.blocking_findings
+                ),
+            )
+        semantic = GradingBatch.open(paths).verify(inputs, persist=False)
+        if semantic.blocking_findings:
+            return VerifiedBatchResume(
+                verified_batch=None,
+                findings=tuple(
+                    replace(
+                        finding,
+                        message=_with_verification_instruction(finding.message),
+                    )
+                    for finding in semantic.blocking_findings
                 ),
             )
         return VerifiedBatchResume(
@@ -299,6 +322,17 @@ class VerifiedBatch:
                 BlockingFinding(
                     code="renderer-batch-mismatch",
                     message="The renderer belongs to a different grading batch.",
+                    token="",
+                )
+            )
+        if renderer.run_id != self._redaction_run_id:
+            findings.append(
+                BlockingFinding(
+                    code="renderer-redaction-mismatch",
+                    message=(
+                        "The token map belongs to a different redaction result. "
+                        "Use the map created with this grading batch."
+                    ),
                     token="",
                 )
             )
@@ -354,31 +388,49 @@ class VerifiedBatch:
                 findings=tuple(findings),
             )
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(
-            tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent)
-        )
-        (staging / TRANSACTION_NAME).write_text(
-            json.dumps(
-                {
-                    "schema": TRANSACTION_SCHEMA,
-                    "batch": self._paths.batch,
-                    "receipt_sha256": current_digest,
-                    "target": target.name,
-                },
-                indent=2,
-                sort_keys=True,
+        staging: Path | None = None
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            staging = Path(
+                tempfile.mkdtemp(prefix=f".{target.name}-", dir=target.parent)
             )
-            + "\n",
-            encoding="utf-8",
-        )
+            (staging / TRANSACTION_NAME).write_text(
+                json.dumps(
+                    {
+                        "schema": TRANSACTION_SCHEMA,
+                        "batch": self._paths.batch,
+                        "receipt_sha256": current_digest,
+                        "target": target.name,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except OSError as error:
+            if staging is not None and staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            return PublicationReport(
+                destination=target,
+                progress=Progress.VERIFIED,
+                findings=(
+                    _publication_finding(
+                        "publication-failed",
+                        f"Could not prepare publication staging: {error}",
+                    ),
+                ),
+            )
         outputs: list[dict[str, str]] = []
         try:
             for entry in status.entries:
                 if entry.draft is None:
                     continue
                 destination = staging / entry.draft.name
-                result = renderer.render(entry.draft, destination)
+                expected_digest = self._draft_digests.get(entry.draft.name, "")
+                result = renderer.render(
+                    entry.draft, destination, expected_digest
+                )
                 if result.error:
                     findings.append(
                         BlockingFinding(
@@ -497,7 +549,7 @@ class VerifiedBatch:
                 changed=True,
             )
         finally:
-            if staging.exists():
+            if staging is not None and staging.exists():
                 shutil.rmtree(staging)
 
 
@@ -523,6 +575,22 @@ class VerificationReport:
     failure: VerificationFailure | None
     receipt: Path | None = None
     verified_batch: VerifiedBatch | None = None
+
+
+def _failed_verification(
+    status: StatusReport,
+    blocking: list[BlockingFinding],
+    failure: VerificationFailure,
+) -> VerificationReport:
+    """Build the common no-persistence result for unusable course evidence."""
+    return VerificationReport(
+        status=status,
+        blocking_findings=tuple(blocking),
+        warnings=(),
+        checked_tokens=(),
+        persisted=False,
+        failure=failure,
+    )
 
 
 @dataclass(frozen=True)
@@ -561,8 +629,53 @@ class GradingBatch:
     def open(cls, paths: BatchPaths) -> "GradingBatch":
         return cls(paths)
 
-    def status(self, *, require_verified: bool = False) -> StatusReport:
-        return self._status(check_receipt=True, require_verified=require_verified)
+    def status(
+        self,
+        *,
+        require_verified: bool = False,
+        publication: Path | None = None,
+        renderer: RehydrationRenderer | None = None,
+    ) -> StatusReport:
+        report = self._status(
+            check_receipt=True, require_verified=require_verified
+        )
+        if publication is None or report.blocking_findings:
+            return report
+        if renderer is None:
+            return StatusReport(
+                entries=report.entries,
+                blocking_findings=(
+                    BlockingFinding(
+                        code="publication-renderer-required",
+                        message=(
+                            "Rehydrated status needs the local renderer to check "
+                            "identity-bearing output hashes."
+                        ),
+                        token="",
+                    ),
+                ),
+            )
+        receipt = self.paths.drafts / RECEIPT_NAME
+        digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        findings = _validate_existing_publication(
+            publication,
+            renderer,
+            self.paths.batch,
+            digest,
+            report,
+        )
+        if findings:
+            return StatusReport(
+                entries=report.entries,
+                blocking_findings=findings,
+            )
+        return StatusReport(
+            entries=tuple(
+                replace(entry, progress=Progress.REHYDRATED)
+                for entry in report.entries
+            ),
+            blocking_findings=(),
+        )
 
     def _status(
         self, *, check_receipt: bool, require_verified: bool = False
@@ -570,9 +683,21 @@ class GradingBatch:
         sources = _artifact_paths(self.paths.redacted, (".md", ".txt", ".docx"))
         drafts = _artifact_paths(self.paths.drafts, (".md",))
         records = _artifact_paths(self.paths.drafts, (".json",))
+        source_links = _symlink_artifacts(
+            self.paths.redacted, (".md", ".txt", ".docx")
+        )
+        draft_links = _symlink_artifacts(self.paths.drafts, (".md",))
+        record_links = _symlink_artifacts(self.paths.drafts, (".json",))
         entries: list[BatchEntry] = []
         findings: list[BlockingFinding] = []
-        for token in sorted(set(sources) | set(drafts) | set(records)):
+        for token in sorted(
+            set(sources)
+            | set(drafts)
+            | set(records)
+            | set(source_links)
+            | set(draft_links)
+            | set(record_links)
+        ):
             source_paths = sources.get(token, ())
             draft_paths = drafts.get(token, ())
             record_paths = records.get(token, ())
@@ -594,6 +719,23 @@ class GradingBatch:
                     record=record,
                 )
             )
+            linked = (
+                source_links.get(token, ())
+                + draft_links.get(token, ())
+                + record_links.get(token, ())
+            )
+            if linked:
+                findings.append(
+                    BlockingFinding(
+                        code="symlink-artifact",
+                        message=(
+                            "Symbolic links are not grading-batch artifacts: "
+                            + ", ".join(path.name for path in linked)
+                        ),
+                        token=token,
+                    )
+                )
+                continue
             if not source_paths:
                 findings.append(
                     BlockingFinding(
@@ -659,6 +801,10 @@ class GradingBatch:
     ) -> VerificationReport:
         status = self._status(check_receipt=False)
         blocking = list(status.blocking_findings)
+        try:
+            initial_digests = _verification_digests(self.paths, inputs, status)
+        except OSError:
+            initial_digests = {}
         if not any(entry.record is not None for entry in status.entries):
             blocking.append(
                 BlockingFinding(
@@ -675,6 +821,9 @@ class GradingBatch:
         )
         for loaded in loaded_entries:
             blocking.extend(loaded.findings)
+        profile = None
+        rubric = None
+        terms = None
         try:
             profile = load_profile(inputs.profile)
         except ProfileError as error:
@@ -685,14 +834,6 @@ class GradingBatch:
                     token="",
                 )
             )
-            return VerificationReport(
-                status=status,
-                blocking_findings=tuple(blocking),
-                warnings=(),
-                checked_tokens=(),
-                persisted=False,
-                failure=VerificationFailure.NO_PROFILE,
-            )
         except (OSError, UnicodeError, ValueError, TypeError) as error:
             blocking.append(
                 BlockingFinding(
@@ -700,14 +841,6 @@ class GradingBatch:
                     message=str(error),
                     token="",
                 )
-            )
-            return VerificationReport(
-                status=status,
-                blocking_findings=tuple(blocking),
-                warnings=(),
-                checked_tokens=(),
-                persisted=False,
-                failure=VerificationFailure.MALFORMED,
             )
         try:
             rubric = load_rubric(inputs.rubric)
@@ -719,15 +852,22 @@ class GradingBatch:
                     token="",
                 )
             )
-            return VerificationReport(
-                status=status,
-                blocking_findings=tuple(blocking),
-                warnings=(),
-                checked_tokens=(),
-                persisted=False,
-                failure=VerificationFailure.MALFORMED,
+        if profile is not None and profile.course != inputs.course:
+            blocking.append(
+                BlockingFinding(
+                    code="profile-course-mismatch",
+                    message=(
+                        f"The profile belongs to {profile.course!r}, not "
+                        f"{inputs.course!r}."
+                    ),
+                    token="",
+                )
             )
-        drifted = profile.drift(rubric)
+        drifted = (
+            profile.drift(rubric)
+            if profile is not None and rubric is not None
+            else []
+        )
         if drifted:
             blocking.append(
                 BlockingFinding(
@@ -737,14 +877,6 @@ class GradingBatch:
                     ),
                     token="",
                 )
-            )
-            return VerificationReport(
-                status=status,
-                blocking_findings=tuple(blocking),
-                warnings=(),
-                checked_tokens=(),
-                persisted=False,
-                failure=VerificationFailure.RUBRIC_DRIFT,
             )
         try:
             terms = load_terms(inputs.patterns)
@@ -756,14 +888,18 @@ class GradingBatch:
                     token="",
                 )
             )
-            return VerificationReport(
-                status=status,
-                blocking_findings=tuple(blocking),
-                warnings=(),
-                checked_tokens=(),
-                persisted=False,
-                failure=VerificationFailure.MALFORMED,
+        if profile is None or rubric is None or terms is None or drifted:
+            codes = {finding.code for finding in blocking}
+            failure = (
+                VerificationFailure.NO_PROFILE
+                if "no-profile" in codes
+                else (
+                    VerificationFailure.RUBRIC_DRIFT
+                    if "rubric-drift" in codes
+                    else VerificationFailure.MALFORMED
+                )
             )
+            return _failed_verification(status, blocking, failure)
         warnings: list[AdvisoryFinding] = []
         checked: list[str] = []
         records: list[tuple[Path, GradeRecord]] = []
@@ -825,9 +961,68 @@ class GradingBatch:
 
         receipt = None
         if persist and not blocking:
-            for path, record in records:
-                record.save(path)
-            receipt = _write_verification_receipt(self.paths, inputs, status)
+            try:
+                current = self._status(check_receipt=False)
+                current_digests = _verification_digests(
+                    self.paths, inputs, current
+                )
+            except OSError as error:
+                blocking.append(
+                    BlockingFinding(
+                        code="batch-changed",
+                        message=f"The grading batch changed during verification: {error}",
+                        token="",
+                    )
+                )
+                current_digests = {}
+            if not blocking and current_digests != initial_digests:
+                blocking.append(
+                    BlockingFinding(
+                        code="batch-changed",
+                        message=(
+                            "The grading batch changed during verification. Run "
+                            "verification again on the current files."
+                        ),
+                        token="",
+                    )
+                )
+            staged: list[tuple[Path, Path]] = []
+            try:
+                if not blocking:
+                    for path, record in records:
+                        temporary = path.with_name(f".{path.name}.verified.tmp")
+                        record.save(temporary)
+                        staged.append((path, temporary))
+                    latest = self._status(check_receipt=False)
+                    latest_digests = _verification_digests(
+                        self.paths, inputs, latest
+                    )
+                    if latest_digests != initial_digests:
+                        blocking.append(
+                            BlockingFinding(
+                                code="batch-changed",
+                                message=(
+                                    "The grading batch changed while verified records "
+                                    "were staged. Nothing was committed."
+                                ),
+                                token="",
+                            )
+                        )
+                if not blocking:
+                    receipt_digests = dict(initial_digests)
+                    for path, temporary in staged:
+                        receipt_digests[path.resolve()] = hashlib.sha256(
+                            temporary.read_bytes()
+                        ).hexdigest()
+                    for path, temporary in staged:
+                        temporary.replace(path)
+                    receipt = _write_verification_receipt(
+                        self.paths, inputs, status, receipt_digests
+                    )
+            finally:
+                for _, temporary in staged:
+                    if temporary.exists():
+                        temporary.unlink()
         failure = None
         if blocking:
             failure = (
@@ -899,15 +1094,60 @@ def _artifact_paths(
     for path in sorted(directory.iterdir()):
         if (
             path.is_file()
-            and path.suffix in suffixes
+            and not path.is_symlink()
+            and path.suffix.lower() in suffixes
             and not path.name.startswith("_")
         ):
             found.setdefault(path.stem, []).append(path)
     return {token: tuple(paths) for token, paths in found.items()}
 
 
+def _symlink_artifacts(
+    directory: Path, suffixes: tuple[str, ...]
+) -> dict[str, tuple[Path, ...]]:
+    if not directory.is_dir():
+        return {}
+    found: dict[str, list[Path]] = {}
+    for path in sorted(directory.iterdir()):
+        if (
+            path.is_symlink()
+            and path.suffix.lower() in suffixes
+            and not path.name.startswith("_")
+        ):
+            found.setdefault(path.stem, []).append(path)
+    return {token: tuple(paths) for token, paths in found.items()}
+
+
+def _verification_digests(
+    paths: BatchPaths,
+    inputs: VerificationInputs,
+    status: StatusReport,
+) -> dict[Path, str]:
+    """Snapshot every byte sequence that verification and its receipt bind."""
+    artifact_paths: list[Path] = []
+    for entry in status.entries:
+        artifact_paths.extend(
+            path for _, path in _participant_paths(entry) if path is not None
+        )
+    artifact_paths.extend(
+        [
+            paths.redacted / REDACTION_MANIFEST_NAME,
+            inputs.rubric,
+            inputs.profile,
+            inputs.patterns,
+        ]
+    )
+    return {
+        path.resolve(): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in artifact_paths
+    }
+
+
 def _write_verification_receipt(
-    paths: BatchPaths, inputs: VerificationInputs, status: StatusReport
+    paths: BatchPaths,
+    inputs: VerificationInputs,
+    status: StatusReport,
+    digests: dict[Path, str],
 ) -> Path:
     receipt = paths.drafts / RECEIPT_NAME
     base = receipt.parent.resolve()
@@ -915,13 +1155,20 @@ def _write_verification_receipt(
     for entry in status.entries:
         for role, path in _participant_paths(entry):
             if path is not None:
-                artifacts.append(_receipt_artifact(role, path, base, entry.token))
+                artifacts.append(
+                    _receipt_artifact(
+                        role, path, base, digests[path.resolve()], entry.token
+                    )
+                )
     for role, path in (
+        ("redaction-manifest", paths.redacted / REDACTION_MANIFEST_NAME),
         ("rubric", inputs.rubric),
         ("calibration-profile", inputs.profile),
         ("pattern-reference", inputs.patterns),
     ):
-        artifacts.append(_receipt_artifact(role, path, base))
+        artifacts.append(
+            _receipt_artifact(role, path, base, digests[path.resolve()])
+        )
     artifacts.sort(key=lambda item: (item["role"], item.get("token", ""), item["path"]))
     payload = {
         "schema": RECEIPT_SCHEMA,
@@ -940,13 +1187,17 @@ def _write_verification_receipt(
 
 
 def _receipt_artifact(
-    role: str, path: Path, base: Path, token: str | None = None
+    role: str,
+    path: Path,
+    base: Path,
+    digest: str,
+    token: str | None = None,
 ) -> dict[str, str]:
     resolved = path.expanduser().resolve()
     artifact = {
         "role": role,
         "path": _receipt_locator(resolved, base),
-        "sha256": hashlib.sha256(resolved.read_bytes()).hexdigest(),
+        "sha256": digest,
     }
     if token is not None:
         artifact["token"] = token
@@ -958,41 +1209,6 @@ def _receipt_locator(path: Path, base: Path) -> str:
         return Path(os.path.relpath(path, base)).as_posix()
     except ValueError:
         return path.as_posix()
-
-
-def _paths_from_receipt(drafts: Path, receipt: Path) -> BatchPaths:
-    payload = json.loads(receipt.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("The verification receipt must be a JSON object.")
-    if payload.get("schema") != RECEIPT_SCHEMA:
-        raise ValueError(f"Unknown verification receipt schema {payload.get('schema')!r}.")
-    batch = payload.get("batch")
-    if not isinstance(batch, str) or not batch:
-        raise ValueError("The verification receipt needs a grading batch.")
-    artifacts = payload.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise ValueError("The verification receipt artifacts must be a list.")
-    redacted_paths: list[Path] = []
-    for artifact in artifacts:
-        if not isinstance(artifact, dict) or artifact.get("role") != "redacted-submission":
-            continue
-        locator = artifact.get("path")
-        if not isinstance(locator, str) or not locator:
-            raise ValueError("A redacted submission in the receipt needs a path.")
-        path = Path(locator)
-        redacted_paths.append(
-            path.resolve() if path.is_absolute() else (receipt.parent / path).resolve()
-        )
-    parents = {path.parent for path in redacted_paths}
-    if not redacted_paths or len(parents) != 1:
-        raise ValueError(
-            "The verification receipt must identify one redacted-submission directory."
-        )
-    return BatchPaths(
-        batch=batch,
-        redacted=parents.pop(),
-        drafts=drafts.resolve(),
-    )
 
 
 def _publication_backup(target: Path) -> Path:
@@ -1357,7 +1573,7 @@ def _validated_receipt_artifacts(
             raise ValueError(
                 "A verification receipt artifact has an invalid SHA-256 hash."
             ) from error
-        if role in _COURSE_EVIDENCE_ROLES and "token" in artifact:
+        if role in (_COURSE_EVIDENCE_ROLES | _BATCH_EVIDENCE_ROLES) and "token" in artifact:
             raise ValueError("Course evidence in a receipt must not carry a token.")
         if role in _PARTICIPANT_ROLES and (not isinstance(token, str) or not token):
             raise ValueError(
@@ -1381,6 +1597,8 @@ def _validated_receipt_artifacts(
     for role in _COURSE_EVIDENCE_ROLES:
         if sum(1 for item in validated if item["role"] == role) != 1:
             raise ValueError("The verification receipt repeats course evidence.")
+    if sum(1 for item in validated if item["role"] == "redaction-manifest") != 1:
+        raise ValueError("The verification receipt needs one redaction manifest.")
     return validated
 
 

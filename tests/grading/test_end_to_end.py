@@ -184,10 +184,16 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
 
     final = tmp_path / "final"
     rehydrated = subprocess.run(
-        [
-            sys.executable, "scripts/rehydrate.py", str(drafts),
-            "--map", str(tmp_path / "maps" / "essay-2.json"), "--out", str(final),
-        ],
+            [
+                sys.executable, "scripts/rehydrate.py", str(drafts),
+                "--batch", "essay-2",
+                "--course", "phil210",
+                "--rubric", str(phil210 / "grading_rubric.md"),
+                "--profile", str(phil210 / "profile_phil210.md"),
+                "--redacted", str(redacted),
+                "--map", str(tmp_path / "maps" / "essay-2.json"),
+                "--out", str(final),
+            ],
         capture_output=True, text=True,
     )
     assert rehydrated.returncode == 0, rehydrated.stderr

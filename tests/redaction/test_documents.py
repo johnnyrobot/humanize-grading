@@ -20,6 +20,16 @@ def test_plain_text_is_read(tmp_path):
     assert extract(path).text == "Body text."
 
 
+def test_text_submission_over_the_public_limit_is_refused_before_reading(tmp_path):
+    path = tmp_path / "oversized.md"
+    with path.open("wb") as handle:
+        handle.truncate(26 * 1024 * 1024)
+
+    result = extract(path)
+
+    assert "too large" in result.error.lower()
+
+
 def test_pdf_is_refused(tmp_path):
     path = tmp_path / "paper.pdf"
     path.write_bytes(b"%PDF-1.4")

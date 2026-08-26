@@ -3,6 +3,8 @@
 **Course**: phil210
 **Calibrated**: 2026-08-24
 **Rubric**: tests/fixtures/phil210/grading_rubric.md
+**Rubric digest**: 58a64521abb1
+**Rubric context digest**: ef34c63666c6
 **Samples**: 4
 **Holdout**: paper_5
 
@@ -14,10 +16,10 @@ student essay text appears anywhere in this file.
 
 | Criterion | Digest |
 | :--- | :--- |
-| 1. Thesis & Theoretical Framing | 0892f1f9641d |
-| 2. Evidence & Empirical Grounding | ff1a2d22b0b5 |
-| 3. Counterargument & Critical Analysis | c8e4eb18f06c |
-| 4. Structure, Prose & Academic Voice | e1821590dac0 |
+| 1. Thesis & Theoretical Framing | 4a4b083c5b97 |
+| 2. Evidence & Empirical Grounding | a90148085010 |
+| 3. Counterargument & Critical Analysis | 861b365b81e4 |
+| 4. Structure, Prose & Academic Voice | 48d0142eb583 |
 
 ## Rubric, normalized
 

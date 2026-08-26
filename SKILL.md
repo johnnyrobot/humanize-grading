@@ -23,7 +23,7 @@ Ask this before reading any file, every run:
 
 | Answer | What happens |
 | --- | --- |
-| Cloud | Redaction is mandatory. A non-zero exit from `redact.py` stops the run. |
+| Cloud | Redaction is mandatory. A non-zero exit from `redact.py` stops the grading batch. |
 | Local | Redaction is on by default. Skipping it takes an explicit `--no-redact`. |
 
 You cannot detect your own host. The answer is the instructor's to give, and
@@ -40,9 +40,10 @@ context and the answer changes nothing.
 4. Refuse to grade without a profile.
 
 These are instructions, and instructions can be violated. `hooks/block-raw-reads.json`
-ships as an optional `PreToolUse` hook that denies reads of `submissions/` and
-`.grading/maps/`. It is the difference between a rule and a guarantee. Tell the
-instructor it exists. The skill must work without it.
+ships as an optional `PreToolUse` hook that blocks common direct reads of
+private grading data. It is defense against accidents and instruction drift,
+not an adversarial sandbox. Tell the instructor it exists. The skill must work
+without it.
 
 ## Two commands
 
@@ -78,8 +79,8 @@ Read `references/calibration.md` first.
 4. **Interview.** Ask only what the samples cannot answer. The five questions
    are in `references/calibration.md`. Skip any the work already answers.
 5. **Write the profile** to `.grading/profiles/<course>.md` with all eight
-   sections, including the fingerprint table. Copy each criterion's digest from
-   the packet.
+   sections, including the fingerprint table. Copy the whole-rubric digest and
+   each criterion digest from the packet.
 6. **Validate against the holdout.** Grade the held-back sample blind, using the
    full grading flow below, then:
 
@@ -115,8 +116,10 @@ python3 scripts/redact.py <submissions/> --roster <roster.csv> \
   --batch <batch> --out redacted/ --instructor "<Your Name>"
 ```
 
-Read the review file it names. It lists candidate names, passages that may
-identify their author, and every bare surname substituted. Then re-run with
+Pause and ask the instructor to inspect the review file locally, outside this
+conversation. It contains candidate names, passages that may identify their
+author, and every bare surname substituted. Never read or quote it yourself.
+After the instructor confirms the local review is complete, re-run with
 `--reviewed`.
 
 A non-zero exit stops the cloud path. There is no override. Report the exit
@@ -209,13 +212,17 @@ outlier is often a genuinely unusual essay.
 
 ```bash
 python3 scripts/rehydrate.py .grading/drafts/<batch>/ \
+  --batch <batch> --course <course> --rubric <rubric.md> \
+  --profile .grading/profiles/<course>.md --redacted redacted/ \
   --map .grading/maps/<batch>.json --out final/<batch>/
 ```
 
-Local only. Rehydration first requires and revalidates the verification receipt,
-then restores identities through the local token map. It prepares every draft in
-staging before publishing anything. A missing, stale, or malformed receipt, a
-token with no mapping, or a rendering failure leaves the destination unchanged.
+Local only. Rehydration first requires the current trusted grading context,
+revalidates the receipt, and reruns semantic verification before it restores
+identities through the local token map. It prepares every draft in staging
+before publishing anything. A missing, stale, malformed, or self-authored
+receipt, a token with no mapping, or a rendering failure leaves the destination
+unchanged.
 It refuses a legacy batch with no receipt; run verification again to produce
 current whole-batch evidence.
 Successful publication includes the identity-free `_publication.json` marker.
@@ -238,11 +245,11 @@ Every condition refuses rather than guesses.
 | Rubric changed since calibration | Warn, name the drifted criteria, ask before proceeding |
 | Student text pasted instead of a path | Refuse. Say the text is already in context and what that means. |
 | `redact.py` exits non-zero | The cloud path refuses. No override. |
-| No roster supplied | Layer 1 is off. Warn. The cloud path requires explicit acknowledgment. |
+| No roster supplied | The shipped CLI refuses because `--roster` is required. A direct library call with no roster must not use the cloud path. |
 | Criterion not assessable from the work | Score it "cannot assess". Never infer a score. |
 | No supporting quote for a score | Give no score. Flag it for the instructor. |
 | Batch interrupted | Resume. Skip files that already have drafts. |
-| Unmapped token at rehydrate | Fail the run. |
+| Unmapped token at rehydrate | Fail publication. |
 | Empty or corrupt submission | Skip it, report it, continue the batch. |
 | A draft fails verification | Fix the draft. Never rehydrate a failed batch. |
 

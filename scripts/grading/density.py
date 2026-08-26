@@ -21,6 +21,7 @@ are therefore a guide rather than an exact partition.
 from __future__ import annotations
 
 import re
+from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -152,6 +153,7 @@ def _term_pattern(text: str) -> re.Pattern[str]:
 def scan(text: str, terms: list[Term]) -> Density:
     """Count every watched term in text and record where each one sits."""
     hits: list[Hit] = []
+    newlines = [index for index, character in enumerate(text) if character == "\n"]
     for term in terms:
         for match in _term_pattern(term.text).finditer(text):
             start = max(0, match.start() - 40)
@@ -160,7 +162,7 @@ def scan(text: str, terms: list[Term]) -> Density:
                     pattern=term.pattern,
                     term=term.text,
                     offset=match.start(),
-                    line=text.count("\n", 0, match.start()) + 1,
+                    line=bisect_right(newlines, match.start()) + 1,
                     context=_norm(text[start : match.end() + 40]),
                 )
             )

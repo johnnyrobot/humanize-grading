@@ -111,3 +111,34 @@ def redact_structured(
     text, swept = _sweep_known_ids(text, tmap)
     total += swept
     return text, total
+
+
+def scrub_structured(
+    text: str, placeholder: str = "[REDACTED]"
+) -> tuple[str, list[str]]:
+    """Replace structured identity without creating a reversible token map."""
+    found: list[str] = []
+    id_values: list[str] = []
+
+    def substitute(pattern: re.Pattern[str], source: str, *, is_id: bool = False) -> str:
+        def swap(match: re.Match[str]) -> str:
+            start, end = _replacement_span(match)
+            value = match.string[start:end]
+            found.append(value)
+            if is_id:
+                id_values.append(value)
+            whole = match.group(0)
+            base = match.start(0)
+            return whole[: start - base] + placeholder + whole[end - base :]
+
+        return pattern.sub(swap, source)
+
+    scrubbed = text
+    for _, pattern in _ORDER:
+        scrubbed = substitute(pattern, scrubbed)
+    scrubbed = substitute(DEFAULT_ID, scrubbed, is_id=True)
+    for value in id_values:
+        scrubbed = re.sub(
+            rf"\b{re.escape(value)}\b", placeholder, scrubbed, flags=re.IGNORECASE
+        )
+    return scrubbed, found

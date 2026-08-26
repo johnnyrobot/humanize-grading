@@ -27,7 +27,7 @@ surface in the first minute rather than on the fortieth essay.
 
 | Section | Holds |
 | --- | --- |
-| Rubric fingerprint | One digest per criterion, so drift can be named |
+| Rubric fingerprint | The whole-rubric digest plus one digest per criterion, so scale/protocol drift and named criterion drift are both reported |
 | Rubric, normalized | Criteria, levels, weights, point values |
 | Weighting in practice | The gap between the rubric and the instructor's behaviour |
 | Severity | Where the instructor lands against the rubric's language; score spread |
@@ -47,10 +47,15 @@ is most of what makes feedback sound like a specific person.
 not needed to learn it, and the profile is read during cloud runs.
 
 **No student name.** Instructors write "Maya, this is exceptional work". Run
-every comment through name scrubbing first, so the bank reads "[STUDENT],
+every comment through name and structured-identity scrubbing first, so the bank reads "[STUDENT],
 this is exceptional work". Use the literal `[STUDENT]`, never a
 `STUDENT_01`-shaped token: a token leaking out of a profile would be
 reattached at rehydration to whichever student holds it in the current batch.
+
+**No inline brackets from the submission.** Bracket syntax inside student prose
+does not prove that an instructor wrote it. Calibration uses only the single
+instructor feedback section. More than one feedback heading is ambiguous and
+must be resolved locally before the sample can be used.
 
 ## Take structure from the rubric
 

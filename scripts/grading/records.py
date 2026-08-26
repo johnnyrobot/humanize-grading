@@ -23,6 +23,10 @@ from pathlib import Path
 SCHEMA = "grade-record/1"
 CANNOT_ASSESS = "cannot assess"
 MIN_QUOTE_WORDS = 4
+MAX_RECORD_BYTES = 1_048_576
+MAX_CRITERIA = 50
+MAX_JUSTIFICATIONS_PER_CRITERION = 16
+MAX_QUOTE_CHARACTERS = 2_000
 
 _REQUIRED = (
     "schema",
@@ -78,29 +82,33 @@ def locate(
     prefix = r"\b" if words[0][:1].isalnum() else ""
     suffix = r"\b" if words[-1][-1:].isalnum() else ""
     pattern = re.compile(prefix + body + suffix)
-    matches = [
-        match
-        for match in pattern.finditer(source)
-        if not _PARAGRAPH_BREAK.search(match.group(0))
-    ]
-    if not matches:
-        raise RecordError(f"Quote is not in the source: {quote!r}")
-    if len(matches) > 1 and occurrence is None:
-        raise RecordError(
-            f"Quote appears {len(matches)} times. Lengthen it, or set "
-            f'"occurrence": {quote!r}'
-        )
     if occurrence is not None and occurrence < 1:
         raise RecordError(
             f"Occurrence must be 1 or greater, not {occurrence}: {quote!r}"
         )
-    index = (occurrence or 1) - 1
-    if index >= len(matches):
+    count = 0
+    selected = None
+    for match in pattern.finditer(source):
+        if _PARAGRAPH_BREAK.search(match.group(0)):
+            continue
+        count += 1
+        if occurrence is None and count == 2:
+            raise RecordError(
+                f"Quote appears 2 times or more. Lengthen it, or set "
+                f'"occurrence": {quote!r}'
+            )
+        if count == (occurrence or 1):
+            selected = match
+            if occurrence is not None:
+                break
+    if selected is None and count == 0:
+        raise RecordError(f"Quote is not in the source: {quote!r}")
+    if selected is None:
         raise RecordError(
-            f"Quote appears {len(matches)} times, so occurrence "
+            f"Quote appears {count} times, so occurrence "
             f"{occurrence} does not exist: {quote!r}"
         )
-    match = matches[index]
+    match = selected
     line = source.count("\n", 0, match.start()) + 1
     return match.start(), line, match.end() - match.start()
 
@@ -133,10 +141,21 @@ class Justification:
     def from_dict(cls, payload: dict) -> "Justification":
         if "quote" not in payload:
             raise RecordError("Every justification needs a quote.")
+        if not isinstance(payload["quote"], str):
+            raise RecordError("A justification quote must be text.")
+        if len(payload["quote"]) > MAX_QUOTE_CHARACTERS:
+            raise RecordError("A justification quote is too large.")
+        occurrence = payload.get("occurrence")
+        if occurrence is not None and (
+            not isinstance(occurrence, int)
+            or isinstance(occurrence, bool)
+            or not 1 <= occurrence <= 100
+        ):
+            raise RecordError("A justification occurrence must be from 1 to 100.")
         return cls(
             quote=str(payload["quote"]),
             note=str(payload.get("note", "")),
-            occurrence=payload.get("occurrence"),
+            occurrence=occurrence,
             offset=payload.get("offset"),
             line=payload.get("line"),
             length=payload.get("length"),
@@ -176,16 +195,23 @@ class CriterionScore:
             points_possible = int(payload["points_possible"])
         except (TypeError, ValueError) as error:
             raise RecordError(f"Cannot convert criterion fields to int: {error}") from error
+        if not isinstance(payload["assessable"], bool):
+            raise RecordError("Criterion assessable must be a JSON boolean.")
+        justifications = payload.get("justifications", [])
+        if not isinstance(justifications, list):
+            raise RecordError("Criterion justifications must be a list.")
+        if len(justifications) > MAX_JUSTIFICATIONS_PER_CRITERION:
+            raise RecordError("A criterion has too many justifications.")
         return cls(
             number=number,
             name=str(payload["name"]),
             points_possible=points_possible,
             score=payload.get("score"),
             level=str(payload["level"]),
-            assessable=bool(payload["assessable"]),
+            assessable=payload["assessable"],
             justifications=tuple(
                 Justification.from_dict(item)
-                for item in payload.get("justifications", [])
+                for item in justifications
             ),
         )
 
@@ -247,6 +273,11 @@ class GradeRecord:
             total_possible = int(payload["total_possible"])
         except (TypeError, ValueError) as error:
             raise RecordError(f"Cannot convert total fields to int: {error}") from error
+        criteria = payload["criteria"]
+        if not isinstance(criteria, list):
+            raise RecordError("The grade record criteria must be a list.")
+        if len(criteria) > MAX_CRITERIA:
+            raise RecordError("The grade record has too many criteria.")
         return cls(
             schema=str(payload["schema"]),
             batch=str(payload["batch"]),
@@ -255,9 +286,7 @@ class GradeRecord:
             course=str(payload["course"]),
             rubric=str(payload["rubric"]),
             profile=str(payload["profile"]),
-            criteria=tuple(
-                CriterionScore.from_dict(item) for item in payload["criteria"]
-            ),
+            criteria=tuple(CriterionScore.from_dict(item) for item in criteria),
             total=total,
             total_possible=total_possible,
             letter=str(payload["letter"]),
@@ -267,6 +296,13 @@ class GradeRecord:
 
     @classmethod
     def load(cls, path: Path) -> "GradeRecord":
+        try:
+            if path.stat().st_size > MAX_RECORD_BYTES:
+                raise RecordError(
+                    f"{path.name} is too large. Grade records are limited to 1 MiB."
+                )
+        except OSError as error:
+            raise RecordError(f"Cannot read {path}: {error}") from error
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as error:

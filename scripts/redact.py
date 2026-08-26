@@ -5,12 +5,13 @@ Usage:
     python3 scripts/redact.py SOURCE --roster roster.csv --batch essay-3
 
 Exit codes: 0 clean, 2 unmatched roster entry, 3 unreviewed candidates,
-4 unreadable file, 5 destination directory not empty. A non-zero exit must
+4 unreadable or oversized input, 5 destination not empty, 6 unsafe path,
+7 participant collision. A non-zero exit must
 stop the cloud path. There is no override for 2, 3, or 4 -- if this prints
 anything other than a clean exit for one of those, fix the input and run it
 again rather than forcing the cloud path open. Exit 5 exists only to stop a
-stale prior run's files from silently mixing into a new one; pass --force
-to overwrite the prior run's token-named outputs (nothing else in the
+stale files from an earlier redaction from silently mixing into a new one; pass --force
+to overwrite the earlier redaction's token-named outputs (nothing else in the
 directory is touched).
 
 The review file (candidate names, self-identifying passages, bare-name
@@ -27,15 +28,26 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from redaction.pipeline import EXIT_DESTINATION_NOT_EMPTY, EXIT_OK, run  # noqa: E402
+from redaction.pipeline import (  # noqa: E402
+    EXIT_DESTINATION_NOT_EMPTY,
+    EXIT_OK,
+    EXIT_UNSAFE_PATH,
+    run,
+)
 from redaction.roster import load_roster  # noqa: E402
+from path_safety import require_component  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source", type=Path, help="Folder of raw submissions")
     parser.add_argument("--roster", type=Path, required=True, help="Roster CSV")
-    parser.add_argument("--batch", required=True, help="Batch name, such as essay-3")
+    parser.add_argument(
+        "--batch",
+        required=True,
+        type=lambda value: require_component(value, "The grading batch"),
+        help="Batch name, such as essay-3",
+    )
     parser.add_argument("--out", type=Path, default=Path("redacted"))
     parser.add_argument("--map", type=Path, default=None)
     parser.add_argument(
@@ -74,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
     )
 
-    if result.exit_code == EXIT_DESTINATION_NOT_EMPTY:
+    if result.exit_code in {EXIT_DESTINATION_NOT_EMPTY, EXIT_UNSAFE_PATH}:
         print(result.message, file=sys.stderr)
         print("\nRedaction did not complete cleanly. Do not send this to a "
               "cloud model.", file=sys.stderr)

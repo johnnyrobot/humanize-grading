@@ -1,8 +1,10 @@
-"""Instructions can be violated. This is the part that cannot be."""
+"""The optional hook blocks common accidental reads of private grading data."""
 
 import json
+import re
 import subprocess
 import sys
+from pathlib import Path
 
 HOOK = "hooks/block_raw_reads.py"
 
@@ -127,8 +129,6 @@ def test_the_denial_message_says_what_to_read_instead():
 
 
 def test_the_hook_config_is_valid_and_opt_in():
-    from pathlib import Path
-
     config = json.loads(
         Path("hooks/block-raw-reads.json").read_text(encoding="utf-8")
     )
@@ -137,3 +137,13 @@ def test_the_hook_config_is_valid_and_opt_in():
     assert "Bash" in entries[0]["matcher"]
     assert "Read" in entries[0]["matcher"]
     assert not Path("hooks/hooks.json").exists()
+
+
+def test_the_cloud_workflow_keeps_review_data_out_of_model_context():
+    skill = Path("SKILL.md").read_text(encoding="utf-8")
+
+    assert "Read the review file it names" not in skill
+    assert re.search(
+        r"inspect the review file locally,\s+outside\s+this\s+conversation", skill
+    )
+    assert "difference between a rule and a guarantee" not in skill

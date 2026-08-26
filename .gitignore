@@ -5,6 +5,11 @@ submissions/
 redacted/
 final/
 *.roster.csv
+roster.csv
+calibration-inputs*.json
+/graded/
+.pytest_cache/
+.coverage
 
 .DS_Store
 __pycache__/

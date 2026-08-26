@@ -28,6 +28,35 @@ def test_grading_batch_reports_a_redacted_submission_as_pending(tmp_path):
     assert report.blocking_findings == ()
 
 
+def test_uppercase_submission_extensions_remain_in_the_grading_batch(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    (redacted / "STUDENT_01.DOCX").write_bytes(b"synthetic")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [(item.token, item.progress) for item in report.entries] == [
+        ("STUDENT_01", Progress.PENDING)
+    ]
+
+
+def test_symlinked_grading_artifacts_are_blocking_not_authoritative(tmp_path):
+    redacted, drafts = _batch(tmp_path)
+    outside = tmp_path / "raw.md"
+    outside.write_text("private", encoding="utf-8")
+    (redacted / "STUDENT_01.md").symlink_to(outside)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).status()
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "symlink-artifact"
+    ]
+    assert report.entries[0].source is None
+
+
 def test_grading_batch_reports_a_complete_pair_as_drafted(tmp_path):
     redacted, drafts = _batch(tmp_path)
     (redacted / "STUDENT_01.md").write_text("essay", encoding="utf-8")
@@ -228,20 +257,42 @@ def test_the_status_subcommand_prints_duplicate_submission_findings(tmp_path):
 
 
 def test_the_density_subcommand_reports_a_count(phil210):
+    redacted = phil210 / "ungraded"
     result = _run(
         "density",
-        str(phil210 / "ungraded/paper_7_ungraded_ai_healthcare_slop.md"),
+        str(redacted / "paper_7_ungraded_ai_healthcare_slop.md"),
+        "--redacted",
+        str(redacted),
     )
     assert result.returncode == 0
     assert "per 1000" in result.stdout
 
 
+def test_density_refuses_a_file_outside_the_redacted_directory(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    raw = tmp_path / "submissions" / "paper.md"
+    raw.parent.mkdir()
+    raw.write_text("private pivotal text", encoding="utf-8")
+
+    result = _run(
+        "density", str(raw), "--redacted", str(redacted), "--json"
+    )
+
+    assert result.returncode == 13
+    assert "inside the configured redacted directory" in result.stderr
+    assert "private" not in result.stdout
+
+
 def test_the_density_subcommand_can_emit_json(phil210):
     import json
 
+    redacted = phil210 / "ungraded"
     result = _run(
         "density",
-        str(phil210 / "ungraded/paper_7_ungraded_ai_healthcare_slop.md"),
+        str(redacted / "paper_7_ungraded_ai_healthcare_slop.md"),
+        "--redacted",
+        str(redacted),
         "--json",
     )
     payload = json.loads(result.stdout)

@@ -17,6 +17,7 @@ saying only that something changed.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +106,56 @@ class Rubric:
     def total_points(self) -> int:
         return sum(c.points for c in self.criteria)
 
+    @property
+    def digest(self) -> str:
+        """Bind every scoring and feedback rule that calibration depends on."""
+        payload = {
+            "criteria": [
+                {
+                    "number": item.number,
+                    "name": item.name,
+                    "points": item.points,
+                    "levels": [
+                        {
+                            "name": level.name,
+                            "band": level.band,
+                            "descriptor": level.descriptor,
+                        }
+                        for level in item.levels
+                    ],
+                }
+                for item in self.criteria
+            ],
+            "bands": [
+                {"low": band.low, "high": band.high, "label": band.label}
+                for band in self.bands
+            ],
+            "protocol": {
+                "sections": list(self.protocol.sections),
+                "sign_offs": list(self.protocol.sign_offs),
+                "requires_inline_annotations": self.protocol.requires_inline_annotations,
+            },
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+    @property
+    def context_digest(self) -> str:
+        """Bind the scale and feedback protocol outside named criteria."""
+        payload = {
+            "bands": [
+                {"low": band.low, "high": band.high, "label": band.label}
+                for band in self.bands
+            ],
+            "protocol": {
+                "sections": list(self.protocol.sections),
+                "sign_offs": list(self.protocol.sign_offs),
+                "requires_inline_annotations": self.protocol.requires_inline_annotations,
+            },
+        }
+        canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
     def criterion(self, number: int) -> Criterion:
         for item in self.criteria:
             if item.number == number:
@@ -129,7 +180,10 @@ class Rubric:
 
 def _digest(name: str, points: int, levels: tuple[Level, ...]) -> str:
     parts = [_norm(name), str(points)]
-    parts += [f"{_norm(level.name)}={_norm(level.descriptor)}" for level in levels]
+    parts += [
+        f"{_norm(level.name)}[{_norm(level.band)}]={_norm(level.descriptor)}"
+        for level in levels
+    ]
     payload = "\x1f".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
 

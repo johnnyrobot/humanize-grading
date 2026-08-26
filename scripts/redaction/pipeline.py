@@ -2,28 +2,35 @@
 
 Silent partial success is the failure mode that matters here. Exit codes:
 0 clean, 2 an unmatched roster entry, 3 unreviewed layer-4 candidates, 4 an
-unreadable file, 5 the destination directory is not empty. There is no
-override for 2, 3, or 4 -- fix the input and run again. Exit 5 exists only
-to stop a stale prior run's files from silently mixing into a new one:
+unreadable or oversized input, 5 the destination directory is not empty, 6 an
+unsafe path, and 7 a participant collision. There is no override for 2, 3, 4,
+6, or 7 -- fix the input and run again. Exit 5 exists only
+to stop stale files from an earlier redaction from silently mixing into a new one:
 without it, a re-run after fixing a warning would leave last time's
 STUDENT_02.md sitting next to this time's STUDENT_01.md, indistinguishable
 from current output, and an instructor would grade a student who did not
 submit this batch. ``force=True`` (the CLI's --force) permits writing into
-a non-empty destination, and deletes only the prior run's token-named
+a non-empty destination, and deletes only the earlier redaction's token-named
 outputs first -- never anything else someone put there on purpose.
 """
 
 from __future__ import annotations
 
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+try:
+    from scripts.path_safety import is_within, paths_overlap, require_component
+except ModuleNotFoundError:  # direct scripts/redact.py execution
+    from path_safety import is_within, paths_overlap, require_component
+
 from .candidates import Candidate, find_candidates
 from .documents import extract, output_name
 from .patterns import redact_structured
+from .private_files import write_private_text
+from .manifest import RedactionManifest
 from .roster import BareHit, RosterEntry, full_name_variants, redact_roster
 from .selfid import SelfIdWarning, find_self_identifying
 from .tokens import TokenMap
@@ -33,15 +40,19 @@ EXIT_ROSTER = 2
 EXIT_CANDIDATES = 3
 EXIT_UNREADABLE = 4
 EXIT_DESTINATION_NOT_EMPTY = 5
+EXIT_UNSAFE_PATH = 6
+EXIT_COLLISION = 7
 
 UNKNOWN_PREFIX = "UNKNOWN"
 
 # The only two prefixes run() ever gives a redacted file's token (see the
 # `entry.token` assignment below): a matched roster student, or an
 # unmatched submission. Only a file whose name has this shape could be a
-# token-named output from a prior run, so only these are ever candidates
+# token-named output from an earlier redaction, so only these are ever candidates
 # for deletion under --force.
 _TOKEN_OUTPUT_PATTERN = re.compile(rf"^(?:STUDENT|{UNKNOWN_PREFIX})_\d+\..+$")
+MAX_BATCH_FILES = 500
+MAX_BATCH_BYTES = 500 * 1024 * 1024
 
 
 def _named_students(
@@ -60,7 +71,7 @@ def _named_students(
     for entry in roster:
         offset = None
         for form in full_name_variants(entry.name):
-            match = re.search(rf"\b{re.escape(form)}\b", text)
+            match = re.search(rf"\b{re.escape(form)}\b", text, re.IGNORECASE)
             if match and (offset is None or match.start() < offset):
                 offset = match.start()
         if offset is not None:
@@ -125,10 +136,10 @@ def run(
     the instructor must see, not a failure.
 
     A non-empty destination is refused unless ``force`` is True, so a
-    second run can never leave a prior run's files sitting alongside this
-    run's -- current and stale output would otherwise be indistinguishable,
+    second redaction can never leave earlier files sitting alongside the
+    current files -- current and stale output would otherwise be indistinguishable,
     and the model would grade a student who did not submit this batch. With
-    ``force``, only files shaped like a prior run's token-named outputs
+    ``force``, only files shaped like an earlier redaction's token-named outputs
     (STUDENT_NN.* or UNKNOWN_NN.*) are deleted before writing; anything else
     already in destination is left alone.
 
@@ -144,6 +155,57 @@ def run(
     if review_path is None:
         review_path = map_path.parent / "reviews" / f"{batch}.json"
 
+    try:
+        require_component(batch, "The grading batch")
+    except ValueError as error:
+        return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
+    if source.is_symlink() or destination.is_symlink():
+        return BatchResult(
+            exit_code=EXIT_UNSAFE_PATH,
+            message="Submission and redacted-output roots must not be symlinks.",
+        )
+    if paths_overlap(source, destination):
+        return BatchResult(
+            exit_code=EXIT_UNSAFE_PATH,
+            message="Submission and redacted-output directories must be separate.",
+        )
+    if map_path == review_path or map_path.resolve() == review_path.resolve():
+        return BatchResult(
+            exit_code=EXIT_UNSAFE_PATH,
+            message="The token map and review file must use separate paths.",
+        )
+    for label, private_path in (("token map", map_path), ("review file", review_path)):
+        if private_path.is_symlink() or any(
+            is_within(private_path, root, follow_symlinks=follow)
+            for root in (source, destination)
+            for follow in (False, True)
+        ):
+            return BatchResult(
+                exit_code=EXIT_UNSAFE_PATH,
+                message=(
+                    f"The {label} must be a regular local file outside the "
+                    "submission and redacted-output directories."
+                ),
+            )
+
+    source_paths = sorted(
+        p for p in source.rglob("*") if p.is_file() or p.is_symlink()
+    )
+    if len(source_paths) > MAX_BATCH_FILES:
+        return BatchResult(
+            exit_code=EXIT_UNREADABLE,
+            message=f"A grading batch may contain at most {MAX_BATCH_FILES} files.",
+        )
+    try:
+        batch_bytes = sum(path.lstat().st_size for path in source_paths)
+    except OSError as error:
+        return BatchResult(exit_code=EXIT_UNREADABLE, message=str(error))
+    if batch_bytes > MAX_BATCH_BYTES:
+        return BatchResult(
+            exit_code=EXIT_UNREADABLE,
+            message="The grading batch is too large. The input limit is 500 MiB.",
+        )
+
     if destination.exists() and any(destination.iterdir()):
         if not force:
             return BatchResult(
@@ -151,7 +213,7 @@ def run(
                 message=(
                     f"{destination} is not empty. Empty it, choose a "
                     "different destination, or pass --force to overwrite "
-                    "the prior run's token-named outputs."
+                    "the earlier redaction's token-named outputs."
                 ),
             )
         for entry in destination.iterdir():
@@ -164,12 +226,20 @@ def run(
     result = BatchResult()
     matched_names: set[str] = set()
     unknown_count = 0
+    claimed_outputs: dict[Path, Path] = {}
 
-    for path in sorted(p for p in source.rglob("*") if p.is_file()):
+    for path in source_paths:
         if path.name.startswith("_"):
             continue
 
         entry = FileResult(source=path)
+        if path.is_symlink():
+            entry.error = (
+                f"Could not read {path.name}: symbolic links are not accepted "
+                "as submissions."
+            )
+            result.files.append(entry)
+            continue
         extracted = extract(path)
         if extracted.error:
             entry.error = extracted.error
@@ -211,9 +281,14 @@ def run(
             for token, e in tmap.tokens().items()
             if e.kind == "STUDENT" and e.file == path.name
         }
+        student_tokens = {
+            e.value.casefold(): token
+            for token, e in tmap.tokens().items()
+            if e.kind == "STUDENT"
+        }
         author = named[0][1] if named else None
-        if author is not None and author.name.casefold() in file_student_tokens:
-            entry.token = file_student_tokens[author.name.casefold()]
+        if author is not None and author.name.casefold() in student_tokens:
+            entry.token = student_tokens[author.name.casefold()]
         elif file_student_tokens:
             # Defensive fallback: a roster student's full name is confirmed
             # present in this file (redact_roster matched it), but the
@@ -226,16 +301,29 @@ def run(
             entry.token = f"{UNKNOWN_PREFIX}_{unknown_count:02d}"
 
         output = destination / output_name(entry.token, path.suffix or ".md")
+        if output in claimed_outputs:
+            entry.error = (
+                f"Duplicate output {output.name}: both {claimed_outputs[output].name} "
+                f"and {path.name} resolve to the same grading-batch participant."
+            )
+            result.files.append(entry)
+            continue
+        claimed_outputs[output] = path
         output.write_text(text, encoding="utf-8")
         entry.output = output
         result.files.append(entry)
 
+    RedactionManifest(batch=batch, run_id=tmap.run_id).save(destination)
     tmap.save(map_path)
 
     result.unmatched_roster = [e for e in roster if e.name not in matched_names]
     _write_review(review_path, result)
 
-    if any(f.error for f in result.files):
+    collisions = [f.error for f in result.files if f.error.startswith("Duplicate output")]
+    if collisions:
+        result.exit_code = EXIT_COLLISION
+        result.message = " ".join(collisions)
+    elif any(f.error for f in result.files):
         result.exit_code = EXIT_UNREADABLE
     elif result.unmatched_roster:
         result.exit_code = EXIT_ROSTER
@@ -286,6 +374,4 @@ def _write_review(review_path: Path, result: BatchResult) -> None:
             if len(f.named_students) > 1
         ],
     }
-    review_path.parent.mkdir(parents=True, exist_ok=True)
-    review_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    os.chmod(review_path, 0o600)
+    write_private_text(review_path, json.dumps(payload, indent=2))

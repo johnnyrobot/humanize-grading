@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from scripts.path_safety import require_component
 from scripts.grading.rubric import Rubric
 
 FINGERPRINT_SECTION = "Rubric fingerprint"
@@ -47,6 +48,7 @@ class ProfileError(Exception):
 
 def profile_path(course: str, root: Path = Path(".grading")) -> Path:
     """Return where a course's profile lives."""
+    require_component(course, "The course")
     return root / "profiles" / f"{course}.md"
 
 
@@ -58,6 +60,8 @@ class Profile:
     course: str = ""
     calibrated: str = ""
     rubric_path: str = ""
+    rubric_digest: str = ""
+    rubric_context_digest: str = ""
     samples: int = 0
     holdout: str = ""
     fingerprint: dict[int, str] = field(default_factory=dict)
@@ -81,6 +85,8 @@ class Profile:
                 drifted.append(f"{number}. {self.criterion_names.get(number, '')}".strip())
             elif recorded is None or recorded != criterion.digest:
                 drifted.append(f"{number}. {criterion.name}")
+        if self.rubric_context_digest != rubric.context_digest:
+            drifted.append("grading scale or feedback protocol")
         return drifted
 
 
@@ -138,12 +144,22 @@ def load_profile(path: Path) -> Profile:
     course = meta.get("Course", "")
     if not course:
         raise ProfileError(f"{path.name} has no '**Course**:' line.")
+    rubric_digest = meta.get("Rubric digest", "")
+    if not rubric_digest:
+        raise ProfileError(f"{path.name} has no '**Rubric digest**:' line.")
+    rubric_context_digest = meta.get("Rubric context digest", "")
+    if not rubric_context_digest:
+        raise ProfileError(
+            f"{path.name} has no '**Rubric context digest**:' line."
+        )
 
     return Profile(
         path=path,
         course=course,
         calibrated=meta.get("Calibrated", ""),
         rubric_path=meta.get("Rubric", ""),
+        rubric_digest=rubric_digest,
+        rubric_context_digest=rubric_context_digest,
         samples=int(meta.get("Samples", "0") or 0),
         holdout=meta.get("Holdout", ""),
         fingerprint=fingerprint,

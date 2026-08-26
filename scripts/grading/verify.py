@@ -29,7 +29,10 @@ from scripts.redaction.rehydrate import TOKEN
 ERROR = "error"
 WARNING = "warning"
 
-_ANNOTATION = re.compile(r"\[[^\[\]]{10,}\](?!\()")
+_ANNOTATION_LINE = re.compile(r"(?m)^\s*\[[^\[\]\n]{10,}\]\s*$")
+_FEEDBACK_HEADING = re.compile(
+    r"^\s*(?:#{1,6}\s+(.+?)|\*\*(.+?)\*\*:?\s*)$"
+)
 
 
 @dataclass(frozen=True)
@@ -112,6 +115,19 @@ def _check_criteria(
                     )
                 )
             continue
+
+        allowed_levels = {level.name for level in criterion.levels}
+        if scored.level not in allowed_levels:
+            found.append(
+                Finding(
+                    ERROR,
+                    "level",
+                    f"Criterion {scored.number} uses level {scored.level!r}; "
+                    f"the rubric defines {sorted(allowed_levels)}.",
+                    record.token,
+                    scored.number,
+                )
+            )
 
         if scored.score is None:
             found.append(
@@ -242,9 +258,7 @@ def _check_density(
 ) -> None:
     fresh = scan(source, terms).as_dict()
     reported = record.pattern_density or {}
-    if reported.get("count") != fresh["count"] or reported.get(
-        "by_pattern"
-    ) != fresh["by_pattern"]:
+    if reported != fresh:
         found.append(
             Finding(
                 ERROR,
@@ -267,8 +281,20 @@ def _check_feedback(
     found: list[Finding],
 ) -> None:
     lowered = markdown.lower()
+    lines = markdown.splitlines()
+    headings: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        match = _FEEDBACK_HEADING.match(line)
+        if match:
+            headings.append(
+                ((match.group(1) or match.group(2)).strip().casefold(), index)
+            )
+    previous = -1
     for section in rubric.protocol.sections:
-        if section.lower() not in lowered:
+        positions = [
+            index for label, index in headings if label == section.casefold()
+        ]
+        if not positions:
             found.append(
                 Finding(
                     ERROR,
@@ -278,6 +304,18 @@ def _check_feedback(
                     record.token,
                 )
             )
+            continue
+        position = positions[0]
+        if position <= previous:
+            found.append(
+                Finding(
+                    ERROR,
+                    "section-order",
+                    f"The {section!r} section is out of order.",
+                    record.token,
+                )
+            )
+        previous = position
     if rubric.protocol.sign_offs:
         tail = [line for line in markdown.strip().splitlines() if line.strip()]
         last = tail[-1].strip() if tail else ""
@@ -291,7 +329,10 @@ def _check_feedback(
                     record.token,
                 )
             )
-    if rubric.protocol.requires_inline_annotations and not _ANNOTATION.search(markdown):
+    if (
+        rubric.protocol.requires_inline_annotations
+        and not _ANNOTATION_LINE.search(markdown)
+    ):
         found.append(
             Finding(
                 ERROR,
@@ -315,12 +356,23 @@ def _check_feedback(
             )
 
     for match in TOKEN.finditer(markdown):
-        if match.group(0) not in source:
+        token = match.group(0)
+        if token != record.token:
+            found.append(
+                Finding(
+                    ERROR,
+                    "foreign-token",
+                    f"The feedback uses {token}, but only {record.token} may be "
+                    "rehydrated for this student.",
+                    record.token,
+                )
+            )
+        if token not in source:
             found.append(
                 Finding(
                     ERROR,
                     "stray-token",
-                    f"The feedback uses {match.group(0)}, which is not in the "
+                    f"The feedback uses {token}, which is not in the "
                     "redacted source. Rehydration would attach a real name to it.",
                     record.token,
                 )

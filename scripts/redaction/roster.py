@@ -113,7 +113,7 @@ def bare_name_variants(name: str) -> list[str]:
 
 
 def _replace(text: str, needle: str, token: str) -> tuple[str, int]:
-    return re.subn(rf"\b{re.escape(needle)}\b", token, text)
+    return re.subn(rf"\b{re.escape(needle)}\b", token, text, flags=re.IGNORECASE)
 
 
 def _context(text: str, match: re.Match) -> str:
@@ -142,7 +142,8 @@ def redact_roster(
     for entry in roster:
         full_forms = full_name_variants(entry.name)
         present = any(
-            re.search(rf"\b{re.escape(form)}\b", result.text) for form in full_forms
+            re.search(rf"\b{re.escape(form)}\b", result.text, re.IGNORECASE)
+            for form in full_forms
         )
         full_name_present[entry.name] = present
 
@@ -153,13 +154,15 @@ def redact_roster(
                 if count:
                     result.matched.add(entry.name)
 
-        if entry.email and entry.email in result.text:
+        if entry.email and re.search(re.escape(entry.email), result.text, re.IGNORECASE):
             email_token = tmap.allocate("EMAIL", entry.email, source_file)
-            result.text = result.text.replace(entry.email, email_token)
+            result.text = re.sub(
+                re.escape(entry.email), email_token, result.text, flags=re.IGNORECASE
+            )
             result.matched.add(entry.name)
 
         if entry.student_id and re.search(
-            rf"\b{re.escape(entry.student_id)}\b", result.text
+            rf"\b{re.escape(entry.student_id)}\b", result.text, re.IGNORECASE
         ):
             id_token = tmap.allocate("ID", entry.student_id, source_file)
             result.text, count = _replace(result.text, entry.student_id, id_token)
@@ -179,7 +182,7 @@ def redact_roster(
         form = initial_form(entry.name)
         if form is None:
             continue
-        if re.search(rf"\b{re.escape(form)}\b", result.text):
+        if re.search(rf"\b{re.escape(form)}\b", result.text, re.IGNORECASE):
             form_token = tmap.allocate("STUDENT", form, source_file)
             result.text, _ = _replace(result.text, form, form_token)
 
@@ -191,7 +194,9 @@ def redact_roster(
     for index, name in enumerate(protected):
         sentinel = f"\x00SHIELD{index}\x00"
         shields[sentinel] = name
-        result.text = re.sub(rf"\b{re.escape(name)}\b", sentinel, result.text)
+        result.text = re.sub(
+            rf"\b{re.escape(name)}\b", sentinel, result.text, flags=re.IGNORECASE
+        )
 
     # Pass 2: bare first/last names, only for entries whose full name was
     # present. Each bare token is keyed on the literal bare text, so a
@@ -205,14 +210,16 @@ def redact_roster(
                 continue
             for bare in bare_name_variants(entry.name):
                 pattern = rf"\b{re.escape(bare)}\b"
-                matches = list(re.finditer(pattern, result.text))
+                matches = list(re.finditer(pattern, result.text, re.IGNORECASE))
                 if not matches:
                     continue
                 bare_token = tmap.allocate("STUDENT", bare, source_file)
                 for match in matches:
                     context = _context(result.text, match)
                     result.bare_hits.append(BareHit(bare, bare_token, context))
-                result.text = re.sub(pattern, bare_token, result.text)
+                result.text = re.sub(
+                    pattern, bare_token, result.text, flags=re.IGNORECASE
+                )
 
     for sentinel, name in shields.items():
         result.text = result.text.replace(sentinel, name)
