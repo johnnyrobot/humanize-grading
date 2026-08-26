@@ -14,7 +14,7 @@ from scripts.grading.brief import prepare_brief
 from scripts.grading.drafts import prepare_draft_pair
 from scripts.grading.rubric import load_rubric
 from scripts.grading.records import GradeRecord
-from scripts.grading.workflow import WorkflowContext, next_action
+from scripts.grading.workflow import WorkflowContext, WorkflowError, next_action
 from scripts.redaction.manifest import RedactionManifest
 from tests.grading.test_verify import _write_batch
 from tests.grading.test_publication import FakeRenderer
@@ -83,6 +83,76 @@ def _complete_context(
         patterns=PATTERNS_PATH,
         publication=tmp_path / "final",
     )
+
+
+def _template_context(tmp_path: Path, ready_batch: ReadyBatch) -> WorkflowContext:
+    context = ready_batch.context(tmp_path)
+    prepare_draft_pair(
+        batch=context.batch,
+        course=context.course,
+        source=context.redacted / "STUDENT_01.md",
+        rubric=load_rubric(context.rubric),
+        profile=context.root / "profiles" / "phil210.md",
+        patterns=context.patterns,
+        drafts=context.drafts,
+    )
+    return context
+
+
+def _published_context(
+    tmp_path: Path, phil210: Path, approved_brief
+) -> WorkflowContext:
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(
+        VerificationInputs(
+            course=context.course,
+            rubric=context.rubric,
+            profile=context.root / "profiles" / "phil210.md",
+            patterns=context.patterns,
+            brief=context.root / "assignments" / "essay-2.md",
+        )
+    )
+    assert report.verified_batch is not None
+    published = report.verified_batch.publish(context.publication, FakeRenderer())
+    assert published.changed is True
+    return context
+
+
+def _mismatched_profile_context(
+    tmp_path: Path, ready_batch: ReadyBatch, approved_brief
+) -> WorkflowContext:
+    context = ready_batch.context(tmp_path)
+    profile = context.root / "profiles" / "phil210.md"
+    profile.write_text(
+        profile.read_text(encoding="utf-8").replace(
+            "**Course**: phil210", "**Course**: another-course", 1
+        ),
+        encoding="utf-8",
+    )
+    brief = context.root / "assignments" / "essay-2.md"
+    brief.unlink()
+    approved_brief(
+        brief,
+        batch=context.batch,
+        course=context.course,
+        rubric=context.rubric,
+        profile=profile,
+    )
+    return context
+
+
+def _install_nonregular_receipt(context: WorkflowContext, kind: str) -> Path:
+    receipt = context.drafts / "_verification.json"
+    if kind == "directory":
+        receipt.mkdir()
+    else:
+        private = context.root / "private-receipt"
+        private.mkdir()
+        (private / "identity.txt").write_text("must not be read", encoding="utf-8")
+        receipt.symlink_to(private, target_is_directory=True)
+    return receipt
 
 
 def _private_sentinels(
@@ -220,6 +290,29 @@ def test_rubric_drift_precedes_brief_state(tmp_path, phil210):
     assert action.action == "recalibrate"
 
 
+def test_profile_for_another_course_is_malformed_workflow_state(
+    tmp_path, ready_batch, approved_brief
+):
+    context = _mismatched_profile_context(tmp_path, ready_batch, approved_brief)
+
+    with pytest.raises(WorkflowError, match="another-course.*phil210"):
+        next_action(context)
+
+
+def test_next_cli_profile_course_mismatch_exits_thirteen(
+    tmp_path, ready_batch, approved_brief
+):
+    context = _mismatched_profile_context(tmp_path, ready_batch, approved_brief)
+
+    result = _next_run(context, "--json")
+
+    assert result.returncode == 13
+    assert result.stdout == ""
+    assert "another-course" in result.stderr
+    assert "phil210" in result.stderr
+    assert "prepare-record" not in result.stdout + result.stderr
+
+
 def test_missing_brief_returns_prepare_brief(tmp_path, phil210):
     context = _empty_context(tmp_path, phil210)
     _write_profile(context, phil210)
@@ -332,21 +425,50 @@ def test_inventory_finding_returns_repair_batch(tmp_path, ready_batch):
 
 
 def test_template_pair_returns_complete_draft(tmp_path, ready_batch):
-    context = ready_batch.context(tmp_path)
-    prepare_draft_pair(
-        batch=context.batch,
-        course=context.course,
-        source=context.redacted / "STUDENT_01.md",
-        rubric=load_rubric(context.rubric),
-        profile=context.root / "profiles" / "phil210.md",
-        patterns=context.patterns,
-        drafts=context.drafts,
-    )
+    context = _template_context(tmp_path, ready_batch)
 
     action = next_action(context)
 
     assert action.action == "complete-draft"
     assert action.token == "STUDENT_01"
+
+
+def test_template_pair_with_total_error_returns_repair_verification(
+    tmp_path, ready_batch
+):
+    context = _template_context(tmp_path, ready_batch)
+    record_path = context.drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.total = 1
+    record.save(record_path)
+
+    action = next_action(context)
+
+    assert action.action == "repair-verification"
+    assert {finding.code for finding in action.findings} >= {
+        "template-marker",
+        "nothing-assessed",
+        "total",
+    }
+
+
+def test_next_cli_mixed_template_findings_exit_twelve(tmp_path, ready_batch):
+    context = _template_context(tmp_path, ready_batch)
+    record_path = context.drafts / "STUDENT_01.json"
+    record = GradeRecord.load(record_path)
+    record.total = 1
+    record.save(record_path)
+
+    result = _next_run(context, "--json")
+
+    assert result.returncode == 12
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "repair-verification"
+    assert {finding["code"] for finding in payload["findings"]} >= {
+        "template-marker",
+        "nothing-assessed",
+        "total",
+    }
 
 
 def test_invalid_record_returns_repair_verification(
@@ -428,29 +550,93 @@ def test_stale_receipt_returns_repair_verification(
     assert action.findings[0].code == "malformed-verification-receipt"
 
 
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_nonregular_receipt_precedes_pending_batch_action(
+    tmp_path, ready_batch, kind
+):
+    context = ready_batch.context(tmp_path)
+    _install_nonregular_receipt(context, kind)
+
+    action = next_action(context)
+
+    assert action.action == "repair-verification"
+    assert action.findings[0].code == "malformed-verification-receipt"
+    assert "regular file" in action.findings[0].message
+
+
+@pytest.mark.parametrize("kind", ["directory", "symlink"])
+def test_next_cli_nonregular_receipt_exits_twelve(
+    tmp_path, ready_batch, kind
+):
+    context = ready_batch.context(tmp_path)
+    _install_nonregular_receipt(context, kind)
+
+    result = _next_run(context, "--json")
+
+    assert result.returncode == 12
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "repair-verification"
+    assert payload["findings"][0]["code"] == "malformed-verification-receipt"
+
+
 def test_publication_returns_terminal_review_publication(
     tmp_path, phil210, approved_brief
 ):
-    context = _complete_context(tmp_path, phil210, approved_brief)
-    report = GradingBatch.open(
-        BatchPaths(context.batch, context.redacted, context.drafts)
-    ).verify(
-        VerificationInputs(
-            course=context.course,
-            rubric=context.rubric,
-            profile=context.root / "profiles" / "phil210.md",
-            patterns=context.patterns,
-            brief=context.root / "assignments" / "essay-2.md",
-        )
-    )
-    assert report.verified_batch is not None
-    published = report.verified_batch.publish(context.publication, FakeRenderer())
-    assert published.changed is True
+    context = _published_context(tmp_path, phil210, approved_brief)
 
     action = next_action(context)
 
     assert action.action == "review-publication"
     assert action.commands == ()
+
+
+def test_publication_with_stale_extra_file_is_not_terminal(
+    tmp_path, phil210, approved_brief
+):
+    context = _published_context(tmp_path, phil210, approved_brief)
+    (context.publication / "STALE_STUDENT.md").write_text(
+        "identity-bearing stale output", encoding="utf-8"
+    )
+
+    with pytest.raises(WorkflowError, match="unexpected entries"):
+        next_action(context)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_publication_with_extra_nonregular_entry_is_not_terminal(
+    tmp_path, phil210, approved_brief, kind
+):
+    context = _published_context(tmp_path, phil210, approved_brief)
+    extra = context.publication / "STALE_ENTRY"
+    if kind == "symlink":
+        private = tmp_path / "private-extra-publication"
+        private.write_text("must not be read", encoding="utf-8")
+        private.chmod(0)
+        extra.symlink_to(private)
+    else:
+        extra.mkdir()
+
+    with pytest.raises(WorkflowError, match="unexpected entries"):
+        next_action(context)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory"])
+def test_publication_expected_member_must_be_a_regular_unlinked_file(
+    tmp_path, phil210, approved_brief, kind
+):
+    context = _published_context(tmp_path, phil210, approved_brief)
+    output = context.publication / "STUDENT_01.md"
+    output.unlink()
+    if kind == "symlink":
+        private = tmp_path / "private-publication"
+        private.write_text("must not be read", encoding="utf-8")
+        private.chmod(0)
+        output.symlink_to(private)
+    else:
+        output.mkdir()
+
+    with pytest.raises(WorkflowError, match="regular file"):
+        next_action(context)
 
 
 def test_redaction_action_renders_private_paths_without_reading_them(

@@ -32,6 +32,7 @@ from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
 from scripts.path_safety import read_bytes_limited, read_text_limited
 
 NEXT_SCHEMA = "grading-next-action/1"
+_TEMPLATE_INCOMPLETE_CODES = {"template-marker", "nothing-assessed"}
 
 
 class WorkflowError(ValueError):
@@ -120,7 +121,20 @@ def _publication_is_current(
         return False
     if context.publication.is_symlink() or not context.publication.is_dir():
         raise WorkflowError("The publication path must be a regular directory.")
+    expected = {
+        entry.draft.name for entry in status.entries if entry.draft is not None
+    }
     marker = context.publication / PUBLICATION_NAME
+    try:
+        actual = {path.name for path in context.publication.iterdir()}
+    except OSError as error:
+        raise WorkflowError(f"Cannot inspect publication membership: {error}") from error
+    if actual != expected | {PUBLICATION_NAME}:
+        raise WorkflowError(
+            "The publication has missing, renamed, or unexpected entries."
+        )
+    if marker.is_symlink() or not marker.is_file():
+        raise WorkflowError("The publication marker must be one regular file.")
     try:
         payload = json.loads(
             read_text_limited(marker, "The publication marker", 1_048_576)
@@ -136,9 +150,6 @@ def _publication_is_current(
     ).hexdigest()
     if payload.get("receipt_sha256") != receipt_digest:
         raise WorkflowError("The publication was created from a stale receipt.")
-    expected = {
-        entry.draft.name for entry in status.entries if entry.draft is not None
-    }
     outputs = payload.get("outputs")
     if not isinstance(outputs, list):
         raise WorkflowError("The publication marker has no output list.")
@@ -180,6 +191,11 @@ def next_action(context: WorkflowContext) -> NextAction:
             stage="calibration",
             action="calibrate",
             message=f"Calibrate a profile for {context.course} before grading.",
+        )
+    if profile.course != context.course:
+        raise WorkflowError(
+            f"The calibration profile belongs to {profile.course!r}, "
+            f"not {context.course!r}."
         )
     rubric = load_rubric(context.rubric)
     drifted = profile.drift(rubric)
@@ -327,6 +343,23 @@ def next_action(context: WorkflowContext) -> NextAction:
             message="Repair the redaction result before grading.",
             findings=(finding,),
         )
+    receipt = context.drafts / RECEIPT_NAME
+    if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
+        finding = BlockingFinding(
+            "malformed-verification-receipt",
+            (
+                "The verification receipt must be one regular file without a "
+                "symbolic link. Remove it, then run verification again."
+            ),
+            "",
+        )
+        return _action(
+            context,
+            stage="verification",
+            action="repair-verification",
+            message="Remove the unsafe verification receipt and verify again.",
+            findings=(finding,),
+        )
     status = GradingBatch.open(
         BatchPaths(
             batch=context.batch,
@@ -368,7 +401,6 @@ def next_action(context: WorkflowContext) -> NextAction:
             patterns=context.patterns,
             brief=current_brief,
         )
-        receipt = context.drafts / RECEIPT_NAME
         if receipt.is_file():
             resumed = VerifiedBatch.resume(
                 BatchPaths(context.batch, context.redacted, context.drafts), inputs
@@ -444,8 +476,8 @@ def next_action(context: WorkflowContext) -> NextAction:
             inputs,
             persist=False,
         )
-        if any(
-            finding.code in {"template-marker", "nothing-assessed"}
+        if verification.blocking_findings and all(
+            finding.code in _TEMPLATE_INCOMPLETE_CODES
             for finding in verification.blocking_findings
         ):
             token = next(
@@ -453,7 +485,7 @@ def next_action(context: WorkflowContext) -> NextAction:
                     finding.token
                     for finding in verification.blocking_findings
                     if finding.token
-                    and finding.code in {"template-marker", "nothing-assessed"}
+                    and finding.code in _TEMPLATE_INCOMPLETE_CODES
                 ),
                 "",
             )
