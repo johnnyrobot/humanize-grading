@@ -32,6 +32,7 @@ from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
 from scripts.redaction.manifest import RedactionManifest
 from scripts.path_safety import (
     has_symlink_component,
+    normalized,
     read_bytes_limited,
     read_text_limited,
     require_component,
@@ -281,6 +282,12 @@ class VerifiedBatch:
                     )
                     for finding in status.blocking_findings
                 ),
+            )
+        context_findings = _receipt_context_findings(receipt, paths, inputs)
+        if context_findings:
+            return VerifiedBatchResume(
+                verified_batch=None,
+                findings=context_findings,
             )
         semantic = GradingBatch.open(paths).verify(inputs, persist=False)
         if semantic.blocking_findings:
@@ -1363,6 +1370,51 @@ def _receipt_digest(receipt: Path) -> str:
             receipt, "The verification receipt", 10 * 1024 * 1024
         )
     ).hexdigest()
+
+
+def _receipt_context_findings(
+    receipt: Path, paths: BatchPaths, inputs: VerificationInputs
+) -> tuple[BlockingFinding, ...]:
+    """Require explicit publication paths to name the receipt-bound files."""
+    decoded = _decode_receipt(receipt)
+    artifacts = _validated_receipt_artifacts(decoded, paths)
+    expected = {
+        "assignment-brief": inputs.brief,
+        "rubric": inputs.rubric,
+        "calibration-profile": inputs.profile,
+        "pattern-reference": inputs.patterns,
+        "redaction-manifest": paths.redacted / REDACTION_MANIFEST_NAME,
+    }
+    labels = {
+        "assignment-brief": "assignment brief",
+        "rubric": "rubric",
+        "calibration-profile": "calibration profile",
+        "pattern-reference": "pattern reference",
+        "redaction-manifest": "redaction manifest",
+    }
+    findings: list[BlockingFinding] = []
+    for artifact in artifacts:
+        role = artifact["role"]
+        if role not in expected:
+            continue
+        locator = Path(artifact["path"])
+        bound = locator if locator.is_absolute() else receipt.parent / locator
+        if normalized(bound, follow_symlinks=True) == normalized(
+            expected[role], follow_symlinks=True
+        ):
+            continue
+        findings.append(
+            BlockingFinding(
+                code="verification-context-mismatch",
+                message=(
+                    f"The explicit {labels[role]} path does not match the file "
+                    "bound by the verification receipt. Run verification again "
+                    "before publication."
+                ),
+                token="",
+            )
+        )
+    return tuple(findings)
 
 
 def _context_from_receipt(

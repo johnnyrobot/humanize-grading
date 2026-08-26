@@ -281,9 +281,10 @@ redaction manifest, and pattern reference that passed. Any later edit makes the
 receipt stale and requires verification again. The `--no-write` check writes
 neither offsets nor a receipt.
 
-Exit 12 means the assignment brief or at least one draft failed. Approve a
-missing, unapproved, or stale brief, or fix the draft, then run verification
-again. Do not rehydrate a batch that failed verification.
+Exit 13 means the assignment brief is missing, still a draft, malformed, or
+stale. Exit 12 means at least one generated draft failed verification. Approve
+or correct the brief, or fix the generated draft, then run verification again.
+Do not rehydrate a batch that failed verification.
 
 ### 7. Consistency
 

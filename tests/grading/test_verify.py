@@ -949,6 +949,34 @@ def test_edit_to_each_bound_artifact_role_invalidates_receipt(
     }
 
 
+def test_verification_receipt_preserves_crlf_brief_byte_binding(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    brief = root / "assignments" / "essay-2.md"
+    brief.write_bytes(brief.read_bytes().replace(b"\n", b"\r\n"))
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    report = batch.verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=brief,
+        )
+    )
+    assert report.verified_batch is not None
+
+    exact_bytes = brief.read_bytes()
+    brief.write_bytes(exact_bytes.replace(b"\r\n", b"\n", 1))
+
+    assert "stale-verification-receipt" in {
+        finding.code for finding in batch.status().blocking_findings
+    }
+
+
 def test_reverification_replaces_a_stale_receipt(tmp_path, phil210, approved_brief):
     redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(

@@ -386,6 +386,87 @@ def test_resume_reruns_semantic_verification_instead_of_trusting_forged_hashes(
     assert any(finding.code == "section-missing" for finding in resumed.findings)
 
 
+def test_resume_rejects_a_separately_approved_brief_not_bound_by_the_receipt(
+    tmp_path, phil210, approved_brief, monkeypatch
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    paths = BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    original = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
+    )
+    GradingBatch.open(paths).verify(original)
+    replacement_brief = approved_brief(
+        root / "assignments" / "replacement.md",
+        batch="essay-2",
+        course="phil210",
+        rubric=original.rubric,
+        profile=original.profile,
+    )
+    replacement = VerificationInputs(
+        course=original.course,
+        rubric=original.rubric,
+        profile=original.profile,
+        patterns=original.patterns,
+        brief=replacement_brief,
+    )
+
+    def fail_semantic_verification(*args, **kwargs):
+        pytest.fail("Receipt context mismatches must block before semantic verification.")
+
+    monkeypatch.setattr(GradingBatch, "verify", fail_semantic_verification)
+
+    resumed = VerifiedBatch.resume(paths, replacement)
+
+    assert resumed.verified_batch is None
+    assert [finding.code for finding in resumed.findings] == [
+        "verification-context-mismatch"
+    ]
+    assert "assignment brief" in resumed.findings[0].message.lower()
+
+
+@pytest.mark.parametrize("role", ["rubric", "redaction-manifest"])
+def test_resume_rejects_other_evidence_paths_not_bound_by_the_receipt(
+    tmp_path, phil210, approved_brief, monkeypatch, role
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    paths = BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
+    )
+    GradingBatch.open(paths).verify(inputs)
+    receipt = drafts / "_verification.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    artifact = next(item for item in payload["artifacts"] if item["role"] == role)
+    alternate = tmp_path / "alternate" / Path(artifact["path"]).name
+    alternate.parent.mkdir()
+    original = Path(artifact["path"])
+    original = original if original.is_absolute() else receipt.parent / original
+    alternate.write_bytes(original.read_bytes())
+    artifact["path"] = str(alternate)
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    def fail_semantic_verification(*args, **kwargs):
+        pytest.fail("Receipt context mismatches must block before semantic verification.")
+
+    monkeypatch.setattr(GradingBatch, "verify", fail_semantic_verification)
+
+    resumed = VerifiedBatch.resume(paths, inputs)
+
+    assert resumed.verified_batch is None
+    assert [finding.code for finding in resumed.findings] == [
+        "verification-context-mismatch"
+    ]
+    assert role.replace("-", " ") in resumed.findings[0].message.lower()
+
+
 def test_verified_batch_publishes_complete_first_destination(
     tmp_path, phil210, approved_brief
 ):

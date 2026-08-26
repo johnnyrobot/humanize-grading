@@ -124,6 +124,104 @@ def test_approved_brief_binds_body_rubric_and_profile(tmp_path, phil210, profile
     ) == approved
 
 
+@pytest.mark.parametrize("evidence", ["rubric", "profile"])
+def test_approval_and_check_bind_evidence_at_the_five_mebibyte_limit(
+    tmp_path, phil210, profile, evidence
+):
+    path = brief_path(tmp_path, "essay-3")
+    large = tmp_path / f"large-{evidence}.md"
+    large.write_bytes(b"x" * (5 * 1024 * 1024))
+    rubric = large if evidence == "rubric" else phil210 / "grading_rubric.md"
+    bound_profile = large if evidence == "profile" else profile
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    _answer(path)
+
+    approved = approve_brief(
+        path,
+        batch="essay-3",
+        course="phil210",
+        rubric=rubric,
+        profile=bound_profile,
+        approval="Approve assignment brief for essay-3",
+    )
+
+    assert check_brief(
+        path,
+        batch="essay-3",
+        course="phil210",
+        rubric=rubric,
+        profile=bound_profile,
+    ) == approved
+
+
+@pytest.mark.parametrize("evidence", ["rubric", "profile"])
+def test_approval_refuses_bound_evidence_above_five_mebibytes(
+    tmp_path, phil210, profile, evidence
+):
+    path = brief_path(tmp_path, "essay-3")
+    oversized = tmp_path / f"oversized-{evidence}.md"
+    oversized.write_bytes(b"x" * ((5 * 1024 * 1024) + 1))
+    rubric = oversized if evidence == "rubric" else phil210 / "grading_rubric.md"
+    bound_profile = oversized if evidence == "profile" else profile
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    _answer(path)
+
+    with pytest.raises(BriefError, match="5242880 bytes"):
+        approve_brief(
+            path,
+            batch="essay-3",
+            course="phil210",
+            rubric=rubric,
+            profile=bound_profile,
+            approval="Approve assignment brief for essay-3",
+        )
+
+
+def test_crlf_brief_can_be_approved_and_checked_with_exact_source_binding(
+    tmp_path, phil210, profile
+):
+    path = brief_path(tmp_path, "essay-3")
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    answered = path.read_text(encoding="utf-8").replace(
+        ANSWER_REQUIRED, "Instructor answer."
+    )
+    path.write_bytes(answered.replace("\n", "\r\n").encode("utf-8"))
+
+    approved = approve_brief(
+        path,
+        batch="essay-3",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+        approval="Approve assignment brief for essay-3",
+    )
+    approved_bytes = path.read_bytes()
+    assert approved.source_sha256 == hashlib.sha256(approved_bytes).hexdigest()
+
+    crlf_bytes = approved_bytes.replace(b"\n", b"\r\n")
+    path.write_bytes(crlf_bytes)
+    checked = check_brief(
+        path,
+        batch="essay-3",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+    )
+
+    assert checked.body_sha256 == approved.body_sha256
+    assert checked.source_sha256 == hashlib.sha256(crlf_bytes).hexdigest()
+
+    path.write_bytes(crlf_bytes + b"Changed after approval.\r\n")
+    with pytest.raises(BriefError, match="body changed"):
+        check_brief(
+            path,
+            batch="essay-3",
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=profile,
+        )
+
+
 @pytest.mark.parametrize("changed", ["body", "rubric", "profile"])
 def test_changes_invalidate_approval(tmp_path, phil210, profile, changed):
     path = brief_path(tmp_path, "essay-3")

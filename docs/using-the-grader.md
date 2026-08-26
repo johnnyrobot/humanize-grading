@@ -391,10 +391,11 @@ Status now shows the receipt-derived state:
 0 pending, 0 drafted, 0 incomplete, 0 orphaned, 5 verified, 0 rehydrated.
 ```
 
-Exit 12 means the assignment brief or at least one draft failed. A failed batch
-writes neither offsets nor a receipt. Approve a missing, unapproved or stale
-brief, or fix the draft, then run verification again. `--no-write` checks the
-batch but writes neither artifact.
+Exit 13 means the assignment brief is missing, still a draft, malformed, or
+stale. Exit 12 means at least one generated draft failed verification. A failed
+batch writes neither offsets nor a receipt. Approve or correct the brief, or fix
+the generated draft, then run verification again. `--no-write` checks the batch
+but writes neither artifact.
 
 ### 2.8 Look at the outliers
 
@@ -546,8 +547,8 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 | 5 | `rehydrate.py` | Receipt, map, rendering, token mapping or publication failure |
 | 10 | `grade.py` | No profile for this course |
 | 11 | `grade.py` | The rubric drifted since calibration |
-| 12 | `grade.py verify` | The assignment brief or a draft failed verification |
-| 13 | both CLIs | Malformed input; `grade.py brief` also uses it for a missing, unapproved or stale brief |
+| 12 | `grade.py verify` | At least one generated draft failed verification |
+| 13 | both CLIs | Malformed input; `grade.py brief` and `grade.py verify` also use it for a missing, draft, malformed, or stale assignment brief |
 
 ## What this does not do
 

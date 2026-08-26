@@ -19,6 +19,7 @@ from scripts.redaction.private_files import write_private_text
 
 BRIEF_SCHEMA = "grading-assignment-brief/1"
 BRIEF_LIMIT = 1_048_576
+EVIDENCE_LIMIT = 5 * 1024 * 1024
 ANSWER_REQUIRED = "<!-- answer-required -->"
 MODES = {"local", "cloud"}
 REQUIRED_HEADINGS = (
@@ -180,7 +181,7 @@ def _load(path: Path) -> AssignmentBrief:
 def _parse_text(
     path: Path, text: str, *, source_sha256: str = ""
 ) -> AssignmentBrief:
-    metadata, body = _split_front_matter(text)
+    metadata, body = _split_front_matter(_normalize_line_endings(text))
     _validate_metadata(metadata)
     _validate_body(body, metadata["mode"])
     return AssignmentBrief(
@@ -197,6 +198,11 @@ def _parse_text(
         body=body,
         source_sha256=source_sha256 or _digest_bytes(text.encode("utf-8")),
     )
+
+
+def _normalize_line_endings(value: str) -> str:
+    """Use one newline form for structure and body hashes."""
+    return value.replace("\r\n", "\n").replace("\r", "\n")
 
 
 def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
@@ -317,7 +323,7 @@ def _reject_symlink_path(path: Path) -> None:
 
 def _read_bound_file(path: Path, label: str) -> bytes:
     try:
-        return read_bytes_limited(path, label, BRIEF_LIMIT)
+        return read_bytes_limited(path, label, EVIDENCE_LIMIT)
     except (OSError, ValueError) as error:
         raise BriefError(str(error)) from error
 
