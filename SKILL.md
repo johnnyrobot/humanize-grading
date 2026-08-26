@@ -233,7 +233,9 @@ The destination may be briefly absent during that portable directory swap, but
 it is never exposed as a partly populated new grading batch.
 
 Every rehydrated feedback file is a draft pending the instructor's sign-off. Say
-so. The identity-free publication marker is not feedback.
+Do not open or quote the rehydrated files after publication. They contain real
+identities and must stay outside model context. Tell the instructor where the
+local drafts were written so they can review the feedback and numeric grades.
 
 ## Errors
 

@@ -1,6 +1,124 @@
-# Humanizer
+# Humanizer Grading
 
-Humanizer rewrites AI-sounding text so it reads like a person wrote it, without changing what it says. Because it is just Markdown, it works with any agent that supports skills.
+Humanizer Grading is a package of agent skills and local Python tools. It is
+meant to be operated by an AI agent working with an instructor. It is not a
+hosted grading service, a standalone desktop app, or an autonomous grade
+publisher.
+
+The agent follows the Grader skill, runs the repository's safety scripts,
+grades only redacted submissions, and produces verified draft feedback. The
+instructor controls the privacy decision, reviews identity-bearing information
+locally, signs off on every grade, and submits the result to the learning
+management system (LMS).
+
+```text
+Instructor -> AI agent -> local safety scripts -> verified draft -> instructor approval
+```
+
+In cloud mode, the model receives only tokenized submissions, the rubric, the
+calibration profile and identity-free verification evidence. Raw submissions,
+the roster, the private review file, the token map and rehydrated drafts stay
+outside model context.
+
+In this README, **publication** means writing one complete batch of draft
+feedback to a local `final/<batch>/` directory. It does not mean publishing to
+the internet or sending anything to an LMS. After identities are restored, the
+agent must not open the rehydrated files; the instructor reviews them locally.
+
+## Who does what
+
+| AI agent | Instructor |
+| --- | --- |
+| Loads the Grader or Humanizer skill | Chooses local or cloud operation |
+| Runs redaction, grading, verification and consistency commands | Inspects the private review file outside the AI conversation |
+| Reads only tokenized submissions from `redacted/` | Decides whether institutional policy permits cloud processing |
+| Writes draft feedback and structured grade records | Reviews, edits and signs off on every draft |
+| Rehydrates a verified batch through the local script | Submits approved grades or feedback to the LMS |
+
+Nothing in this repository logs into an LMS or sends a grade automatically.
+Every rehydrated feedback file remains a draft until the instructor approves it.
+
+## Grading example
+
+An instructor can ask an agent:
+
+```text
+Grade the submissions in submissions/essay-2 with the PHIL 210 profile and rubric.
+This is a cloud-model run.
+```
+
+The agent then follows this sequence:
+
+1. Confirm the course profile still matches the rubric.
+2. Run local redaction. Names, IDs, emails, filenames and document metadata
+   become stable tokens such as `STUDENT_03`.
+3. Pause while the instructor inspects the private review file locally. The
+   agent must never read that identity-bearing file.
+4. Grade only the pending files under `redacted/`. For each rubric criterion,
+   write a score and a supporting quote into the grade record under
+   `.grading/drafts/<batch>/`.
+5. Verify the whole grading batch. A failed quote, total, letter grade,
+   feedback section, density measurement or file binding blocks publication.
+6. Show the instructor the advisory consistency flags across the batch.
+7. Rehydrate the verified drafts locally. Real names return only after the
+   receipt, redaction manifest, token map and output set all match.
+
+For the repository's five-submission synthetic example, verification reports:
+
+```text
+STUDENT_01: 0 errors, 0 warnings
+STUDENT_02: 0 errors, 0 warnings
+STUDENT_03: 0 errors, 0 warnings
+STUDENT_04: 0 errors, 0 warnings
+STUDENT_05: 0 errors, 0 warnings
+
+All 5 drafts verified. Offsets and verification receipt written.
+```
+
+One rehydrated draft from that synthetic batch contains:
+
+```markdown
+[This sentence carries the paragraph. Lead with it. (Evan Ramirez)]
+
+**The Bottom Line**
+
+Your argument holds. You named the mechanism instead of gesturing at it,
+and the evidence you chose does real work.
+
+**What Worked**
+
+* Paragraph 2 does the analytical work the thesis promises.
+
+**What to Work On**
+
+* Give the strongest counterargument a full paragraph, not a clause.
+* Name the statute or the case rather than describing it.
+
+Come see me in office hours if you want to push this further.
+
+— Dr. Vance
+```
+
+The instructor receives five rehydrated feedback drafts plus an identity-free
+publication marker. Grade-record JSON is not copied into the publication. The
+verified grade records remain under `.grading/drafts/<batch>/`, where the
+instructor can review the numeric scores and their supporting evidence. The
+rehydrated feedback files are local Markdown files under `final/<batch>/`.
+Their filenames stay tokenized, while real names are restored inside the
+feedback. The instructor reads each draft, makes any final edits, approves the
+numeric grade, signs off, and submits it.
+
+**Verified does not mean correct or approved.** Verification proves that the
+draft follows the required structure and that its quotes, arithmetic, rubric,
+profile, density evidence and file bindings agree. The instructor still owns
+the academic judgement and final decision.
+
+## The other skill: Humanizer
+
+Humanizer rewrites AI-sounding text so it reads like a person wrote it, without
+changing what it says. Because its skill instructions are Markdown, it works
+with any agent that supports skills. Its writing-focused before-and-after
+example appears later in this README.
 
 This package builds on [Siqi Chen's Humanizer](https://github.com/blader/humanizer),
 preserves its MIT license, and adds the identity-safe Grader skill.
@@ -173,7 +291,12 @@ Humanizer follows the sample's rhythm, word choice, punctuation, and deliberate 
 
 ## Full example
 
-*Details such as the month and neighborhood need to come from the writer. If they are missing, Humanizer should ask instead of making them up.*
+*For this synthetic example, assume the writer supplied separate notes that are
+not shown here. Those notes contain every factual and personal detail that
+appears only in the After text, including the dates, neighborhoods, hotel,
+tram ride, pastry stop, street scene, castle queue and preferred return season.
+Humanizer does not infer those details from the Before text. Without the notes,
+it would have to ask instead of making them up.*
 
 **Before (AI-sounding):**
 > I recently spent five unforgettable days in Lisbon, and let me tell you — this city completely stole my heart. From the moment I arrived, I knew I was somewhere truly special.
