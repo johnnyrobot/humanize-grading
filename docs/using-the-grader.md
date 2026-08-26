@@ -68,13 +68,34 @@ Subject matter is kept on purpose. Places, statutes, historical figures and the
 dates an essay is about all survive, because removing them would make the work
 impossible to grade.
 
+## Choose local or cloud before calibration or grading
+
+The agent asks before it reads any file:
+
+> Are you running me on a local model or a cloud model?
+
+Fully local model inference and agent execution are recommended. They keep
+prompts and files on an instructor-controlled machine, and redaction still runs
+by default.
+
+- **Local:** Calibration and grading are available. Calibration must use this
+  path because its source samples and roster still carry student identity.
+- **Cloud:** Calibration is not available. Do not gather or open calibration
+  samples or the roster. A cloud grading run may use an existing current
+  identity-free profile, but it must follow mandatory redaction and
+  institutional policy.
+
+If a cloud run has no current profile, stop. Switch to a fully local model and
+agent for calibration before returning to the cloud grading path.
+
 ## Part 1 — Calibrate, once per course
 
 Calibration learns two things your rubric cannot record: where you actually land
 against your own scale, and how you write.
 
-**It is local-only.** It reads work you have already graded, which still carries
-names. Do not run it against a cloud model.
+**It is local-only.** Continue only after the instructor chose the local path
+above. Calibration reads work the instructor already graded, which still
+carries names. Refuse to calibrate after a cloud answer.
 
 ### 1.1 Gather your inputs
 
@@ -150,9 +171,9 @@ applies to the current assignment. It does not replace calibration.
 
 ## Part 2 — Grade a batch
 
-### 2.1 Answer the gate
+### 2.1 Confirm the gate answer for this grading run
 
-The skill asks before it reads anything:
+The skill asks again before each grading run:
 
 > Are you running me on a local model or a cloud model?
 

@@ -18,11 +18,15 @@ profile apply to one grading batch. Verification binds the exact approved file.
 _Avoid_: Prompt, config, approval receipt
 
 **Verified draft**:
-Draft feedback and its grade record after every required check has passed against the redacted submission, rubric, and calibration profile.
+Draft feedback and its grade record after every required check has passed
+against the approved assignment brief, redacted submission, rubric, and
+calibration profile.
 _Avoid_: Approved feedback, final grade
 
 **Verification receipt**:
-An identity-free record that a grading batch passed every required check for the exact submissions, drafts, grade records, rubric, profile, and pattern reference used.
+A schema 2 identity-free record that a grading batch passed every required
+check for the exact approved assignment brief, redacted submissions, drafts,
+grade records, rubric, profile, redaction manifest, and pattern reference used.
 _Avoid_: Status flag, instructor approval
 
 **Rehydrated draft**:
