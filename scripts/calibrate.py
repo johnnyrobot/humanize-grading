@@ -197,7 +197,15 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
-    except (RubricError, SampleError, RecordError, FileNotFoundError) as error:
+    except (
+        RubricError,
+        SampleError,
+        RecordError,
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ) as error:
         print(str(error), file=sys.stderr)
         return EXIT_MALFORMED
 

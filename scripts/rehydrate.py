@@ -62,7 +62,11 @@ class TokenMapRenderer:
             text = source_bytes.decode("utf-8")
             rendered, unmapped = rehydrate_text(text, self._token_map)
             destination.write_text(rendered, encoding="utf-8")
-            digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            digest = hashlib.sha256(
+                read_bytes_limited(
+                    destination, "The rehydrated feedback", 2 * 1024 * 1024
+                )
+            ).hexdigest()
         except (OSError, UnicodeError, ValueError) as error:
             return RenderResult(error=str(error))
         return RenderResult(
@@ -72,7 +76,9 @@ class TokenMapRenderer:
 
     def hash_output(self, path: Path) -> str:
         """Hash rehydrated output without returning its identity-bearing text."""
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(
+            read_bytes_limited(path, "The published feedback", 2 * 1024 * 1024)
+        ).hexdigest()
 
 
 def main(argv: list[str] | None = None) -> int:

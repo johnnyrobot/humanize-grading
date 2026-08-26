@@ -240,7 +240,7 @@ class VerifiedBatch:
 
     @classmethod
     def _create(cls, paths: BatchPaths, receipt: Path) -> "VerifiedBatch":
-        digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        digest = _receipt_digest(receipt)
         manifest = RedactionManifest.load(paths.redacted)
         decoded = _decode_receipt(receipt)
         draft_digests = {
@@ -313,7 +313,7 @@ class VerifiedBatch:
         receipt = self._paths.drafts / RECEIPT_NAME
         status = GradingBatch.open(self._paths).status(require_verified=True)
         current_digest = (
-            hashlib.sha256(receipt.read_bytes()).hexdigest()
+            _receipt_digest(receipt)
             if receipt.is_file()
             else ""
         )
@@ -666,7 +666,7 @@ class GradingBatch:
                 ),
             )
         receipt = self.paths.drafts / RECEIPT_NAME
-        digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
+        digest = _receipt_digest(receipt)
         findings = _validate_existing_publication(
             publication,
             renderer,
@@ -1047,7 +1047,9 @@ class GradingBatch:
                     receipt_digests = dict(initial_digests)
                     for path, temporary, _ in staged:
                         receipt_digests[path.resolve()] = hashlib.sha256(
-                            temporary.read_bytes()
+                            read_bytes_limited(
+                                temporary, "The staged grade record", 1_048_576
+                            )
                         ).hexdigest()
                     installed: list[tuple[Path, Path]] = []
                     try:
@@ -1273,7 +1275,7 @@ def _backup_file(path: Path) -> Path:
     )
     try:
         with os.fdopen(descriptor, "wb") as handle:
-            handle.write(path.read_bytes())
+            handle.write(read_bytes_limited(path, "The grade record", 1_048_576))
             handle.flush()
             os.fsync(handle.fileno())
     except Exception:
@@ -1305,6 +1307,14 @@ def _receipt_locator(path: Path, base: Path) -> str:
         return Path(os.path.relpath(path, base)).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _receipt_digest(receipt: Path) -> str:
+    return hashlib.sha256(
+        read_bytes_limited(
+            receipt, "The verification receipt", 10 * 1024 * 1024
+        )
+    ).hexdigest()
 
 
 def _context_from_receipt(

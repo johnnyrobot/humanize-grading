@@ -73,11 +73,17 @@ def main(argv: list[str] | None = None) -> int:
     map_path = args.map or Path(".grading/maps") / f"{args.batch}.json"
     review_path = args.review or map_path.parent / "reviews" / f"{args.batch}.json"
 
+    try:
+        roster = load_roster(args.roster)
+    except (OSError, UnicodeError, ValueError, KeyError) as error:
+        print(f"Could not read the roster safely: {error}", file=sys.stderr)
+        return 4
+
     result = run(
         source=args.source,
         destination=args.out,
         map_path=map_path,
-        roster=load_roster(args.roster),
+        roster=roster,
         batch=args.batch,
         protected=tuple(args.instructor),
         bare_names=not args.no_bare_names,

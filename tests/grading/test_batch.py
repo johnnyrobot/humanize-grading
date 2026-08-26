@@ -285,6 +285,22 @@ def test_density_refuses_a_file_outside_the_redacted_directory(tmp_path):
     assert "private" not in result.stdout
 
 
+def test_density_reports_oversized_redacted_input_without_a_traceback(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    oversized = redacted / "STUDENT_01.md"
+    with oversized.open("wb") as handle:
+        handle.truncate(26 * 1024 * 1024)
+
+    result = _run(
+        "density", str(oversized), "--redacted", str(redacted), "--json"
+    )
+
+    assert result.returncode == 13
+    assert "too large" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
 def test_the_density_subcommand_can_emit_json(phil210):
     import json
 

@@ -43,6 +43,7 @@ from scripts.grading.records import RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
 from scripts.path_safety import (  # noqa: E402
     is_within,
+    read_bytes_limited,
     read_text_limited,
     require_component,
 )
@@ -70,7 +71,9 @@ class PublicationInspector:
         self.run_id = run_id
 
     def hash_output(self, path: Path) -> str:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashlib.sha256(
+            read_bytes_limited(path, "The published feedback", 2 * 1024 * 1024)
+        ).hexdigest()
 
 
 def _drafts_dir(args: argparse.Namespace) -> Path:
@@ -254,7 +257,7 @@ def _cmd_density(args: argparse.Namespace) -> int:
             ),
             terms,
         )
-    except (OSError, UnicodeError) as error:
+    except (OSError, UnicodeError, ValueError) as error:
         print(f"Cannot read redacted submission: {error}", file=sys.stderr)
         return EXIT_MALFORMED
     if args.json:
@@ -369,7 +372,15 @@ def main(argv: list[str] | None = None) -> int:
         return args.handler(args)
     except SystemExit as exit_request:
         return int(exit_request.code or 0)
-    except (RubricError, RecordError, ProfileError, FileNotFoundError) as error:
+    except (
+        RubricError,
+        RecordError,
+        ProfileError,
+        FileNotFoundError,
+        OSError,
+        UnicodeError,
+        ValueError,
+    ) as error:
         print(str(error), file=sys.stderr)
         return EXIT_MALFORMED
 
