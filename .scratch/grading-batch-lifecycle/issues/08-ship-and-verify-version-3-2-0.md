@@ -28,7 +28,7 @@ The walkthrough output was refreshed from a five-submission synthetic PHIL 210
 batch, including a 19-artifact verification receipt and a five-file
 publication with its identity-free marker.
 
-Verification: 427 tests passed from the repository root. The leak and
+Verification: 428 tests passed from the repository root. The leak and
 end-to-end tests also passed together, 20 tests total. Bytecode compilation and
 the package validator passed. The required default Skills CLI check passed for
 the root Grader; the documented `--full-depth` check found both `grader` and
