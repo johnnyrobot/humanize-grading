@@ -28,6 +28,8 @@ Keep the skill portable. Do not write instructions that limit it to one or two a
 - `.claude-plugin/plugin.json` describes the Claude plugin and points its skill loader at both `./` (the grader) and `./skills/humanizer` (Humanizer).
 - `.claude-plugin/marketplace.json` lets users add this repo as a Claude marketplace.
 - `scripts/validate-package.py` checks package files and shared values.
+- `PACKAGE_FILES.txt` is the reviewed public package inventory. Any added or
+  removed tracked file requires an explicit inventory update.
 
 ## Rules for changes
 

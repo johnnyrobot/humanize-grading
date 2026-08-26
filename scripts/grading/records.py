@@ -49,6 +49,24 @@ class RecordError(Exception):
     """The record cannot be read, or a quote in it cannot be trusted."""
 
 
+def _text(value: object, name: str) -> str:
+    if not isinstance(value, str):
+        raise RecordError(f"{name} must be JSON text.")
+    return value
+
+
+def _integer(value: object, name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise RecordError(f"{name} must be a JSON integer.")
+    return value
+
+
+def _optional_integer(value: object, name: str) -> int | None:
+    if value is None:
+        return None
+    return _integer(value, name)
+
+
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
@@ -139,8 +157,13 @@ class Justification:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "Justification":
+        if not isinstance(payload, dict):
+            raise RecordError("Every justification must be a JSON object.")
         if "quote" not in payload:
             raise RecordError("Every justification needs a quote.")
+        allowed = {"quote", "note", "occurrence", "offset", "line", "length"}
+        if set(payload) - allowed:
+            raise RecordError("A justification has unknown fields.")
         if not isinstance(payload["quote"], str):
             raise RecordError("A justification quote must be text.")
         if len(payload["quote"]) > MAX_QUOTE_CHARACTERS:
@@ -152,13 +175,16 @@ class Justification:
             or not 1 <= occurrence <= 100
         ):
             raise RecordError("A justification occurrence must be from 1 to 100.")
+        note = payload.get("note", "")
+        if not isinstance(note, str):
+            raise RecordError("A justification note must be text.")
         return cls(
-            quote=str(payload["quote"]),
-            note=str(payload.get("note", "")),
+            quote=payload["quote"],
+            note=note,
             occurrence=occurrence,
-            offset=payload.get("offset"),
-            line=payload.get("line"),
-            length=payload.get("length"),
+            offset=_optional_integer(payload.get("offset"), "Justification offset"),
+            line=_optional_integer(payload.get("line"), "Justification line"),
+            length=_optional_integer(payload.get("length"), "Justification length"),
         )
 
 
@@ -187,14 +213,29 @@ class CriterionScore:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "CriterionScore":
+        if not isinstance(payload, dict):
+            raise RecordError("Every criterion must be a JSON object.")
         for name in ("number", "name", "points_possible", "level", "assessable"):
             if name not in payload:
                 raise RecordError(f"A criterion is missing {name!r}.")
-        try:
-            number = int(payload["number"])
-            points_possible = int(payload["points_possible"])
-        except (TypeError, ValueError) as error:
-            raise RecordError(f"Cannot convert criterion fields to int: {error}") from error
+        allowed = {
+            "number",
+            "name",
+            "points_possible",
+            "score",
+            "level",
+            "assessable",
+            "justifications",
+        }
+        if set(payload) - allowed:
+            raise RecordError("A criterion has unknown fields.")
+        number = _integer(payload["number"], "Criterion number")
+        points_possible = _integer(
+            payload["points_possible"], "Criterion points_possible"
+        )
+        score = payload.get("score")
+        if score is not None:
+            score = _integer(score, "Criterion score")
         if not isinstance(payload["assessable"], bool):
             raise RecordError("Criterion assessable must be a JSON boolean.")
         justifications = payload.get("justifications", [])
@@ -204,10 +245,10 @@ class CriterionScore:
             raise RecordError("A criterion has too many justifications.")
         return cls(
             number=number,
-            name=str(payload["name"]),
+            name=_text(payload["name"], "Criterion name"),
             points_possible=points_possible,
-            score=payload.get("score"),
-            level=str(payload["level"]),
+            score=score,
+            level=_text(payload["level"], "Criterion level"),
             assessable=payload["assessable"],
             justifications=tuple(
                 Justification.from_dict(item)
@@ -260,6 +301,8 @@ class GradeRecord:
 
     @classmethod
     def from_dict(cls, payload: dict) -> "GradeRecord":
+        if not isinstance(payload, dict):
+            raise RecordError("The grade record must be a JSON object.")
         if payload.get("schema") != SCHEMA:
             raise RecordError(
                 f"Unknown record schema {payload.get('schema')!r}. "
@@ -268,30 +311,35 @@ class GradeRecord:
         missing = [name for name in _REQUIRED if name not in payload]
         if missing:
             raise RecordError(f"The record is missing: {', '.join(missing)}")
-        try:
-            total = int(payload["total"])
-            total_possible = int(payload["total_possible"])
-        except (TypeError, ValueError) as error:
-            raise RecordError(f"Cannot convert total fields to int: {error}") from error
+        if set(payload) - set(_REQUIRED):
+            raise RecordError("The grade record has unknown fields.")
+        total = _integer(payload["total"], "total")
+        total_possible = _integer(payload["total_possible"], "total_possible")
         criteria = payload["criteria"]
         if not isinstance(criteria, list):
             raise RecordError("The grade record criteria must be a list.")
         if len(criteria) > MAX_CRITERIA:
             raise RecordError("The grade record has too many criteria.")
+        pattern_density = payload["pattern_density"]
+        if not isinstance(pattern_density, dict):
+            raise RecordError("pattern_density must be a JSON object.")
+        status = _text(payload["status"], "status")
+        if status != "draft":
+            raise RecordError("status must be 'draft'.")
         return cls(
-            schema=str(payload["schema"]),
-            batch=str(payload["batch"]),
-            token=str(payload["token"]),
-            source=str(payload["source"]),
-            course=str(payload["course"]),
-            rubric=str(payload["rubric"]),
-            profile=str(payload["profile"]),
+            schema=_text(payload["schema"], "schema"),
+            batch=_text(payload["batch"], "batch"),
+            token=_text(payload["token"], "token"),
+            source=_text(payload["source"], "source"),
+            course=_text(payload["course"], "course"),
+            rubric=_text(payload["rubric"], "rubric"),
+            profile=_text(payload["profile"], "profile"),
             criteria=tuple(CriterionScore.from_dict(item) for item in criteria),
             total=total,
             total_possible=total_possible,
-            letter=str(payload["letter"]),
-            pattern_density=dict(payload["pattern_density"]),
-            status=str(payload["status"]),
+            letter=_text(payload["letter"], "letter"),
+            pattern_density=dict(pattern_density),
+            status=status,
         )
 
     @classmethod

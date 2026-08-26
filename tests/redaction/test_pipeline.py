@@ -361,6 +361,22 @@ def test_two_sources_cannot_overwrite_one_students_redacted_submission(tmp_path)
     assert "duplicate output" in result.message.lower()
 
 
+def test_one_student_cannot_split_across_extensions(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "first.md", "Maya Lin argues the first position.")
+    _write(source, "second.txt", "Maya Lin argues the second position.")
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_COLLISION
+
+
 def test_authorship_does_not_depend_on_roster_order(tmp_path):
     """The author is whoever is named first in the file, not CSV row order."""
     source = tmp_path / "in"

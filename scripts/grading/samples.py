@@ -27,6 +27,7 @@ from pathlib import Path
 
 from scripts.redaction.patterns import scrub_structured
 from scripts.redaction.roster import RosterEntry, bare_name_variants, full_name_variants
+from scripts.path_safety import read_text_limited
 
 PLACEHOLDER = "[STUDENT]"
 
@@ -197,7 +198,7 @@ def _parse_feedback(feedback: str) -> dict[str, object]:
 
 def load_sample(path: Path) -> GradedSample:
     """Read one graded sample."""
-    text = path.read_text(encoding="utf-8")
+    text = read_text_limited(path, "The graded sample", 10 * 1024 * 1024)
     header_block, essay, feedback = _split_sections(text)
     parsed = _parse_feedback(feedback)
     return GradedSample(

@@ -258,6 +258,17 @@ def test_section_names_in_prose_do_not_satisfy_the_protocol(
     assert any(finding.code == "section-missing" for finding in errors(findings))
 
 
+def test_a_required_feedback_section_must_have_content(
+    rubric, loaded_profile, terms
+):
+    broken = FEEDBACK.replace(
+        "* Paragraph 2 ties the rate-of-return model to the interconnection queue.\n",
+        "",
+    )
+    findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
+    assert any(finding.code == "section-empty" for finding in errors(findings))
+
+
 def test_a_missing_sign_off_fails(rubric, loaded_profile, terms):
     broken = FEEDBACK.replace("— Dr. Vance", "Regards,")
     findings = verify_draft(_record(), broken, SOURCE, rubric, loaded_profile, terms)
@@ -326,7 +337,7 @@ def _write_batch(tmp_path, phil210, feedback=FEEDBACK):
     redacted.mkdir()
     drafts.mkdir()
     (redacted / "STUDENT_01.md").write_text(SOURCE, encoding="utf-8")
-    RedactionManifest(batch="essay-2", run_id="test-redaction-run").save(redacted)
+    _refresh_redaction_manifest(redacted)
     (drafts / "STUDENT_01.md").write_text(feedback, encoding="utf-8")
     root = tmp_path / ".grading"
     (root / "profiles").mkdir(parents=True)
@@ -341,6 +352,18 @@ def _write_batch(tmp_path, phil210, feedback=FEEDBACK):
     )
     record.save(drafts / "STUDENT_01.json")
     return redacted, drafts, root
+
+
+def _refresh_redaction_manifest(redacted, batch="essay-2"):
+    try:
+        run_id = RedactionManifest.load(redacted).run_id
+    except (OSError, ValueError, json.JSONDecodeError):
+        run_id = "test-redaction-run"
+    RedactionManifest.create(
+        batch,
+        run_id,
+        [path for path in redacted.iterdir() if not path.name.startswith("_")],
+    ).save(redacted)
 
 
 def _run(*args):
@@ -369,19 +392,15 @@ def test_grading_batch_verifies_and_persists_a_clean_batch(tmp_path, phil210):
     assert payload["criteria"][0]["justifications"][0]["offset"] >= 0
 
 
-def test_a_batch_change_during_record_staging_prevents_receipt_commit(
-    tmp_path, phil210, monkeypatch
+def test_predictable_verification_temp_symlinks_are_never_followed(
+    tmp_path, phil210
 ):
     redacted, drafts, root = _write_batch(tmp_path, phil210)
-    draft = drafts / "STUDENT_01.md"
-    original_save = GradeRecord.save
+    sentinel = tmp_path / "unrelated.txt"
+    sentinel.write_text("leave me alone", encoding="utf-8")
+    (drafts / ".STUDENT_01.json.verified.tmp").symlink_to(sentinel)
+    (drafts / "_verification.tmp").symlink_to(sentinel)
 
-    def save_and_change_draft(record, path):
-        original_save(record, path)
-        if path.name.endswith(".verified.tmp"):
-            draft.write_text("changed during verification", encoding="utf-8")
-
-    monkeypatch.setattr(GradeRecord, "save", save_and_change_draft)
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -393,10 +412,34 @@ def test_a_batch_change_during_record_staging_prevents_receipt_commit(
         )
     )
 
-    assert any(finding.code == "batch-changed" for finding in report.blocking_findings)
+    assert report.blocking_findings == ()
+    assert report.persisted is True
+    assert sentinel.read_text(encoding="utf-8") == "leave me alone"
+
+
+def test_verification_refuses_a_manifest_from_another_redaction_result(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    source = redacted / "STUDENT_01.md"
+    source.write_text(source.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8")
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+
+    assert any(
+        finding.code == "malformed-redaction-manifest"
+        for finding in report.blocking_findings
+    )
     assert not (drafts / "_verification.json").exists()
-    payload = json.loads((drafts / "STUDENT_01.json").read_text(encoding="utf-8"))
-    assert "offset" not in payload["criteria"][0]["justifications"][0]
 
 
 def test_persisted_verification_writes_one_versioned_receipt(tmp_path, phil210):
@@ -893,6 +936,7 @@ def test_grading_batch_aggregates_failures_and_leaves_every_record_unchanged(
         feedback=FEEDBACK.replace("— Dr. Vance", "Regards,"),
     )
     (redacted / "STUDENT_02.md").write_text(SOURCE, encoding="utf-8")
+    _refresh_redaction_manifest(redacted)
     (drafts / "STUDENT_02.md").write_text(FEEDBACK, encoding="utf-8")
     malformed = drafts / "STUDENT_02.json"
     malformed.write_text("[]", encoding="utf-8")
@@ -930,6 +974,7 @@ def test_grading_batch_reports_unreadable_artifacts_and_checks_later_work(
     (drafts / "STUDENT_01.md").write_bytes(b"\xff")
     second_source = redacted / "STUDENT_02.md"
     second_source.write_text(SOURCE, encoding="utf-8")
+    _refresh_redaction_manifest(redacted)
     (drafts / "STUDENT_02.md").write_text(FEEDBACK, encoding="utf-8")
     second_record = drafts / "STUDENT_02.json"
     _record(
@@ -969,6 +1014,7 @@ def test_semantically_malformed_record_does_not_stop_later_verification(
     first.save(first_path)
     second_source = redacted / "STUDENT_02.md"
     second_source.write_text(SOURCE, encoding="utf-8")
+    _refresh_redaction_manifest(redacted)
     (drafts / "STUDENT_02.md").write_text(FEEDBACK, encoding="utf-8")
     _record(
         token="STUDENT_02",
@@ -1180,6 +1226,7 @@ def test_grading_batch_refuses_verification_when_there_are_no_grade_records(
     redacted.mkdir()
     drafts.mkdir()
     (redacted / "STUDENT_01.md").write_text(SOURCE, encoding="utf-8")
+    _refresh_redaction_manifest(redacted)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -1288,6 +1335,7 @@ def test_the_cli_never_persists_part_of_a_failing_batch(tmp_path, phil210):
     before_first = first_record.read_bytes()
     second_source = redacted / "STUDENT_02.md"
     second_source.write_text(SOURCE, encoding="utf-8")
+    _refresh_redaction_manifest(redacted)
     (drafts / "STUDENT_02.md").write_text(
         FEEDBACK.replace("— Dr. Vance", "Regards,"), encoding="utf-8"
     )

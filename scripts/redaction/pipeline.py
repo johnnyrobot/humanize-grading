@@ -22,9 +22,19 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 try:
-    from scripts.path_safety import is_within, paths_overlap, require_component
+    from scripts.path_safety import (
+        has_symlink_component,
+        is_within,
+        paths_overlap,
+        require_component,
+    )
 except ModuleNotFoundError:  # direct scripts/redact.py execution
-    from path_safety import is_within, paths_overlap, require_component
+    from path_safety import (
+        has_symlink_component,
+        is_within,
+        paths_overlap,
+        require_component,
+    )
 
 from .candidates import Candidate, find_candidates
 from .documents import extract, output_name
@@ -159,7 +169,7 @@ def run(
         require_component(batch, "The grading batch")
     except ValueError as error:
         return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
-    if source.is_symlink() or destination.is_symlink():
+    if has_symlink_component(source) or has_symlink_component(destination):
         return BatchResult(
             exit_code=EXIT_UNSAFE_PATH,
             message="Submission and redacted-output roots must not be symlinks.",
@@ -175,7 +185,7 @@ def run(
             message="The token map and review file must use separate paths.",
         )
     for label, private_path in (("token map", map_path), ("review file", review_path)):
-        if private_path.is_symlink() or any(
+        if has_symlink_component(private_path) or any(
             is_within(private_path, root, follow_symlinks=follow)
             for root in (source, destination)
             for follow in (False, True)
@@ -226,7 +236,7 @@ def run(
     result = BatchResult()
     matched_names: set[str] = set()
     unknown_count = 0
-    claimed_outputs: dict[Path, Path] = {}
+    claimed_tokens: dict[str, Path] = {}
 
     for path in source_paths:
         if path.name.startswith("_"):
@@ -301,19 +311,24 @@ def run(
             entry.token = f"{UNKNOWN_PREFIX}_{unknown_count:02d}"
 
         output = destination / output_name(entry.token, path.suffix or ".md")
-        if output in claimed_outputs:
+        if entry.token in claimed_tokens:
             entry.error = (
-                f"Duplicate output {output.name}: both {claimed_outputs[output].name} "
-                f"and {path.name} resolve to the same grading-batch participant."
+                f"Duplicate output for {entry.token}: both "
+                f"{claimed_tokens[entry.token].name} and {path.name} resolve "
+                "to the same grading-batch participant."
             )
             result.files.append(entry)
             continue
-        claimed_outputs[output] = path
+        claimed_tokens[entry.token] = path
         output.write_text(text, encoding="utf-8")
         entry.output = output
         result.files.append(entry)
 
-    RedactionManifest(batch=batch, run_id=tmap.run_id).save(destination)
+    RedactionManifest.create(
+        batch,
+        tmap.run_id,
+        [file.output for file in result.files if file.output is not None],
+    ).save(destination)
     tmap.save(map_path)
 
     result.unmatched_roster = [e for e in roster if e.name not in matched_names]
@@ -341,6 +356,11 @@ def _write_review(review_path: Path, result: BatchResult) -> None:
     never live inside the redacted output directory.
     """
     payload = {
+        "errors": [
+            {"file": f.source.name, "error": f.error}
+            for f in result.files
+            if f.error
+        ],
         "candidates": [
             {"file": f.output.name if f.output else f.source.name, "name": c.name,
              "line": c.line, "context": c.context}

@@ -225,7 +225,7 @@ python3 scripts/grade.py status --batch essay-2 --redacted redacted
   STUDENT_04  pending
   STUDENT_05  pending
 
-5 pending, 0 drafted, 0 incomplete, 0 orphaned, 0 verified.
+5 pending, 0 drafted, 0 incomplete, 0 orphaned, 0 verified, 0 rehydrated.
 ```
 
 Grade only what is `pending`. A submission that already has a draft has already
@@ -306,7 +306,7 @@ Status now shows the receipt-derived state:
   STUDENT_04  verified
   STUDENT_05  verified
 
-0 pending, 0 drafted, 0 incomplete, 0 orphaned, 5 verified.
+0 pending, 0 drafted, 0 incomplete, 0 orphaned, 5 verified, 0 rehydrated.
 ```
 
 Exit 12 means at least one draft failed. A failed batch writes neither offsets
@@ -391,6 +391,16 @@ this portable swap, but it is never exposed as a partly populated new batch.
 
 Every rehydrated feedback file in `final/` remains a draft until you sign it
 off. `_publication.json` is lifecycle evidence, not feedback.
+
+To include publication in status, name its directory:
+
+```bash
+python3 scripts/grade.py status --batch essay-2 --redacted redacted \
+  --publication final/essay-2
+```
+
+All five participants now report `rehydrated`. Status checks the publication
+marker and output hashes without loading the token map.
 
 ## The optional hook
 

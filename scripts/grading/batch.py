@@ -29,6 +29,7 @@ from scripts.grading.rubric import RubricError, load_rubric
 from scripts.grading.verify import ERROR, verify_draft
 from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
 from scripts.redaction.manifest import RedactionManifest
+from scripts.path_safety import has_symlink_component, read_text_limited
 
 
 class Progress(str, Enum):
@@ -61,6 +62,7 @@ _MALFORMED_CODES = {
     "malformed-profile",
     "malformed-rubric",
     "malformed-patterns",
+    "malformed-redaction-manifest",
 }
 _RECORD_LOAD_ERRORS = (
     RecordError,
@@ -131,6 +133,7 @@ class StatusReport:
             "pending": 0,
             "drafted": 0,
             "verified": 0,
+            "rehydrated": 0,
             "incomplete": 0,
             "orphan": 0,
         }
@@ -231,7 +234,9 @@ class VerifiedBatch:
     def _create(cls, paths: BatchPaths, receipt: Path) -> "VerifiedBatch":
         digest = hashlib.sha256(receipt.read_bytes()).hexdigest()
         manifest = RedactionManifest.load(paths.redacted)
-        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        payload = json.loads(
+            read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
+        )
         draft_digests = {
             Path(item["path"]).name: item["sha256"]
             for item in payload.get("artifacts", [])
@@ -284,6 +289,13 @@ class VerifiedBatch:
             verified_batch=cls._create(paths, receipt),
             findings=(),
         )
+
+    @classmethod
+    def context_from_receipt(
+        cls, drafts: Path
+    ) -> tuple[BatchPaths, VerificationInputs]:
+        """Recover the legacy rehydration context, then rerun verification."""
+        return _context_from_receipt(drafts)
 
     def publish(
         self,
@@ -577,22 +589,6 @@ class VerificationReport:
     verified_batch: VerifiedBatch | None = None
 
 
-def _failed_verification(
-    status: StatusReport,
-    blocking: list[BlockingFinding],
-    failure: VerificationFailure,
-) -> VerificationReport:
-    """Build the common no-persistence result for unusable course evidence."""
-    return VerificationReport(
-        status=status,
-        blocking_findings=tuple(blocking),
-        warnings=(),
-        checked_tokens=(),
-        persisted=False,
-        failure=failure,
-    )
-
-
 @dataclass(frozen=True)
 class ConsistencyReport:
     """Structural findings and advisory flags for a grading batch."""
@@ -637,7 +633,8 @@ class GradingBatch:
         renderer: RehydrationRenderer | None = None,
     ) -> StatusReport:
         report = self._status(
-            check_receipt=True, require_verified=require_verified
+            check_receipt=True,
+            require_verified=require_verified or publication is not None,
         )
         if publication is None or report.blocking_findings:
             return report
@@ -678,18 +675,35 @@ class GradingBatch:
         )
 
     def _status(
-        self, *, check_receipt: bool, require_verified: bool = False
+        self,
+        *,
+        check_receipt: bool,
+        require_verified: bool = False,
+        require_manifest: bool = False,
     ) -> StatusReport:
-        sources = _artifact_paths(self.paths.redacted, (".md", ".txt", ".docx"))
-        drafts = _artifact_paths(self.paths.drafts, (".md",))
-        records = _artifact_paths(self.paths.drafts, (".json",))
-        source_links = _symlink_artifacts(
+        sources, source_links = _scan_artifacts(
             self.paths.redacted, (".md", ".txt", ".docx")
         )
-        draft_links = _symlink_artifacts(self.paths.drafts, (".md",))
-        record_links = _symlink_artifacts(self.paths.drafts, (".json",))
+        drafts, draft_links = _scan_artifacts(self.paths.drafts, (".md",))
+        records, record_links = _scan_artifacts(self.paths.drafts, (".json",))
         entries: list[BatchEntry] = []
         findings: list[BlockingFinding] = []
+        if require_manifest:
+            try:
+                manifest = RedactionManifest.load(self.paths.redacted)
+                if manifest.batch != self.paths.batch:
+                    raise ValueError(
+                        "The redaction manifest belongs to another grading batch."
+                    )
+                manifest.validate(self.paths.redacted)
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+                findings.append(
+                    BlockingFinding(
+                        code="malformed-redaction-manifest",
+                        message=str(error),
+                        token="",
+                    )
+                )
         for token in sorted(
             set(sources)
             | set(drafts)
@@ -799,7 +813,7 @@ class GradingBatch:
     def verify(
         self, inputs: VerificationInputs, *, persist: bool = True
     ) -> VerificationReport:
-        status = self._status(check_receipt=False)
+        status = self._status(check_receipt=False, require_manifest=True)
         blocking = list(status.blocking_findings)
         try:
             initial_digests = _verification_digests(self.paths, inputs, status)
@@ -899,7 +913,14 @@ class GradingBatch:
                     else VerificationFailure.MALFORMED
                 )
             )
-            return _failed_verification(status, blocking, failure)
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=failure,
+            )
         warnings: list[AdvisoryFinding] = []
         checked: list[str] = []
         records: list[tuple[Path, GradeRecord]] = []
@@ -986,13 +1007,13 @@ class GradingBatch:
                         token="",
                     )
                 )
-            staged: list[tuple[Path, Path]] = []
+            staged: list[tuple[Path, Path, Path]] = []
             try:
                 if not blocking:
                     for path, record in records:
-                        temporary = path.with_name(f".{path.name}.verified.tmp")
-                        record.save(temporary)
-                        staged.append((path, temporary))
+                        temporary = _stage_record(record, path.parent)
+                        backup = _backup_file(path)
+                        staged.append((path, temporary, backup))
                     latest = self._status(check_receipt=False)
                     latest_digests = _verification_digests(
                         self.paths, inputs, latest
@@ -1010,19 +1031,41 @@ class GradingBatch:
                         )
                 if not blocking:
                     receipt_digests = dict(initial_digests)
-                    for path, temporary in staged:
+                    for path, temporary, _ in staged:
                         receipt_digests[path.resolve()] = hashlib.sha256(
                             temporary.read_bytes()
                         ).hexdigest()
-                    for path, temporary in staged:
-                        temporary.replace(path)
-                    receipt = _write_verification_receipt(
-                        self.paths, inputs, status, receipt_digests
-                    )
+                    installed: list[tuple[Path, Path]] = []
+                    try:
+                        for path, temporary, backup in staged:
+                            temporary.replace(path)
+                            installed.append((path, backup))
+                        receipt = _write_verification_receipt(
+                            self.paths, inputs, status, receipt_digests
+                        )
+                    except OSError as error:
+                        restore_errors: list[str] = []
+                        for path, backup in reversed(installed):
+                            try:
+                                backup.replace(path)
+                            except OSError as restore_error:
+                                restore_errors.append(str(restore_error))
+                        detail = f"Could not commit verified records: {error}"
+                        if restore_errors:
+                            detail += "; restore failed: " + "; ".join(restore_errors)
+                        blocking.append(
+                            BlockingFinding(
+                                code="record-commit-failed",
+                                message=detail,
+                                token="",
+                            )
+                        )
+                        receipt = None
             finally:
-                for _, temporary in staged:
-                    if temporary.exists():
-                        temporary.unlink()
+                for _, temporary, backup in staged:
+                    for transient in (temporary, backup):
+                        if transient.exists():
+                            transient.unlink()
         failure = None
         if blocking:
             failure = (
@@ -1085,37 +1128,26 @@ class GradingBatch:
         )
 
 
-def _artifact_paths(
+def _scan_artifacts(
     directory: Path, suffixes: tuple[str, ...]
-) -> dict[str, tuple[Path, ...]]:
+) -> tuple[dict[str, tuple[Path, ...]], dict[str, tuple[Path, ...]]]:
     if not directory.is_dir():
-        return {}
-    found: dict[str, list[Path]] = {}
+        return {}, {}
+    regular: dict[str, list[Path]] = {}
+    links: dict[str, list[Path]] = {}
     for path in sorted(directory.iterdir()):
         if (
-            path.is_file()
-            and not path.is_symlink()
-            and path.suffix.lower() in suffixes
+            path.suffix.lower() in suffixes
             and not path.name.startswith("_")
         ):
-            found.setdefault(path.stem, []).append(path)
-    return {token: tuple(paths) for token, paths in found.items()}
-
-
-def _symlink_artifacts(
-    directory: Path, suffixes: tuple[str, ...]
-) -> dict[str, tuple[Path, ...]]:
-    if not directory.is_dir():
-        return {}
-    found: dict[str, list[Path]] = {}
-    for path in sorted(directory.iterdir()):
-        if (
-            path.is_symlink()
-            and path.suffix.lower() in suffixes
-            and not path.name.startswith("_")
-        ):
-            found.setdefault(path.stem, []).append(path)
-    return {token: tuple(paths) for token, paths in found.items()}
+            if path.is_symlink():
+                links.setdefault(path.stem, []).append(path)
+            elif path.is_file():
+                regular.setdefault(path.stem, []).append(path)
+    return (
+        {token: tuple(paths) for token, paths in regular.items()},
+        {token: tuple(paths) for token, paths in links.items()},
+    )
 
 
 def _verification_digests(
@@ -1177,13 +1209,46 @@ def _write_verification_receipt(
         "hash": "sha256",
         "artifacts": artifacts,
     }
-    temporary = receipt.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{receipt.name}.", suffix=".tmp", dir=receipt.parent
     )
-    temporary.replace(receipt)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary.replace(receipt)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
     return receipt
+
+
+def _stage_record(record: GradeRecord, directory: Path) -> Path:
+    descriptor, name = tempfile.mkstemp(
+        prefix=".verified-record.", suffix=".tmp", dir=directory
+    )
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(record.as_dict(), indent=2, ensure_ascii=False))
+        handle.flush()
+        os.fsync(handle.fileno())
+    return Path(name)
+
+
+def _backup_file(path: Path) -> Path:
+    descriptor, name = tempfile.mkstemp(
+        prefix=".record-backup.", suffix=".tmp", dir=path.parent
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(path.read_bytes())
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        Path(name).unlink(missing_ok=True)
+        raise
+    return Path(name)
 
 
 def _receipt_artifact(
@@ -1209,6 +1274,63 @@ def _receipt_locator(path: Path, base: Path) -> str:
         return Path(os.path.relpath(path, base)).as_posix()
     except ValueError:
         return path.as_posix()
+
+
+def _context_from_receipt(
+    drafts: Path,
+) -> tuple[BatchPaths, VerificationInputs]:
+    receipt = drafts / RECEIPT_NAME
+    payload = json.loads(
+        read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
+    )
+    if not isinstance(payload, dict) or payload.get("schema") != RECEIPT_SCHEMA:
+        raise ValueError("The verification receipt has an unknown schema.")
+    batch = payload.get("batch")
+    course = payload.get("course")
+    if not isinstance(batch, str) or not batch:
+        raise ValueError("The verification receipt needs a grading batch.")
+    if not isinstance(course, str) or not course:
+        raise ValueError("The verification receipt needs a course.")
+    artifacts = payload.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise ValueError("The verification receipt needs an artifact list.")
+
+    def paths_for(role: str) -> list[Path]:
+        paths: list[Path] = []
+        for item in artifacts:
+            if not isinstance(item, dict) or item.get("role") != role:
+                continue
+            locator = item.get("path")
+            if not isinstance(locator, str) or not locator:
+                raise ValueError(f"The receipt has an invalid {role} path.")
+            path = Path(locator)
+            paths.append(
+                path.resolve()
+                if path.is_absolute()
+                else (receipt.parent / path).resolve()
+            )
+        return paths
+
+    redacted = paths_for("redacted-submission")
+    parents = {path.parent for path in redacted}
+    if not redacted or len(parents) != 1:
+        raise ValueError("The receipt must name one redacted directory.")
+
+    def one(role: str) -> Path:
+        matched = paths_for(role)
+        if len(matched) != 1:
+            raise ValueError(f"The receipt must name one {role} file.")
+        return matched[0]
+
+    return (
+        BatchPaths(batch=batch, redacted=parents.pop(), drafts=drafts.resolve()),
+        VerificationInputs(
+            course=course,
+            rubric=one("rubric"),
+            profile=one("calibration-profile"),
+            patterns=one("pattern-reference"),
+        ),
+    )
 
 
 def _publication_backup(target: Path) -> Path:
@@ -1359,8 +1481,8 @@ def _validate_existing_publication(
 ) -> tuple[BlockingFinding, ...]:
     marker = target / PUBLICATION_NAME
     try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        payload = json.loads(read_text_limited(marker, "The publication marker", 1_048_576))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
         return (_publication_finding("unrecognized-publication", str(error)),)
     if not isinstance(payload, dict) or payload.get("schema") != PUBLICATION_SCHEMA:
         return (
@@ -1458,8 +1580,8 @@ def _transaction_matches(
     marker: Path, target: Path, batch: str, receipt_digest: str
 ) -> bool:
     try:
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        payload = json.loads(read_text_limited(marker, "The transaction marker", 1_048_576))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return False
     return (
         isinstance(payload, dict)
@@ -1488,7 +1610,9 @@ def _validate_verification_receipt(
     if not receipt.is_file():
         return _ReceiptValidation(present=False, valid=False, findings=())
     try:
-        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        payload = json.loads(
+            read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
+        )
         artifacts = _validated_receipt_artifacts(payload, paths)
         expected = _expected_participant_artifacts(status, receipt.parent)
         actual = {
@@ -1501,6 +1625,10 @@ def _validate_verification_receipt(
         for item in artifacts:
             locator = Path(item["path"])
             artifact_path = locator if locator.is_absolute() else receipt.parent / locator
+            if has_symlink_component(artifact_path):
+                raise ValueError(
+                    f"A verification receipt artifact uses a symlink: {item['path']}"
+                )
             if not artifact_path.is_file():
                 raise _StaleReceipt(f"A verified artifact is missing: {item['path']}")
             digest = hashlib.sha256(artifact_path.read_bytes()).hexdigest()
@@ -1564,6 +1692,17 @@ def _validated_receipt_artifacts(
         token = artifact.get("token", "")
         if role not in _RECEIPT_ROLES or not isinstance(locator, str) or not locator:
             raise ValueError("A verification receipt artifact has an invalid role or path.")
+        suffixes = {
+            "rubric": ".md",
+            "calibration-profile": ".md",
+            "pattern-reference": ".md",
+        }
+        if role in suffixes and Path(locator).suffix.lower() != suffixes[role]:
+            raise ValueError(
+                f"The {role} receipt artifact must be a Markdown file."
+            )
+        if role == "redaction-manifest" and Path(locator).name != REDACTION_MANIFEST_NAME:
+            raise ValueError("The receipt names an invalid redaction manifest.")
         if not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("A verification receipt artifact has an invalid SHA-256 hash.")
         try:
@@ -1663,8 +1802,10 @@ def _load_entry(
     source_text = None
     if entry.source is not None:
         try:
-            source_text = entry.source.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as error:
+            source_text = read_text_limited(
+                entry.source, "The redacted submission", 25 * 1024 * 1024
+            )
+        except (OSError, UnicodeError, ValueError) as error:
             findings.append(
                 BlockingFinding(
                     code="unreadable-source",
@@ -1676,8 +1817,10 @@ def _load_entry(
     draft_text = None
     if entry.draft is not None:
         try:
-            draft_text = entry.draft.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as error:
+            draft_text = read_text_limited(
+                entry.draft, "The feedback draft", 1_048_576
+            )
+        except (OSError, UnicodeError, ValueError) as error:
             findings.append(
                 BlockingFinding(
                     code="unreadable-draft",

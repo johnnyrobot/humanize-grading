@@ -23,7 +23,7 @@ Ask this before reading any file, every run:
 
 | Answer | What happens |
 | --- | --- |
-| Cloud | Redaction is mandatory. A non-zero exit from `redact.py` stops the grading batch. |
+| Cloud | Redaction is mandatory. A non-zero exit from `redact.py` blocks the cloud path. |
 | Local | Redaction is on by default. Skipping it takes an explicit `--no-redact`. |
 
 You cannot detect your own host. The answer is the instructor's to give, and

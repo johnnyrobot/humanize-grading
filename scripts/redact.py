@@ -10,7 +10,7 @@ Exit codes: 0 clean, 2 unmatched roster entry, 3 unreviewed candidates,
 stop the cloud path. There is no override for 2, 3, or 4 -- if this prints
 anything other than a clean exit for one of those, fix the input and run it
 again rather than forcing the cloud path open. Exit 5 exists only to stop a
-stale files from an earlier redaction from silently mixing into a new one; pass --force
+stale files from an earlier redaction silently mixing into a new one; pass --force
 to overwrite the earlier redaction's token-named outputs (nothing else in the
 directory is touched).
 
@@ -93,11 +93,12 @@ def main(argv: list[str] | None = None) -> int:
         return result.exit_code
 
     print(f"Read {len(result.files)} files. Wrote {args.out}. Map at {map_path}.")
-    for entry in result.files:
+    for index, entry in enumerate(result.files, start=1):
+        label = entry.output.name if entry.output else f"submission {index}"
         if entry.error:
-            print(f"  ERROR {entry.source.name}: {entry.error}")
+            print(f"  ERROR {label}: could not be redacted safely. See {review_path}.")
         elif entry.skipped_empty:
-            print(f"  SKIPPED (empty submission) {entry.source.name}")
+            print(f"  SKIPPED (empty submission) {label}")
     for entry in result.unmatched_roster:
         print(f"  UNMATCHED roster entry never found: {entry.name}")
     flagged = sum(len(f.candidates) for f in result.files)

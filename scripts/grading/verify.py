@@ -315,6 +315,19 @@ def _check_feedback(
                     record.token,
                 )
             )
+        next_heading = min(
+            (index for _, index in headings if index > position),
+            default=len(lines),
+        )
+        if not any(line.strip() for line in lines[position + 1 : next_heading]):
+            found.append(
+                Finding(
+                    ERROR,
+                    "section-empty",
+                    f"The {section!r} section has no feedback.",
+                    record.token,
+                )
+            )
         previous = position
     if rubric.protocol.sign_offs:
         tail = [line for line in markdown.strip().splitlines() if line.strip()]

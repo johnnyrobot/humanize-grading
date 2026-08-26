@@ -20,6 +20,7 @@ redacted source, which is the file the model actually read.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import sys
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from scripts.grading.profile import (  # noqa: E402
 from scripts.grading.records import RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
 from scripts.path_safety import is_within, require_component  # noqa: E402
+from scripts.redaction.manifest import RedactionManifest  # noqa: E402
 
 EXIT_OK = 0
 EXIT_NO_PROFILE = 10
@@ -54,6 +56,17 @@ def _component(label: str):
         return require_component(value, label)
 
     return parse
+
+
+class PublicationInspector:
+    """Check identity-bearing output hashes without reading a token map."""
+
+    def __init__(self, batch: str, run_id: str) -> None:
+        self.batch = batch
+        self.run_id = run_id
+
+    def hash_output(self, path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _drafts_dir(args: argparse.Namespace) -> Path:
@@ -164,13 +177,22 @@ def _cmd_verify(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    report = GradingBatch.open(
+    batch = GradingBatch.open(
         BatchPaths(
             batch=args.batch,
             redacted=args.redacted,
             drafts=_drafts_dir(args),
         )
-    ).status()
+    )
+    inspector = None
+    if args.publication is not None:
+        try:
+            manifest = RedactionManifest.load(args.redacted)
+            inspector = PublicationInspector(args.batch, manifest.run_id)
+        except (OSError, UnicodeError, ValueError) as error:
+            print(f"Cannot inspect publication status: {error}", file=sys.stderr)
+            return EXIT_MALFORMED
+    report = batch.status(publication=args.publication, renderer=inspector)
     if not report.entries:
         print(f"Nothing under {args.redacted}. Run redact.py first.")
         return EXIT_OK
@@ -184,12 +206,12 @@ def _cmd_status(args: argparse.Namespace) -> int:
     print(
         f"\n{counts['pending']} pending, {counts['drafted']} drafted, "
         f"{counts['incomplete']} incomplete, {counts['orphan']} orphaned, "
-        f"{counts['verified']} verified."
+        f"{counts['verified']} verified, {counts['rehydrated']} rehydrated."
     )
     if counts["orphan"]:
         print(
             "An orphaned artifact has no redacted submission. It is usually a "
-            "earlier grading batch's output. Move it out before grading.",
+            "an earlier grading batch's output. Move it out before grading.",
             file=sys.stderr,
         )
     if counts["incomplete"]:
@@ -299,6 +321,12 @@ def build_parser() -> argparse.ArgumentParser:
     status.add_argument("--batch", required=True, type=_component("The grading batch"))
     status.add_argument("--redacted", type=Path, default=Path("redacted"))
     status.add_argument("--drafts", type=Path, default=None)
+    status.add_argument(
+        "--publication",
+        type=Path,
+        default=None,
+        help="Check a published draft set and report rehydrated progress",
+    )
     _add_common(status)
     status.set_defaults(handler=_cmd_status)
 

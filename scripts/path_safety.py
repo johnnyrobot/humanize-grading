@@ -40,3 +40,30 @@ def paths_overlap(left: Path, right: Path) -> bool:
         ):
             return True
     return False
+
+
+def has_symlink_component(path: Path) -> bool:
+    """Say whether an existing path component is a symbolic link."""
+    current = normalized(path, follow_symlinks=False)
+    while True:
+        if current.is_symlink():
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+
+
+def read_bytes_limited(path: Path, label: str, max_bytes: int) -> bytes:
+    """Read one regular file after a public byte bound and link check."""
+    if has_symlink_component(path):
+        raise ValueError(f"{label} must not use a symbolic link.")
+    size = path.stat().st_size
+    if size > max_bytes:
+        raise ValueError(f"{label} is too large. The limit is {max_bytes} bytes.")
+    return path.read_bytes()
+
+
+def read_text_limited(
+    path: Path, label: str, max_bytes: int = 5 * 1024 * 1024
+) -> str:
+    return read_bytes_limited(path, label, max_bytes).decode("utf-8")

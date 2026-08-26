@@ -21,7 +21,7 @@ from scripts.grading.density import PATTERNS_PATH, load_terms, scan
 from scripts.grading.records import GradeRecord
 from scripts.redaction.tokens import TokenMap
 from scripts.redaction.manifest import RedactionManifest
-from tests.grading.test_verify import _write_batch
+from tests.grading.test_verify import _refresh_redaction_manifest, _write_batch
 
 
 class FakeRenderer:
@@ -79,6 +79,7 @@ def _add_second_draft(redacted: Path, drafts: Path) -> None:
     record.token = "STUDENT_02"
     record.source = str(second_source)
     record.save(drafts / "STUDENT_02.json")
+    _refresh_redaction_manifest(redacted)
 
 
 def _refresh_density(redacted: Path, drafts: Path, token: str) -> None:
@@ -86,6 +87,12 @@ def _refresh_density(redacted: Path, drafts: Path, token: str) -> None:
     source = (redacted / f"{token}.md").read_text(encoding="utf-8")
     record.pattern_density = scan(source, load_terms(PATTERNS_PATH)).as_dict()
     record.save(drafts / f"{token}.json")
+    manifest = RedactionManifest.load(redacted)
+    RedactionManifest.create(
+        manifest.batch,
+        manifest.run_id,
+        [path for path in redacted.iterdir() if not path.name.startswith("_")],
+    ).save(redacted)
 
 
 def _verified_fixture(tmp_path, phil210):
@@ -214,7 +221,28 @@ def test_status_derives_rehydrated_progress_from_current_publication(
     ).status(publication=target, renderer=renderer)
 
     assert {entry.progress for entry in status.entries} == {Progress.REHYDRATED}
+    assert status.counts()["rehydrated"] == 1
     assert status.blocking_findings == ()
+
+    cli = subprocess.run(
+        [
+            sys.executable,
+            "scripts/grade.py",
+            "status",
+            "--batch",
+            "essay-2",
+            "--redacted",
+            str(redacted),
+            "--drafts",
+            str(drafts),
+            "--publication",
+            str(target),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert cli.returncode == 0, cli.stdout + cli.stderr
+    assert "STUDENT_01  rehydrated" in cli.stdout
 
 
 def test_same_label_map_from_another_redaction_result_is_refused(
@@ -819,6 +847,43 @@ def test_rehydrate_cli_safe_force_replaces_recognized_publication(tmp_path, phil
 
     result = subprocess.run(
         command + ["--force"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (target / "_publication.json").is_file()
+
+
+def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
+    tmp_path, phil210
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+    )
+    token_map = _matching_map(redacted)
+    map_path = tmp_path / "maps" / "essay-2.json"
+    token_map.save(map_path)
+    target = tmp_path / "final"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/rehydrate.py",
+            str(drafts),
+            "--map",
+            str(map_path),
+            "--out",
+            str(target),
+        ],
         capture_output=True,
         text=True,
     )

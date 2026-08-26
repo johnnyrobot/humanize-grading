@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .private_files import write_private_text
+try:
+    from scripts.path_safety import read_text_limited
+except ModuleNotFoundError:  # direct scripts/redact.py execution
+    from path_safety import read_text_limited
 
 KINDS = ("STUDENT", "PERSON", "EMAIL", "PHONE", "ID", "URL")
 
@@ -75,7 +79,7 @@ class TokenMap:
     @classmethod
     def load(cls, path: Path) -> "TokenMap":
         """Read a saved map."""
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_limited(path, "The token map", 5 * 1024 * 1024))
         run_id = payload.get("run_id")
         if not isinstance(run_id, str) or len(run_id) < 16:
             raise ValueError("The token map has no valid redaction-run ID.")

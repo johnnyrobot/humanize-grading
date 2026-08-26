@@ -25,6 +25,8 @@ from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.path_safety import read_text_limited
+
 PATTERNS_PATH = Path(__file__).resolve().parents[2] / "references" / "ai-patterns.md"
 
 MAX_TERM_WORDS = 6
@@ -125,7 +127,7 @@ def load_terms(path: Path = PATTERNS_PATH) -> list[Term]:
     terms: list[Term] = []
     seen: set[str] = set()
     pattern = 0
-    for line in path.read_text(encoding="utf-8").splitlines():
+    for line in read_text_limited(path, "The pattern reference").splitlines():
         heading = _HEADING.match(line)
         if heading:
             pattern = int(heading.group(1))

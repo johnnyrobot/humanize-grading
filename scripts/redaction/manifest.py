@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+
+try:
+    from scripts.path_safety import read_text_limited
+except ModuleNotFoundError:  # direct scripts/redact.py execution
+    from path_safety import read_text_limited
 
 SCHEMA = "redaction-batch/1"
 NAME = "_redaction.json"
@@ -14,12 +20,36 @@ NAME = "_redaction.json"
 class RedactionManifest:
     batch: str
     run_id: str
+    outputs: tuple[tuple[str, str], ...] = ()
+
+    @classmethod
+    def create(
+        cls, batch: str, run_id: str, outputs: list[Path]
+    ) -> "RedactionManifest":
+        bound = tuple(
+            sorted(
+                (
+                    path.name,
+                    hashlib.sha256(path.read_bytes()).hexdigest(),
+                )
+                for path in outputs
+            )
+        )
+        return cls(batch=batch, run_id=run_id, outputs=bound)
 
     def save(self, directory: Path) -> Path:
         path = directory / NAME
         path.write_text(
             json.dumps(
-                {"schema": SCHEMA, "batch": self.batch, "run_id": self.run_id},
+                {
+                    "schema": SCHEMA,
+                    "batch": self.batch,
+                    "run_id": self.run_id,
+                    "outputs": [
+                        {"path": path, "sha256": digest}
+                        for path, digest in self.outputs
+                    ],
+                },
                 indent=2,
                 sort_keys=True,
             )
@@ -31,7 +61,7 @@ class RedactionManifest:
     @classmethod
     def load(cls, directory: Path) -> "RedactionManifest":
         path = directory / NAME
-        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(read_text_limited(path, "The redaction manifest", 1_048_576))
         if not isinstance(payload, dict) or payload.get("schema") != SCHEMA:
             raise ValueError("The redaction manifest has an unknown schema.")
         batch = payload.get("batch")
@@ -40,4 +70,40 @@ class RedactionManifest:
             raise ValueError("The redaction manifest needs a grading batch.")
         if not isinstance(run_id, str) or len(run_id) < 16:
             raise ValueError("The redaction manifest needs a redaction-run ID.")
-        return cls(batch=batch, run_id=run_id)
+        raw_outputs = payload.get("outputs")
+        if not isinstance(raw_outputs, list) or not raw_outputs:
+            raise ValueError("The redaction manifest needs its output list.")
+        outputs: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for item in raw_outputs:
+            if not isinstance(item, dict):
+                raise ValueError("The redaction manifest has a malformed output.")
+            name = item.get("path")
+            digest = item.get("sha256")
+            if (
+                not isinstance(name, str)
+                or Path(name).name != name
+                or name.startswith("_")
+                or name in seen
+                or not isinstance(digest, str)
+                or len(digest) != 64
+            ):
+                raise ValueError("The redaction manifest has a malformed output.")
+            seen.add(name)
+            outputs.append((name, digest))
+        return cls(batch=batch, run_id=run_id, outputs=tuple(sorted(outputs)))
+
+    def validate(self, directory: Path) -> None:
+        """Require the exact token-named file set and bytes from redaction."""
+        actual = {
+            path.name
+            for path in directory.iterdir()
+            if path.is_file() and not path.name.startswith("_")
+        }
+        expected = {name for name, _ in self.outputs}
+        if actual != expected:
+            raise ValueError("The redaction manifest output membership changed.")
+        for name, digest in self.outputs:
+            path = directory / name
+            if path.is_symlink() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+                raise ValueError(f"The redaction manifest does not match {name}.")

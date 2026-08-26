@@ -26,11 +26,14 @@ def package_files() -> set[Path]:
             check=True,
             capture_output=True,
         )
-        return {
+        tracked = {
             Path(raw.decode("utf-8"))
             for raw in result.stdout.split(b"\0")
             if raw
         }
+        if (ROOT / "PACKAGE_FILES.txt").is_file():
+            tracked.add(Path("PACKAGE_FILES.txt"))
+        return tracked
     return {
         path.relative_to(ROOT)
         for path in ROOT.rglob("*")
@@ -42,7 +45,24 @@ def is_synthetic_fixture(path: Path) -> bool:
     return path.parts[:3] == ("tests", "fixtures", "phil210")
 
 
-for packaged_path in package_files():
+packaged_files = package_files()
+manifest_path = ROOT / "PACKAGE_FILES.txt"
+if not manifest_path.is_file():
+    raise SystemExit("Add PACKAGE_FILES.txt with the reviewed public package inventory")
+allowed_files = {
+    Path(line)
+    for line in manifest_path.read_text(encoding="utf-8").splitlines()
+    if line.strip()
+}
+if packaged_files != allowed_files:
+    added = sorted(packaged_files - allowed_files)
+    missing = sorted(allowed_files - packaged_files)
+    raise SystemExit(
+        "Review and update PACKAGE_FILES.txt. "
+        f"Unexpected: {added}; missing: {missing}"
+    )
+
+for packaged_path in packaged_files:
     sensitive_name = (
         packaged_path.name == "roster.csv"
         or packaged_path.name.endswith(".roster.csv")

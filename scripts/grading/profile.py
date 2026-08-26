@@ -20,7 +20,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from scripts.path_safety import require_component
+from scripts.path_safety import read_text_limited, require_component
 from scripts.grading.rubric import Rubric
 
 FINGERPRINT_SECTION = "Rubric fingerprint"
@@ -96,7 +96,7 @@ def load_profile(path: Path) -> Profile:
         raise ProfileError(
             f"No profile at {path}. Run calibration for this course before grading."
         )
-    text = path.read_text(encoding="utf-8")
+    text = read_text_limited(path, "The calibration profile")
     lines = text.splitlines()
 
     meta: dict[str, str] = {}

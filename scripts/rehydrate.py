@@ -2,7 +2,9 @@
 """Put real names back into draft feedback. Runs locally only.
 
 Usage:
-    python3 scripts/rehydrate.py DRAFTS --map .grading/maps/essay-3.json --out final
+    python3 scripts/rehydrate.py DRAFTS --batch essay-3 --course phil210 \
+      --rubric rubric.md --profile .grading/profiles/phil210.md \
+      --redacted redacted --map .grading/maps/essay-3.json --out final
 
 Requires a current verification receipt and fails before publication when a
 token has no mapping or a draft cannot be rendered. The destination changes
@@ -25,7 +27,7 @@ from scripts.grading.batch import (  # noqa: E402
     VerificationInputs,
 )
 from scripts.grading.density import PATTERNS_PATH  # noqa: E402
-from scripts.path_safety import require_component  # noqa: E402
+from scripts.path_safety import read_bytes_limited, require_component  # noqa: E402
 from scripts.redaction.rehydrate import rehydrate_text  # noqa: E402
 from scripts.redaction.tokens import TokenMap  # noqa: E402
 
@@ -47,7 +49,9 @@ class TokenMapRenderer:
         self, source: Path, destination: Path, expected_sha256: str
     ) -> RenderResult:
         try:
-            source_bytes = source.read_bytes()
+            source_bytes = read_bytes_limited(
+                source, "The feedback draft", 1_048_576
+            )
             if hashlib.sha256(source_bytes).hexdigest() != expected_sha256:
                 return RenderResult(
                     error=(
@@ -76,17 +80,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("drafts", type=Path, help="Folder of tokenized drafts")
     parser.add_argument(
         "--batch",
-        required=True,
         type=lambda value: require_component(value, "The grading batch"),
     )
     parser.add_argument(
         "--course",
-        required=True,
         type=lambda value: require_component(value, "The course"),
     )
-    parser.add_argument("--rubric", type=Path, required=True)
-    parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--redacted", type=Path, required=True)
+    parser.add_argument("--rubric", type=Path)
+    parser.add_argument("--profile", type=Path)
+    parser.add_argument("--redacted", type=Path)
     parser.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
     parser.add_argument("--map", type=Path, required=True)
     parser.add_argument("--out", type=Path, default=Path("final"))
@@ -97,19 +99,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    resumed = VerifiedBatch.resume(
-        BatchPaths(
-            batch=args.batch,
-            redacted=args.redacted,
-            drafts=args.drafts,
-        ),
-        VerificationInputs(
-            course=args.course,
-            rubric=args.rubric,
-            profile=args.profile,
-            patterns=args.patterns,
-        ),
-    )
+    supplied = (args.batch, args.course, args.rubric, args.profile, args.redacted)
+    if any(value is not None for value in supplied) and not all(
+        value is not None for value in supplied
+    ):
+        print(
+            "  ERROR context-incomplete: pass batch, course, rubric, profile and "
+            "redacted together, or omit all five for the legacy receipt context.",
+            file=sys.stderr,
+        )
+        return 5
+    try:
+        if all(value is not None for value in supplied):
+            paths = BatchPaths(
+                batch=args.batch,
+                redacted=args.redacted,
+                drafts=args.drafts,
+            )
+            inputs = VerificationInputs(
+                course=args.course,
+                rubric=args.rubric,
+                profile=args.profile,
+                patterns=args.patterns,
+            )
+        else:
+            paths, inputs = VerifiedBatch.context_from_receipt(args.drafts)
+    except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+        print(f"  ERROR verification-context: {error}", file=sys.stderr)
+        return 5
+    resumed = VerifiedBatch.resume(paths, inputs)
     if resumed.verified_batch is None:
         for finding in resumed.findings:
             print(f"  ERROR {finding.code}: {finding.message}", file=sys.stderr)

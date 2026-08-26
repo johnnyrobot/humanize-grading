@@ -142,6 +142,32 @@ def test_assessable_must_be_a_json_boolean(tmp_path):
         GradeRecord.load(path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("course", 210), ("total", "21"), ("status", "verified")],
+)
+def test_top_level_record_fields_use_exact_json_types_and_values(
+    tmp_path, field, value
+):
+    payload = _record().as_dict()
+    payload[field] = value
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RecordError, match=field):
+        GradeRecord.load(path)
+
+
+def test_criterion_numbers_must_be_json_integers_not_booleans(tmp_path):
+    payload = _record().as_dict()
+    payload["criteria"][0]["number"] = True
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(RecordError, match="number.*integer"):
+        GradeRecord.load(path)
+
+
 def test_a_grade_record_over_one_megabyte_is_refused_before_parsing(tmp_path):
     path = tmp_path / "oversized.json"
     with path.open("wb") as handle:

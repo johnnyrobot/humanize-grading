@@ -38,6 +38,8 @@ from scripts.grading.samples import (  # noqa: E402
     scrub_private_data,
 )
 from scripts.redaction.roster import load_roster  # noqa: E402
+from scripts.redaction.private_files import write_private_text  # noqa: E402
+from scripts.path_safety import read_text_limited  # noqa: E402
 
 EXIT_OK = 0
 EXIT_MALFORMED = 13
@@ -148,10 +150,7 @@ def _inputs(args: argparse.Namespace) -> int:
         ),
     }
 
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(
-        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_private_text(args.out, json.dumps(payload, indent=2, ensure_ascii=False))
     scrubbed = sum(item["scrubbed_count"] for item in payload["samples"])
     print(
         f"Wrote {args.out}. {len(payload['samples'])} calibration samples, "
@@ -164,7 +163,7 @@ def _inputs(args: argparse.Namespace) -> int:
 
 def _holdout(args: argparse.Namespace) -> int:
     record = GradeRecord.load(args.record)
-    feedback = args.draft.read_text(encoding="utf-8")
+    feedback = read_text_limited(args.draft, "The holdout draft", 1_048_576)
     sample = load_sample(args.sample)
     delta = compare(record, feedback, sample)
     if args.json:
@@ -184,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
     inputs.add_argument("--roster", type=Path, required=True)
     inputs.add_argument("--holdout", required=True, help="Filename to hold back")
     inputs.add_argument(
-        "--out", type=Path, default=Path(".grading/calibration-inputs.json")
+        "--out", type=Path, default=Path("calibration-inputs.json")
     )
     inputs.set_defaults(handler=_inputs)
 

@@ -22,6 +22,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from scripts.path_safety import read_text_limited
+
 _SEPARATOR = re.compile(r"^\|[\s:|-]+\|$")
 _BOLD = re.compile(r"\*\*(.+?)\*\*")
 _CODE = re.compile(r"`([^`]*)`")
@@ -319,7 +321,7 @@ def _parse_protocol(lines: list[str]) -> FeedbackProtocol:
 
 def load_rubric(path: Path) -> Rubric:
     """Read a rubric from Markdown."""
-    text = path.read_text(encoding="utf-8")
+    text = read_text_limited(path, "The rubric")
     lines = text.splitlines()
     title = next(
         (_norm(line[2:]) for line in lines if line.startswith("# ")), path.stem

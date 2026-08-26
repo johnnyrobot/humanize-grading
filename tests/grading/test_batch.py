@@ -142,6 +142,7 @@ def test_status_report_owns_display_states_and_counts(tmp_path):
         "pending": 1,
         "drafted": 1,
         "verified": 0,
+        "rehydrated": 0,
         "incomplete": 1,
         "orphan": 1,
     }
