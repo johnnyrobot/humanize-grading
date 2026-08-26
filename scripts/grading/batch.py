@@ -21,6 +21,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
+from scripts.grading.brief import BriefError, brief_path, check_brief
 from scripts.grading.consistency import Outlier, review
 from scripts.grading.density import PATTERNS_PATH, load_terms
 from scripts.grading.profile import ProfileError, load_profile
@@ -47,14 +48,14 @@ class Progress(str, Enum):
 
 
 RECEIPT_NAME = "_verification.json"
-RECEIPT_SCHEMA = "grading-batch-verification/1"
+RECEIPT_SCHEMA = "grading-batch-verification/2"
 PUBLICATION_NAME = "_publication.json"
 PUBLICATION_SCHEMA = "grading-batch-publication/1"
 TRANSACTION_NAME = "_transaction.json"
 TRANSACTION_SCHEMA = "grading-batch-publication-transaction/1"
 _PARTICIPANT_ROLES = {"draft", "grade-record", "redacted-submission"}
 _COURSE_EVIDENCE_ROLES = {"calibration-profile", "pattern-reference", "rubric"}
-_BATCH_EVIDENCE_ROLES = {"redaction-manifest"}
+_BATCH_EVIDENCE_ROLES = {"assignment-brief", "redaction-manifest"}
 _RECEIPT_ROLES = (
     _PARTICIPANT_ROLES | _COURSE_EVIDENCE_ROLES | _BATCH_EVIDENCE_ROLES
 )
@@ -67,6 +68,7 @@ _MALFORMED_CODES = {
     "malformed-profile",
     "malformed-rubric",
     "malformed-patterns",
+    "malformed-assignment-brief",
     "malformed-redaction-manifest",
 }
 _RECORD_LOAD_ERRORS = (
@@ -149,12 +151,13 @@ class StatusReport:
 
 @dataclass(frozen=True)
 class VerificationInputs:
-    """The current course evidence used to verify a grading batch."""
+    """The current identity-free evidence used to verify a grading batch."""
 
     course: str
     rubric: Path
     profile: Path
     patterns: Path
+    brief: Path
 
 
 class VerificationFailure(str, Enum):
@@ -826,6 +829,29 @@ class GradingBatch:
     def verify(
         self, inputs: VerificationInputs, *, persist: bool = True
     ) -> VerificationReport:
+        try:
+            check_brief(
+                inputs.brief,
+                batch=self.paths.batch,
+                course=inputs.course,
+                rubric=inputs.rubric,
+                profile=inputs.profile,
+            )
+        except (BriefError, OSError, UnicodeError, ValueError) as error:
+            return VerificationReport(
+                status=StatusReport(entries=(), blocking_findings=()),
+                blocking_findings=(
+                    BlockingFinding(
+                        code="malformed-assignment-brief",
+                        message=str(error),
+                        token="",
+                    ),
+                ),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.MALFORMED,
+            )
         status = self._status(check_receipt=False, require_manifest=True)
         blocking = list(status.blocking_findings)
         try:
@@ -1195,6 +1221,7 @@ def _verification_digests(
     artifacts.extend(
         [
             (paths.redacted / REDACTION_MANIFEST_NAME, "redaction manifest", 1_048_576),
+            (inputs.brief, "assignment brief", 1_048_576),
             (inputs.rubric, "rubric", 5 * 1024 * 1024),
             (inputs.profile, "calibration profile", 5 * 1024 * 1024),
             (inputs.patterns, "pattern reference", 5 * 1024 * 1024),
@@ -1226,6 +1253,7 @@ def _write_verification_receipt(
                     )
                 )
     for role, path in (
+        ("assignment-brief", inputs.brief),
         ("redaction-manifest", paths.redacted / REDACTION_MANIFEST_NAME),
         ("rubric", inputs.rubric),
         ("calibration-profile", inputs.profile),
@@ -1338,6 +1366,7 @@ def _context_from_receipt(
             rubric=rubric,
             profile=profile,
             patterns=PATTERNS_PATH,
+            brief=brief_path(Path(".grading"), decoded.batch).resolve(),
         ),
     )
 
@@ -1348,6 +1377,11 @@ def _decode_receipt(receipt: Path) -> _DecodedReceipt:
     )
     if not isinstance(payload, dict):
         raise ValueError("The verification receipt must be a JSON object.")
+    if payload.get("schema") == "grading-batch-verification/1":
+        raise ValueError(
+            "Verification receipt schema 1 predates assignment briefing and must "
+            "be verified again after assignment brief approval."
+        )
     if payload.get("schema") != RECEIPT_SCHEMA:
         raise ValueError(
             f"Unknown verification receipt schema {payload.get('schema')!r}."
@@ -1666,6 +1700,7 @@ def _validate_verification_receipt(
                 "redacted-submission": 25 * 1024 * 1024,
                 "draft": 1_048_576,
                 "grade-record": 1_048_576,
+                "assignment-brief": 1_048_576,
                 "redaction-manifest": 1_048_576,
                 "rubric": 5 * 1024 * 1024,
                 "calibration-profile": 5 * 1024 * 1024,
@@ -1728,6 +1763,7 @@ def _validated_receipt_artifacts(
         if role not in _RECEIPT_ROLES or not isinstance(locator, str) or not locator:
             raise ValueError("A verification receipt artifact has an invalid role or path.")
         suffixes = {
+            "assignment-brief": ".md",
             "rubric": ".md",
             "calibration-profile": ".md",
             "pattern-reference": ".md",
@@ -1748,7 +1784,7 @@ def _validated_receipt_artifacts(
                 "A verification receipt artifact has an invalid SHA-256 hash."
             ) from error
         if role in (_COURSE_EVIDENCE_ROLES | _BATCH_EVIDENCE_ROLES) and "token" in artifact:
-            raise ValueError("Course evidence in a receipt must not carry a token.")
+            raise ValueError("Course and batch evidence in a receipt must not carry a token.")
         if role in _PARTICIPANT_ROLES and (not isinstance(token, str) or not token):
             raise ValueError(
                 "A redacted submission, draft, or grade record in a receipt needs "
@@ -1771,8 +1807,9 @@ def _validated_receipt_artifacts(
     for role in _COURSE_EVIDENCE_ROLES:
         if sum(1 for item in validated if item["role"] == role) != 1:
             raise ValueError("The verification receipt repeats course evidence.")
-    if sum(1 for item in validated if item["role"] == "redaction-manifest") != 1:
-        raise ValueError("The verification receipt needs one redaction manifest.")
+    for role in _BATCH_EVIDENCE_ROLES:
+        if sum(1 for item in validated if item["role"] == role) != 1:
+            raise ValueError("The verification receipt needs one of each batch evidence role.")
     return validated
 
 

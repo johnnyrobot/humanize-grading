@@ -95,18 +95,21 @@ def _refresh_density(redacted: Path, drafts: Path, token: str) -> None:
     ).save(redacted)
 
 
-def _verified_fixture(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
+def _verified_fixture(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    verified = (
+        GradingBatch.open(BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts))
+        .verify(
+            VerificationInputs(
+                course="phil210",
+                rubric=phil210 / "grading_rubric.md",
+                profile=root / "profiles" / "phil210.md",
+                patterns=PATTERNS_PATH,
+                brief=root / "assignments" / "essay-2.md",
+            )
         )
-    ).verified_batch
+        .verified_batch
+    )
     assert verified is not None
     return redacted, drafts, verified
 
@@ -119,6 +122,7 @@ def _resume(redacted: Path, drafts: Path, root: Path, phil210: Path):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         ),
     )
 
@@ -174,8 +178,10 @@ def _write_transaction_marker(directory: Path, target: Path) -> None:
     )
 
 
-def test_only_persisted_verification_returns_verified_batch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_only_persisted_verification_returns_verified_batch(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -184,6 +190,7 @@ def test_only_persisted_verification_returns_verified_batch(tmp_path, phil210):
         rubric=phil210 / "grading_rubric.md",
         profile=root / "profiles" / "phil210.md",
         patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
     )
 
     dry_run = batch.verify(inputs, persist=False)
@@ -197,9 +204,9 @@ def test_only_persisted_verification_returns_verified_batch(tmp_path, phil210):
 
 
 def test_publication_setup_failures_return_a_finding_instead_of_raising(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     parent = tmp_path / "not-a-directory"
     parent.write_text("occupied", encoding="utf-8")
 
@@ -209,9 +216,9 @@ def test_publication_setup_failures_return_a_finding_instead_of_raising(
 
 
 def test_status_derives_rehydrated_progress_from_current_publication(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, verified = _verified_fixture(tmp_path, phil210)
+    redacted, drafts, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     renderer = FakeRenderer()
     target = tmp_path / "final"
     assert verified.publish(target, renderer).progress is Progress.REHYDRATED
@@ -246,9 +253,9 @@ def test_status_derives_rehydrated_progress_from_current_publication(
 
 
 def test_same_label_map_from_another_redaction_result_is_refused(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
 
     report = verified.publish(
         tmp_path / "final",
@@ -260,8 +267,10 @@ def test_same_label_map_from_another_redaction_result_is_refused(
     ]
 
 
-def test_draft_change_after_revalidation_is_not_published(tmp_path, phil210):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+def test_draft_change_after_revalidation_is_not_published(
+    tmp_path, phil210, approved_brief
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
 
     report = verified.publish(target, MutatingRenderer())
@@ -270,8 +279,10 @@ def test_draft_change_after_revalidation_is_not_published(tmp_path, phil210):
     assert not target.exists()
 
 
-def test_verified_batch_resume_requires_a_current_receipt(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_verified_batch_resume_requires_a_current_receipt(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -280,6 +291,7 @@ def test_verified_batch_resume_requires_a_current_receipt(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -299,14 +311,15 @@ def test_verified_batch_resume_requires_a_current_receipt(tmp_path, phil210):
     ("change", "expected_code"),
     [
         ("stale", "stale-verification-receipt"),
+        ("legacy", "malformed-verification-receipt"),
         ("malformed", "malformed-verification-receipt"),
         ("unknown", "malformed-verification-receipt"),
     ],
 )
 def test_verified_batch_resume_rejects_untrusted_receipts(
-    tmp_path, phil210, change, expected_code
+    tmp_path, phil210, approved_brief, change, expected_code
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -315,11 +328,16 @@ def test_verified_batch_resume_rejects_untrusted_receipts(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     receipt = drafts / "_verification.json"
     if change == "stale":
         (drafts / "STUDENT_01.md").write_text("changed", encoding="utf-8")
+    elif change == "legacy":
+        payload = json.loads(receipt.read_text(encoding="utf-8"))
+        payload["schema"] = "grading-batch-verification/1"
+        receipt.write_text(json.dumps(payload), encoding="utf-8")
     elif change == "malformed":
         receipt.write_text("{not json", encoding="utf-8")
     else:
@@ -331,17 +349,20 @@ def test_verified_batch_resume_rejects_untrusted_receipts(
 
     assert resumed.verified_batch is None
     assert [finding.code for finding in resumed.findings] == [expected_code]
+    if change == "legacy":
+        assert "predates assignment briefing" in resumed.findings[0].message
 
 
 def test_resume_reruns_semantic_verification_instead_of_trusting_forged_hashes(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     inputs = VerificationInputs(
         course="phil210",
         rubric=phil210 / "grading_rubric.md",
         profile=root / "profiles" / "phil210.md",
         patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
     )
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -363,18 +384,23 @@ def test_resume_reruns_semantic_verification_instead_of_trusting_forged_hashes(
     assert any(finding.code == "section-missing" for finding in resumed.findings)
 
 
-def test_verified_batch_publishes_complete_first_destination(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
+def test_verified_batch_publishes_complete_first_destination(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    verified = (
+        GradingBatch.open(BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts))
+        .verify(
+            VerificationInputs(
+                course="phil210",
+                rubric=phil210 / "grading_rubric.md",
+                profile=root / "profiles" / "phil210.md",
+                patterns=PATTERNS_PATH,
+                brief=root / "assignments" / "essay-2.md",
+            )
         )
-    ).verified_batch
+        .verified_batch
+    )
     assert verified is not None
     renderer = FakeRenderer()
     target = tmp_path / "final"
@@ -399,23 +425,24 @@ def test_verified_batch_publishes_complete_first_destination(tmp_path, phil210):
             ).hexdigest(),
         }
     ]
-    assert "Maya Lin" not in (target / "_publication.json").read_text(
-        encoding="utf-8"
-    )
+    assert "Maya Lin" not in (target / "_publication.json").read_text(encoding="utf-8")
 
 
-def test_publish_revalidates_receipt_before_staging(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
+def test_publish_revalidates_receipt_before_staging(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    verified = (
+        GradingBatch.open(BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts))
+        .verify(
+            VerificationInputs(
+                course="phil210",
+                rubric=phil210 / "grading_rubric.md",
+                profile=root / "profiles" / "phil210.md",
+                patterns=PATTERNS_PATH,
+                brief=root / "assignments" / "essay-2.md",
+            )
         )
-    ).verified_batch
+        .verified_batch
+    )
     assert verified is not None
     (drafts / "STUDENT_01.md").write_text("changed", encoding="utf-8")
     renderer = FakeRenderer()
@@ -431,41 +458,49 @@ def test_publish_revalidates_receipt_before_staging(tmp_path, phil210):
     assert not target.exists()
 
 
-def test_publish_rejects_renderer_for_another_grading_batch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
+def test_publish_rejects_renderer_for_another_grading_batch(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    verified = (
+        GradingBatch.open(BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts))
+        .verify(
+            VerificationInputs(
+                course="phil210",
+                rubric=phil210 / "grading_rubric.md",
+                profile=root / "profiles" / "phil210.md",
+                patterns=PATTERNS_PATH,
+                brief=root / "assignments" / "essay-2.md",
+            )
         )
-    ).verified_batch
+        .verified_batch
+    )
     assert verified is not None
     renderer = FakeRenderer(batch="essay-9")
 
     report = verified.publish(tmp_path / "final", renderer)
 
-    assert [finding.code for finding in report.findings] == [
-        "renderer-batch-mismatch"
-    ]
+    assert [finding.code for finding in report.findings] == ["renderer-batch-mismatch"]
     assert renderer.rendered == []
 
 
-def test_first_publication_refuses_nonempty_destination(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
+def test_first_publication_refuses_nonempty_destination(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    verified = (
+        GradingBatch.open(BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts))
+        .verify(
+            VerificationInputs(
+                course="phil210",
+                rubric=phil210 / "grading_rubric.md",
+                profile=root / "profiles" / "phil210.md",
+                patterns=PATTERNS_PATH,
+                brief=root / "assignments" / "essay-2.md",
+            )
         )
-    ).verified_batch
+        .verified_batch
+    )
     assert verified is not None
     renderer = FakeRenderer()
     target = tmp_path / "final"
@@ -475,15 +510,15 @@ def test_first_publication_refuses_nonempty_destination(tmp_path, phil210):
 
     report = verified.publish(target, renderer)
 
-    assert [finding.code for finding in report.findings] == [
-        "destination-not-empty"
-    ]
+    assert [finding.code for finding in report.findings] == ["destination-not-empty"]
     assert renderer.rendered == []
     assert existing.read_text(encoding="utf-8") == "keep me"
 
 
-def test_safe_force_replaces_unchanged_recognized_publication(tmp_path, phil210):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+def test_safe_force_replaces_unchanged_recognized_publication(
+    tmp_path, phil210, approved_brief
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
 
@@ -517,9 +552,9 @@ def test_safe_force_replaces_unchanged_recognized_publication(tmp_path, phil210)
     ],
 )
 def test_safe_force_refuses_unrecognized_or_changed_publication(
-    tmp_path, phil210, change, expected_code
+    tmp_path, phil210, approved_brief, change, expected_code
 ):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     marker_path = target / "_publication.json"
@@ -552,9 +587,9 @@ def test_safe_force_refuses_unrecognized_or_changed_publication(
 
 
 def test_safe_force_restores_prior_publication_when_install_rename_fails(
-    tmp_path, phil210, monkeypatch
+    tmp_path, phil210, approved_brief, monkeypatch
 ):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     before = {path.name: path.read_bytes() for path in target.iterdir()}
@@ -581,9 +616,9 @@ def test_safe_force_restores_prior_publication_when_install_rename_fails(
 
 @pytest.mark.parametrize("state", ["target-missing", "target-and-backup"])
 def test_safe_force_recovers_interrupted_backup_states(
-    tmp_path, phil210, state
+    tmp_path, phil210, approved_brief, state
 ):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     backup = tmp_path / ".final.backup"
@@ -599,14 +634,14 @@ def test_safe_force_recovers_interrupted_backup_states(
     )
 
     assert report.findings == ()
-    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(
-        encoding="utf-8"
-    )
+    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(encoding="utf-8")
     assert not backup.exists()
 
 
-def test_safe_force_removes_recognized_abandoned_staging(tmp_path, phil210):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+def test_safe_force_removes_recognized_abandoned_staging(
+    tmp_path, phil210, approved_brief
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     abandoned = tmp_path / ".final-interrupted"
@@ -622,13 +657,13 @@ def test_safe_force_removes_recognized_abandoned_staging(tmp_path, phil210):
 
     assert report.findings == ()
     assert not abandoned.exists()
-    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(
-        encoding="utf-8"
-    )
+    assert "Maya Updated" in (target / "STUDENT_01.md").read_text(encoding="utf-8")
 
 
-def test_safe_force_refuses_unrecognized_staging_directory(tmp_path, phil210):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+def test_safe_force_refuses_unrecognized_staging_directory(
+    tmp_path, phil210, approved_brief
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     unrelated = tmp_path / ".final-personal"
@@ -647,9 +682,9 @@ def test_safe_force_refuses_unrecognized_staging_directory(tmp_path, phil210):
 
 
 def test_receipt_failure_returns_before_recovery_changes_filesystem(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    _, drafts, verified = _verified_fixture(tmp_path, phil210)
+    _, drafts, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     backup = tmp_path / ".final.backup"
@@ -668,9 +703,9 @@ def test_receipt_failure_returns_before_recovery_changes_filesystem(
 
 
 def test_safe_force_recovers_installed_target_with_transaction_marker(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     backup = tmp_path / ".final.backup"
@@ -688,8 +723,10 @@ def test_safe_force_recovers_installed_target_with_transaction_marker(
     assert not backup.exists()
 
 
-def test_recovery_reports_backup_restore_failure(tmp_path, phil210, monkeypatch):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+def test_recovery_reports_backup_restore_failure(
+    tmp_path, phil210, approved_brief, monkeypatch
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     backup = tmp_path / ".final.backup"
@@ -716,8 +753,10 @@ def test_recovery_reports_backup_restore_failure(tmp_path, phil210, monkeypatch)
     assert not target.exists()
 
 
-def test_recovery_reports_staging_cleanup_failure(tmp_path, phil210, monkeypatch):
-    _, _, verified = _verified_fixture(tmp_path, phil210)
+def test_recovery_reports_staging_cleanup_failure(
+    tmp_path, phil210, approved_brief, monkeypatch
+):
+    _, _, verified = _verified_fixture(tmp_path, phil210, approved_brief)
     target = tmp_path / "final"
     verified.publish(target, FakeRenderer(identity="Maya Lin"))
     abandoned = tmp_path / ".final-interrupted"
@@ -745,20 +784,23 @@ def test_recovery_reports_staging_cleanup_failure(tmp_path, phil210, monkeypatch
 
 
 def test_publish_aggregates_renderer_failures_and_keeps_destination_untouched(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     _add_second_draft(redacted, drafts)
-    verified = GradingBatch.open(
-        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
-    ).verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=root / "profiles" / "phil210.md",
-            patterns=PATTERNS_PATH,
+    verified = (
+        GradingBatch.open(BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts))
+        .verify(
+            VerificationInputs(
+                course="phil210",
+                rubric=phil210 / "grading_rubric.md",
+                profile=root / "profiles" / "phil210.md",
+                patterns=PATTERNS_PATH,
+                brief=root / "assignments" / "essay-2.md",
+            )
         )
-    ).verified_batch
+        .verified_batch
+    )
     assert verified is not None
     renderer = FakeRenderer(
         unmapped={"STUDENT_01.md": ("STUDENT_99",)},
@@ -778,8 +820,10 @@ def test_publish_aggregates_renderer_failures_and_keeps_destination_untouched(
     assert list(tmp_path.glob(".final-*")) == []
 
 
-def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_rehydrate_cli_publishes_through_verified_batch(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     source = redacted / "STUDENT_01.md"
     source.write_text(
         source.read_text(encoding="utf-8") + "\nSTUDENT_01\n",
@@ -801,6 +845,7 @@ def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     token_map = _matching_map(redacted)
@@ -824,8 +869,10 @@ def test_rehydrate_cli_publishes_through_verified_batch(tmp_path, phil210):
     assert (target / "_publication.json").is_file()
 
 
-def test_rehydrate_cli_safe_force_replaces_recognized_publication(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_rehydrate_cli_safe_force_replaces_recognized_publication(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -834,6 +881,7 @@ def test_rehydrate_cli_safe_force_replaces_recognized_publication(tmp_path, phil
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     token_map = _matching_map(redacted)
@@ -856,9 +904,9 @@ def test_rehydrate_cli_safe_force_replaces_recognized_publication(tmp_path, phil
 
 
 def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -867,6 +915,7 @@ def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     token_map = _matching_map(redacted)
@@ -888,6 +937,7 @@ def test_legacy_rehydrate_command_still_reruns_verification_and_publishes(
             rubric=tmp_path / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -934,8 +984,10 @@ def test_rehydrate_cli_requires_receipt_before_loading_map(tmp_path):
     assert not (tmp_path / "final").exists()
 
 
-def test_rehydrate_cli_reports_unreadable_map_as_failure(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_rehydrate_cli_reports_unreadable_map_as_failure(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -944,6 +996,7 @@ def test_rehydrate_cli_reports_unreadable_map_as_failure(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     target = tmp_path / "final"
@@ -968,9 +1021,9 @@ def test_rehydrate_cli_reports_unreadable_map_as_failure(tmp_path, phil210):
 
 
 def test_rehydrate_cli_leaves_destination_absent_for_unmapped_token(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     source = redacted / "STUDENT_01.md"
     source.write_text(
         source.read_text(encoding="utf-8") + "\nSTUDENT_01\n",
@@ -992,6 +1045,7 @@ def test_rehydrate_cli_leaves_destination_absent_for_unmapped_token(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     token_map = _matching_map(redacted)

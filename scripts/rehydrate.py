@@ -26,6 +26,7 @@ from scripts.grading.batch import (  # noqa: E402
     VerifiedBatch,
     VerificationInputs,
 )
+from scripts.grading.brief import brief_path  # noqa: E402
 from scripts.grading.density import PATTERNS_PATH  # noqa: E402
 from scripts.path_safety import read_bytes_limited, require_component  # noqa: E402
 from scripts.redaction.rehydrate import rehydrate_text  # noqa: E402
@@ -127,6 +128,7 @@ def main(argv: list[str] | None = None) -> int:
                 rubric=args.rubric,
                 profile=args.profile,
                 patterns=args.patterns,
+                brief=brief_path(args.profile.parent.parent, args.batch),
             )
         else:
             paths, inputs = VerifiedBatch.context_from_receipt(args.drafts)

@@ -145,6 +145,7 @@ def _cmd_verify(args: argparse.Namespace) -> int:
             rubric=args.rubric,
             profile=profile_path(args.course, args.root),
             patterns=args.patterns,
+            brief=brief_path(args.root, args.batch),
         ),
         persist=not args.no_write,
     )

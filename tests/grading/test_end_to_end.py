@@ -138,7 +138,7 @@ def graded_batch(tmp_path, phil210, instructor):
 
 
 def test_the_chain_runs_from_redaction_to_final_feedback(
-    graded_batch, phil210, instructor
+    graded_batch, phil210, instructor, approved_brief
 ):
     tmp_path, redacted = graded_batch
     drafts = tmp_path / "drafts"
@@ -146,6 +146,9 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
 
     rubric = load_rubric(phil210 / "grading_rubric.md")
     terms = load_terms(PATTERNS_PATH)
+    profile_path = tmp_path / ".grading" / "profiles" / "phil210.md"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_bytes((phil210 / "profile_phil210.md").read_bytes())
 
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -157,17 +160,26 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     for entry in before.entries:
         assert entry.source is not None
         record, feedback = _grade(entry.token, entry.source, rubric, terms)
+        record.profile = str(profile_path)
         record.save(drafts / f"{entry.token}.json")
         (drafts / f"{entry.token}.md").write_text(feedback, encoding="utf-8")
 
     after = batch.status()
     assert after.counts()["drafted"] == len(after.entries)
+    brief = approved_brief(
+        tmp_path / ".grading" / "assignments" / "essay-2.md",
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile_path,
+    )
     verification = batch.verify(
         VerificationInputs(
             course="phil210",
             rubric=phil210 / "grading_rubric.md",
-            profile=phil210 / "profile_phil210.md",
+            profile=profile_path,
             patterns=PATTERNS_PATH,
+            brief=brief,
         )
     )
     assert verification.blocking_findings == ()
@@ -189,7 +201,7 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
                 "--batch", "essay-2",
                 "--course", "phil210",
                 "--rubric", str(phil210 / "grading_rubric.md"),
-                "--profile", str(phil210 / "profile_phil210.md"),
+                "--profile", str(profile_path),
                 "--redacted", str(redacted),
                 "--map", str(tmp_path / "maps" / "essay-2.json"),
                 "--out", str(final),

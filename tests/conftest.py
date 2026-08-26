@@ -23,3 +23,28 @@ def instructor() -> str:
 def profile() -> Path:
     """Return the hand-written reference profile for PHIL 210."""
     return FIXTURES / "profile_phil210.md"
+
+
+@pytest.fixture
+def approved_brief():
+    """Create one answered brief bound to the supplied grading context."""
+
+    def make(path, *, batch, course, rubric, profile, mode="local"):
+        from scripts.grading.brief import approve_brief, prepare_brief
+
+        prepare_brief(path, batch=batch, course=course, mode=mode)
+        text = path.read_text(encoding="utf-8").replace(
+            "<!-- answer-required -->", "Use the rubric and calibrated profile."
+        )
+        path.write_text(text, encoding="utf-8")
+        approve_brief(
+            path,
+            batch=batch,
+            course=course,
+            rubric=rubric,
+            profile=profile,
+            approval=f"Approve assignment brief for {batch}",
+        )
+        return path
+
+    return make

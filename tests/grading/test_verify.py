@@ -331,7 +331,7 @@ def test_watched_terms_in_the_feedback_are_a_warning_not_an_error(
     assert not any(finding.code == "watched-term" for finding in errors(findings))
 
 
-def _write_batch(tmp_path, phil210, feedback=FEEDBACK):
+def _write_batch(tmp_path, phil210, approved_brief, feedback=FEEDBACK):
     redacted = tmp_path / "redacted"
     drafts = tmp_path / "drafts"
     redacted.mkdir()
@@ -345,6 +345,13 @@ def _write_batch(tmp_path, phil210, feedback=FEEDBACK):
     profile_path.write_text(
         (phil210 / "profile_phil210.md").read_text(encoding="utf-8"), encoding="utf-8"
     )
+    approved_brief(
+        root / "assignments" / "essay-2.md",
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile_path,
+    )
     record = _record(
         source=str(redacted / "STUDENT_01.md"),
         rubric=str(phil210 / "grading_rubric.md"),
@@ -352,6 +359,20 @@ def _write_batch(tmp_path, phil210, feedback=FEEDBACK):
     )
     record.save(drafts / "STUDENT_01.json")
     return redacted, drafts, root
+
+
+def _replace_approved_brief(
+    root, phil210, approved_brief, *, rubric=None, profile=None
+):
+    brief = root / "assignments" / "essay-2.md"
+    brief.unlink()
+    return approved_brief(
+        brief,
+        batch="essay-2",
+        course="phil210",
+        rubric=rubric or phil210 / "grading_rubric.md",
+        profile=profile or root / "profiles" / "phil210.md",
+    )
 
 
 def _refresh_redaction_manifest(redacted, batch="essay-2"):
@@ -372,8 +393,31 @@ def _run(*args):
     )
 
 
-def test_grading_batch_verifies_and_persists_a_clean_batch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_verification_inputs_requires_an_assignment_brief(phil210):
+    with pytest.raises(TypeError, match="brief"):
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=phil210 / "profile_phil210.md",
+            patterns=PATTERNS_PATH,
+        )
+
+
+@pytest.mark.parametrize("state", ["missing", "stale"])
+def test_assignment_brief_failure_stops_verification_without_writes(
+    tmp_path, phil210, approved_brief, state
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    brief = root / "assignments" / "essay-2.md"
+    if state == "missing":
+        brief.unlink()
+    if state == "stale":
+        brief.write_text(
+            brief.read_text(encoding="utf-8") + "changed\n", encoding="utf-8"
+        )
+    record = drafts / "STUDENT_01.json"
+    before = record.read_bytes()
+
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -382,6 +426,64 @@ def test_grading_batch_verifies_and_persists_a_clean_batch(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=brief,
+        )
+    )
+
+    assert report.status.entries == ()
+    assert report.status.blocking_findings == ()
+    assert [finding.code for finding in report.blocking_findings] == [
+        "malformed-assignment-brief"
+    ]
+    assert report.checked_tokens == ()
+    assert record.read_bytes() == before
+    assert report.receipt is None
+    assert report.persisted is False
+    assert report.failure is VerificationFailure.MALFORMED
+    assert not (drafts / "_verification.json").exists()
+
+
+def test_assignment_brief_gate_runs_before_batch_status(
+    tmp_path, phil210, approved_brief, monkeypatch
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    (root / "assignments" / "essay-2.md").unlink()
+
+    def fail_status(*args, **kwargs):
+        raise AssertionError("batch artifacts were read")
+
+    monkeypatch.setattr(GradingBatch, "_status", fail_status)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "malformed-assignment-brief"
+    ]
+
+
+def test_grading_batch_verifies_and_persists_a_clean_batch(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -393,9 +495,9 @@ def test_grading_batch_verifies_and_persists_a_clean_batch(tmp_path, phil210):
 
 
 def test_predictable_verification_temp_symlinks_are_never_followed(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     sentinel = tmp_path / "unrelated.txt"
     sentinel.write_text("leave me alone", encoding="utf-8")
     (drafts / ".STUDENT_01.json.verified.tmp").symlink_to(sentinel)
@@ -409,6 +511,7 @@ def test_predictable_verification_temp_symlinks_are_never_followed(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -418,11 +521,13 @@ def test_predictable_verification_temp_symlinks_are_never_followed(
 
 
 def test_verification_refuses_a_manifest_from_another_redaction_result(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     source = redacted / "STUDENT_01.md"
-    source.write_text(source.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8")
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8"
+    )
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -432,6 +537,7 @@ def test_verification_refuses_a_manifest_from_another_redaction_result(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -442,8 +548,10 @@ def test_verification_refuses_a_manifest_from_another_redaction_result(
     assert not (drafts / "_verification.json").exists()
 
 
-def test_persisted_verification_writes_one_versioned_receipt(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_persisted_verification_writes_one_versioned_receipt(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -453,6 +561,7 @@ def test_persisted_verification_writes_one_versioned_receipt(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -462,12 +571,14 @@ def test_persisted_verification_writes_one_versioned_receipt(tmp_path, phil210):
         "_verification.json"
     ]
     payload = json.loads(receipt.read_text(encoding="utf-8"))
-    assert payload["schema"] == "grading-batch-verification/1"
+    assert payload["schema"] == "grading-batch-verification/2"
     assert payload["batch"] == "essay-2"
 
 
-def test_no_write_verification_writes_neither_offsets_nor_a_receipt(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_no_write_verification_writes_neither_offsets_nor_a_receipt(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     record_path = drafts / "STUDENT_01.json"
     before = record_path.read_bytes()
 
@@ -479,6 +590,7 @@ def test_no_write_verification_writes_neither_offsets_nor_a_receipt(tmp_path, ph
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         ),
         persist=False,
     )
@@ -490,8 +602,10 @@ def test_no_write_verification_writes_neither_offsets_nor_a_receipt(tmp_path, ph
     assert not (drafts / "_verification.json").exists()
 
 
-def test_receipt_binds_every_identity_free_artifact_with_sha256(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_receipt_binds_every_identity_free_artifact_with_sha256(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -500,6 +614,7 @@ def test_receipt_binds_every_identity_free_artifact_with_sha256(tmp_path, phil21
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -508,6 +623,7 @@ def test_receipt_binds_every_identity_free_artifact_with_sha256(tmp_path, phil21
     assert payload["course"] == "phil210"
     assert payload["hash"] == "sha256"
     assert [artifact["role"] for artifact in payload["artifacts"]] == [
+        "assignment-brief",
         "calibration-profile",
         "draft",
         "grade-record",
@@ -537,8 +653,10 @@ def test_receipt_binds_every_identity_free_artifact_with_sha256(tmp_path, phil21
     assert "TokenMap" not in blob
 
 
-def test_repeated_verification_writes_the_same_receipt_bytes(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_repeated_verification_writes_the_same_receipt_bytes(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -547,6 +665,7 @@ def test_repeated_verification_writes_the_same_receipt_bytes(tmp_path, phil210):
         rubric=phil210 / "grading_rubric.md",
         profile=root / "profiles" / "phil210.md",
         patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
     )
 
     batch.verify(inputs)
@@ -556,8 +675,10 @@ def test_repeated_verification_writes_the_same_receipt_bytes(tmp_path, phil210):
     assert (drafts / "_verification.json").read_bytes() == first
 
 
-def test_current_receipt_makes_grading_batch_progress_verified(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_current_receipt_makes_grading_batch_progress_verified(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -567,6 +688,7 @@ def test_current_receipt_makes_grading_batch_progress_verified(tmp_path, phil210
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -577,9 +699,9 @@ def test_current_receipt_makes_grading_batch_progress_verified(tmp_path, phil210
 
 
 def test_legacy_batch_requires_verification_only_when_eligibility_is_requested(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, _ = _write_batch(tmp_path, phil210)
+    redacted, drafts, _ = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -603,9 +725,9 @@ def test_legacy_batch_requires_verification_only_when_eligibility_is_requested(
     ],
 )
 def test_malformed_or_unknown_receipt_never_grants_verified_progress(
-    tmp_path, phil210, receipt_text
+    tmp_path, phil210, approved_brief, receipt_text
 ):
-    redacted, drafts, _ = _write_batch(tmp_path, phil210)
+    redacted, drafts, _ = _write_batch(tmp_path, phil210, approved_brief)
     (drafts / "_verification.json").write_text(receipt_text, encoding="utf-8")
 
     status = GradingBatch.open(
@@ -618,8 +740,10 @@ def test_malformed_or_unknown_receipt_never_grants_verified_progress(
     ]
 
 
-def test_receipt_with_malformed_artifact_evidence_is_rejected(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_receipt_with_malformed_artifact_evidence_is_rejected(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -629,6 +753,7 @@ def test_receipt_with_malformed_artifact_evidence_is_rejected(tmp_path, phil210)
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
     receipt = drafts / "_verification.json"
@@ -644,14 +769,53 @@ def test_receipt_with_malformed_artifact_evidence_is_rejected(tmp_path, phil210)
     ]
 
 
+@pytest.mark.parametrize("change", ["missing", "duplicate", "token", "suffix"])
+def test_receipt_requires_one_token_free_markdown_assignment_brief(
+    tmp_path, phil210, approved_brief, change
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    batch = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    )
+    batch.verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+    receipt = drafts / "_verification.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assignment = next(
+        item for item in payload["artifacts"] if item["role"] == "assignment-brief"
+    )
+    if change == "missing":
+        payload["artifacts"].remove(assignment)
+    elif change == "duplicate":
+        payload["artifacts"].append(dict(assignment))
+    elif change == "token":
+        assignment["token"] = "STUDENT_01"
+    else:
+        assignment["path"] = "../assignments/essay-2.txt"
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+
+    status = batch.status()
+
+    assert [finding.code for finding in status.blocking_findings] == [
+        "malformed-verification-receipt"
+    ]
+
+
 @pytest.mark.parametrize(
     "change",
     ["changed", "added", "removed", "renamed", "missing-course-evidence"],
 )
 def test_any_receipt_bound_artifact_change_invalidates_verified_progress(
-    tmp_path, phil210, change
+    tmp_path, phil210, approved_brief, change
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -660,6 +824,7 @@ def test_any_receipt_bound_artifact_change_invalidates_verified_progress(
         rubric=phil210 / "grading_rubric.md",
         profile=root / "profiles" / "phil210.md",
         patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
     )
     batch.verify(inputs)
 
@@ -685,6 +850,7 @@ def test_any_receipt_bound_artifact_change_invalidates_verified_progress(
 @pytest.mark.parametrize(
     "role",
     [
+        "assignment-brief",
         "redacted-submission",
         "draft",
         "grade-record",
@@ -694,8 +860,10 @@ def test_any_receipt_bound_artifact_change_invalidates_verified_progress(
         "redaction-manifest",
     ],
 )
-def test_edit_to_each_bound_artifact_role_invalidates_receipt(tmp_path, phil210, role):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_edit_to_each_bound_artifact_role_invalidates_receipt(
+    tmp_path, phil210, approved_brief, role
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     rubric = tmp_path / "rubric.md"
     rubric.write_bytes((phil210 / "grading_rubric.md").read_bytes())
     patterns = tmp_path / "patterns.md"
@@ -709,12 +877,14 @@ def test_edit_to_each_bound_artifact_role_invalidates_receipt(tmp_path, phil210,
         rubric=rubric,
         profile=root / "profiles" / "phil210.md",
         patterns=patterns,
+        brief=root / "assignments" / "essay-2.md",
     )
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
     batch.verify(inputs)
     artifacts = {
+        "assignment-brief": inputs.brief,
         "redacted-submission": redacted / "STUDENT_01.md",
         "draft": drafts / "STUDENT_01.md",
         "grade-record": record_path,
@@ -732,8 +902,8 @@ def test_edit_to_each_bound_artifact_role_invalidates_receipt(tmp_path, phil210,
     }
 
 
-def test_reverification_replaces_a_stale_receipt(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_reverification_replaces_a_stale_receipt(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     batch = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     )
@@ -742,6 +912,7 @@ def test_reverification_replaces_a_stale_receipt(tmp_path, phil210):
         rubric=phil210 / "grading_rubric.md",
         profile=root / "profiles" / "phil210.md",
         patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
     )
     batch.verify(inputs)
     (drafts / "STUDENT_01.md").write_text(FEEDBACK + "\n", encoding="utf-8")
@@ -756,9 +927,9 @@ def test_reverification_replaces_a_stale_receipt(tmp_path, phil210):
 
 
 def test_status_cli_reports_verified_progress_from_a_current_receipt(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -767,6 +938,7 @@ def test_status_cli_reports_verified_progress_from_a_current_receipt(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -785,8 +957,10 @@ def test_status_cli_reports_verified_progress_from_a_current_receipt(
     assert "1 verified" in result.stdout
 
 
-def test_grading_batch_never_trusts_the_grade_record_source_path(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_grading_batch_never_trusts_the_grade_record_source_path(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     outside = tmp_path / "submissions" / "STUDENT_01.md"
     outside.parent.mkdir()
     outside.write_bytes(b"\xff")
@@ -803,20 +977,21 @@ def test_grading_batch_never_trusts_the_grade_record_source_path(tmp_path, phil2
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
-    assert [finding.code for finding in report.blocking_findings] == [
-        "source-mismatch"
-    ]
+    assert [finding.code for finding in report.blocking_findings] == ["source-mismatch"]
     assert report.checked_tokens == ("STUDENT_01",)
     assert report.persisted is False
     payload = json.loads(record_path.read_text(encoding="utf-8"))
     assert "offset" not in payload["criteria"][0]["justifications"][0]
 
 
-def test_grading_batch_reports_every_grading_context_mismatch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_grading_batch_reports_every_grading_context_mismatch(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     record_path = drafts / "STUDENT_01.json"
     record = GradeRecord.load(record_path)
     record.token = "STUDENT_99"
@@ -834,6 +1009,7 @@ def test_grading_batch_reports_every_grading_context_mismatch(tmp_path, phil210)
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -848,8 +1024,10 @@ def test_grading_batch_reports_every_grading_context_mismatch(tmp_path, phil210)
     assert report.persisted is False
 
 
-def test_loaded_profile_must_name_the_requested_course(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_loaded_profile_must_name_the_requested_course(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     profile_path = root / "profiles" / "phil210.md"
     profile_path.write_text(
         profile_path.read_text(encoding="utf-8").replace(
@@ -857,6 +1035,7 @@ def test_loaded_profile_must_name_the_requested_course(tmp_path, phil210):
         ),
         encoding="utf-8",
     )
+    _replace_approved_brief(root, phil210, approved_brief, profile=profile_path)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -866,6 +1045,7 @@ def test_loaded_profile_must_name_the_requested_course(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=profile_path,
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -875,10 +1055,10 @@ def test_loaded_profile_must_name_the_requested_course(tmp_path, phil210):
     )
 
 
-def test_independent_course_evidence_failures_are_reported_together(
-    tmp_path, phil210
+def test_missing_bound_profile_stops_before_other_course_evidence_reads(
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     profile_path = root / "profiles" / "phil210.md"
     profile_path.unlink()
     rubric_path = tmp_path / "broken-rubric.md"
@@ -894,22 +1074,25 @@ def test_independent_course_evidence_failures_are_reported_together(
             rubric=rubric_path,
             profile=profile_path,
             patterns=patterns_path,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
-    codes = {finding.code for finding in report.blocking_findings}
-    assert {"no-profile", "malformed-rubric", "malformed-patterns"} <= codes
+    assert [finding.code for finding in report.blocking_findings] == [
+        "malformed-assignment-brief"
+    ]
+    assert report.checked_tokens == ()
 
 
-def test_grading_batch_accepts_equivalent_normalized_paths(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_grading_batch_accepts_equivalent_normalized_paths(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     record_path = drafts / "STUDENT_01.json"
     record = GradeRecord.load(record_path)
     record.source = str(redacted / ".." / "redacted" / "STUDENT_01.md")
     record.rubric = str(phil210 / ".." / "phil210" / "grading_rubric.md")
-    record.profile = str(
-        root / "profiles" / ".." / "profiles" / "phil210.md"
-    )
+    record.profile = str(root / "profiles" / ".." / "profiles" / "phil210.md")
     record.save(record_path)
 
     report = GradingBatch.open(
@@ -920,6 +1103,7 @@ def test_grading_batch_accepts_equivalent_normalized_paths(tmp_path, phil210):
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -928,11 +1112,12 @@ def test_grading_batch_accepts_equivalent_normalized_paths(tmp_path, phil210):
 
 
 def test_grading_batch_aggregates_failures_and_leaves_every_record_unchanged(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
     redacted, drafts, root = _write_batch(
         tmp_path,
         phil210,
+        approved_brief,
         feedback=FEEDBACK.replace("— Dr. Vance", "Regards,"),
     )
     (redacted / "STUDENT_02.md").write_text(SOURCE, encoding="utf-8")
@@ -952,6 +1137,7 @@ def test_grading_batch_aggregates_failures_and_leaves_every_record_unchanged(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -968,9 +1154,9 @@ def test_grading_batch_aggregates_failures_and_leaves_every_record_unchanged(
 
 
 def test_grading_batch_reports_unreadable_artifacts_and_checks_later_work(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     (drafts / "STUDENT_01.md").write_bytes(b"\xff")
     second_source = redacted / "STUDENT_02.md"
     second_source.write_text(SOURCE, encoding="utf-8")
@@ -993,6 +1179,7 @@ def test_grading_batch_reports_unreadable_artifacts_and_checks_later_work(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -1005,9 +1192,9 @@ def test_grading_batch_reports_unreadable_artifacts_and_checks_later_work(
 
 
 def test_semantically_malformed_record_does_not_stop_later_verification(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     first_path = drafts / "STUDENT_01.json"
     first = GradeRecord.load(first_path)
     first.criteria[0].score = "twenty"
@@ -1031,6 +1218,7 @@ def test_semantically_malformed_record_does_not_stop_later_verification(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -1041,10 +1229,10 @@ def test_semantically_malformed_record_does_not_stop_later_verification(
     assert report.failure is VerificationFailure.MALFORMED
 
 
-def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
-    tmp_path, phil210
+def test_missing_profile_invalidates_assignment_approval_before_inventory(
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     (drafts / "STUDENT_02.md").write_text("feedback", encoding="utf-8")
     profile_path = root / "profiles" / "phil210.md"
     profile_path.unlink()
@@ -1057,22 +1245,26 @@ def test_grading_batch_reports_a_missing_profile_without_skipping_inventory(
             rubric=phil210 / "grading_rubric.md",
             profile=profile_path,
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
-    assert report.failure is VerificationFailure.NO_PROFILE
+    assert report.failure is VerificationFailure.MALFORMED
     assert [finding.code for finding in report.blocking_findings] == [
-        "orphaned-artifact",
-        "no-profile",
+        "malformed-assignment-brief",
     ]
+    assert report.status.entries == ()
     assert report.checked_tokens == ()
     assert report.persisted is False
 
 
-def test_grading_batch_reports_an_unreadable_profile_as_malformed(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_grading_batch_reports_an_unreadable_profile_as_malformed(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     profile_path = root / "profiles" / "phil210.md"
     profile_path.write_bytes(b"\xff")
+    _replace_approved_brief(root, phil210, approved_brief, profile=profile_path)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -1082,6 +1274,7 @@ def test_grading_batch_reports_an_unreadable_profile_as_malformed(tmp_path, phil
             rubric=phil210 / "grading_rubric.md",
             profile=profile_path,
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -1091,8 +1284,10 @@ def test_grading_batch_reports_an_unreadable_profile_as_malformed(tmp_path, phil
     ]
 
 
-def test_missing_profile_does_not_hide_a_malformed_grade_record(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_missing_profile_stops_before_a_malformed_grade_record_is_read(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     (drafts / "STUDENT_01.json").write_text("{not json", encoding="utf-8")
     profile_path = root / "profiles" / "phil210.md"
     profile_path.unlink()
@@ -1105,20 +1300,21 @@ def test_missing_profile_does_not_hide_a_malformed_grade_record(tmp_path, phil21
             rubric=phil210 / "grading_rubric.md",
             profile=profile_path,
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
-    assert report.failure is VerificationFailure.NO_PROFILE
+    assert report.failure is VerificationFailure.MALFORMED
     assert [finding.code for finding in report.blocking_findings] == [
-        "malformed-record",
-        "no-profile",
+        "malformed-assignment-brief",
     ]
+    assert report.checked_tokens == ()
 
 
-def test_missing_profile_does_not_hide_safe_metadata_and_read_findings(
-    tmp_path, phil210
+def test_missing_profile_stops_before_record_metadata_and_draft_reads(
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     outside = tmp_path / "submissions" / "STUDENT_01.md"
     outside.parent.mkdir()
     outside.write_text("outside", encoding="utf-8")
@@ -1139,20 +1335,21 @@ def test_missing_profile_does_not_hide_safe_metadata_and_read_findings(
             rubric=phil210 / "grading_rubric.md",
             profile=profile_path,
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
-    assert report.failure is VerificationFailure.NO_PROFILE
+    assert report.failure is VerificationFailure.MALFORMED
     assert [finding.code for finding in report.blocking_findings] == [
-        "token-mismatch",
-        "source-mismatch",
-        "unreadable-draft",
-        "no-profile",
+        "malformed-assignment-brief",
     ]
+    assert report.checked_tokens == ()
 
 
-def test_grading_batch_names_rubric_drift_before_checking_drafts(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_grading_batch_names_rubric_drift_before_checking_drafts(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     edited = tmp_path / "edited-rubric.md"
     edited.write_text(
         (phil210 / "grading_rubric.md")
@@ -1164,6 +1361,7 @@ def test_grading_batch_names_rubric_drift_before_checking_drafts(tmp_path, phil2
     record = GradeRecord.load(record_path)
     record.rubric = str(edited)
     record.save(record_path)
+    _replace_approved_brief(root, phil210, approved_brief, rubric=edited)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -1173,20 +1371,21 @@ def test_grading_batch_names_rubric_drift_before_checking_drafts(tmp_path, phil2
             rubric=edited,
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
     assert report.failure is VerificationFailure.RUBRIC_DRIFT
-    assert [finding.code for finding in report.blocking_findings] == [
-        "rubric-drift"
-    ]
+    assert [finding.code for finding in report.blocking_findings] == ["rubric-drift"]
     assert "Thesis" in report.blocking_findings[0].message
     assert report.checked_tokens == ()
     assert report.persisted is False
 
 
-def test_incomplete_pairs_still_report_available_record_metadata(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_incomplete_pairs_still_report_available_record_metadata(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     (drafts / "STUDENT_01.md").unlink()
     record_path = drafts / "STUDENT_01.json"
     record = GradeRecord.load(record_path)
@@ -1205,6 +1404,7 @@ def test_incomplete_pairs_still_report_available_record_metadata(tmp_path, phil2
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -1219,7 +1419,7 @@ def test_incomplete_pairs_still_report_available_record_metadata(tmp_path, phil2
 
 
 def test_grading_batch_refuses_verification_when_there_are_no_grade_records(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
     redacted = tmp_path / "redacted"
     drafts = tmp_path / "drafts"
@@ -1227,6 +1427,14 @@ def test_grading_batch_refuses_verification_when_there_are_no_grade_records(
     drafts.mkdir()
     (redacted / "STUDENT_01.md").write_text(SOURCE, encoding="utf-8")
     _refresh_redaction_manifest(redacted)
+    root = tmp_path / ".grading"
+    brief = approved_brief(
+        root / "assignments" / "essay-2.md",
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=phil210 / "profile_phil210.md",
+    )
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -1236,6 +1444,7 @@ def test_grading_batch_refuses_verification_when_there_are_no_grade_records(
             rubric=phil210 / "grading_rubric.md",
             profile=phil210 / "profile_phil210.md",
             patterns=PATTERNS_PATH,
+            brief=brief,
         )
     )
 
@@ -1245,9 +1454,9 @@ def test_grading_batch_refuses_verification_when_there_are_no_grade_records(
 
 
 def test_grading_batch_reports_a_missing_pattern_reference_as_malformed(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -1257,6 +1466,7 @@ def test_grading_batch_reports_a_missing_pattern_reference_as_malformed(
             rubric=phil210 / "grading_rubric.md",
             profile=root / "profiles" / "phil210.md",
             patterns=tmp_path / "missing-patterns.md",
+            brief=root / "assignments" / "essay-2.md",
         )
     )
 
@@ -1267,29 +1477,51 @@ def test_grading_batch_reports_a_missing_pattern_reference_as_malformed(
     assert report.checked_tokens == ()
 
 
-def test_the_cli_passes_a_clean_batch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_cli_passes_a_clean_batch(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     result = _run(
-        "verify", "--batch", "essay-2", "--course", "phil210",
-        "--rubric", str(phil210 / "grading_rubric.md"),
-        "--redacted", str(redacted), "--drafts", str(drafts), "--root", str(root),
+        "verify",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+        "--root",
+        str(root),
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_the_cli_writes_offsets_back_into_the_record(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_cli_writes_offsets_back_into_the_record(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     _run(
-        "verify", "--batch", "essay-2", "--course", "phil210",
-        "--rubric", str(phil210 / "grading_rubric.md"),
-        "--redacted", str(redacted), "--drafts", str(drafts), "--root", str(root),
+        "verify",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+        "--root",
+        str(root),
     )
     payload = json.loads((drafts / "STUDENT_01.json").read_text(encoding="utf-8"))
     assert payload["criteria"][0]["justifications"][0]["offset"] >= 0
 
 
-def test_the_cli_no_write_check_writes_neither_offsets_nor_receipt(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_cli_no_write_check_writes_neither_offsets_nor_receipt(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     record_path = drafts / "STUDENT_01.json"
     before = record_path.read_bytes()
 
@@ -1316,21 +1548,36 @@ def test_the_cli_no_write_check_writes_neither_offsets_nor_receipt(tmp_path, phi
     assert not (drafts / "_verification.json").exists()
 
 
-def test_the_cli_fails_a_batch_with_a_bad_draft(tmp_path, phil210):
+def test_the_cli_fails_a_batch_with_a_bad_draft(tmp_path, phil210, approved_brief):
     redacted, drafts, root = _write_batch(
-        tmp_path, phil210, feedback=FEEDBACK.replace("— Dr. Vance", "Regards,")
+        tmp_path,
+        phil210,
+        approved_brief,
+        feedback=FEEDBACK.replace("— Dr. Vance", "Regards,"),
     )
     result = _run(
-        "verify", "--batch", "essay-2", "--course", "phil210",
-        "--rubric", str(phil210 / "grading_rubric.md"),
-        "--redacted", str(redacted), "--drafts", str(drafts), "--root", str(root),
+        "verify",
+        "--batch",
+        "essay-2",
+        "--course",
+        "phil210",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--redacted",
+        str(redacted),
+        "--drafts",
+        str(drafts),
+        "--root",
+        str(root),
     )
     assert result.returncode == 12
     assert "sign-off" in result.stdout + result.stderr
 
 
-def test_the_cli_never_persists_part_of_a_failing_batch(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_cli_never_persists_part_of_a_failing_batch(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     first_record = drafts / "STUDENT_01.json"
     before_first = first_record.read_bytes()
     second_source = redacted / "STUDENT_02.md"
@@ -1367,8 +1614,10 @@ def test_the_cli_never_persists_part_of_a_failing_batch(tmp_path, phil210):
     assert first_record.read_bytes() == before_first
 
 
-def test_the_cli_never_opens_a_non_redacted_record_source(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_cli_never_opens_a_non_redacted_record_source(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     outside = tmp_path / "submissions" / "STUDENT_01.md"
     outside.parent.mkdir()
     outside.write_bytes(b"\xff")
@@ -1397,8 +1646,10 @@ def test_the_cli_never_opens_a_non_redacted_record_source(tmp_path, phil210):
     assert "source-mismatch" in result.stdout + result.stderr
 
 
-def test_the_verify_cli_preserves_missing_profile_exit_10(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_verify_cli_reports_missing_bound_profile_as_malformed_brief(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     (root / "profiles" / "phil210.md").unlink()
 
     result = _run(
@@ -1417,15 +1668,17 @@ def test_the_verify_cli_preserves_missing_profile_exit_10(tmp_path, phil210):
         str(root),
     )
 
-    assert result.returncode == 10
-    assert "calibrate" in (result.stdout + result.stderr).lower()
+    assert result.returncode == 13
+    assert "malformed-assignment-brief" in result.stdout + result.stderr
 
 
 def test_the_verify_cli_reports_an_unreadable_profile_as_malformed(
-    tmp_path, phil210
+    tmp_path, phil210, approved_brief
 ):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
-    (root / "profiles" / "phil210.md").write_bytes(b"\xff")
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    profile_path = root / "profiles" / "phil210.md"
+    profile_path.write_bytes(b"\xff")
+    _replace_approved_brief(root, phil210, approved_brief, profile=profile_path)
 
     result = _run(
         "verify",
@@ -1447,8 +1700,10 @@ def test_the_verify_cli_reports_an_unreadable_profile_as_malformed(
     assert "malformed-profile" in result.stdout + result.stderr
 
 
-def test_the_verify_cli_preserves_rubric_drift_exit_11(tmp_path, phil210):
-    redacted, drafts, root = _write_batch(tmp_path, phil210)
+def test_the_verify_cli_preserves_rubric_drift_exit_11(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
     edited = tmp_path / "edited-rubric.md"
     edited.write_text(
         (phil210 / "grading_rubric.md")
@@ -1460,6 +1715,7 @@ def test_the_verify_cli_preserves_rubric_drift_exit_11(tmp_path, phil210):
     record = GradeRecord.load(record_path)
     record.rubric = str(edited)
     record.save(record_path)
+    _replace_approved_brief(root, phil210, approved_brief, rubric=edited)
 
     result = _run(
         "verify",
@@ -1483,9 +1739,13 @@ def test_the_verify_cli_preserves_rubric_drift_exit_11(tmp_path, phil210):
 
 def test_the_cli_refuses_to_grade_without_a_profile(tmp_path, phil210):
     result = _run(
-        "profile", "--course", "eng999",
-        "--rubric", str(phil210 / "grading_rubric.md"),
-        "--root", str(tmp_path),
+        "profile",
+        "--course",
+        "eng999",
+        "--rubric",
+        str(phil210 / "grading_rubric.md"),
+        "--root",
+        str(tmp_path),
     )
     assert result.returncode == 10
     assert "calibrate" in (result.stdout + result.stderr).lower()
@@ -1504,8 +1764,9 @@ def test_the_cli_names_drifted_criteria(tmp_path, phil210):
         .replace("Formulates a sharp, defensible", "Formulates a clear"),
         encoding="utf-8",
     )
-    result = _run("profile", "--course", "phil210", "--rubric", str(edited),
-                  "--root", str(root))
+    result = _run(
+        "profile", "--course", "phil210", "--rubric", str(edited), "--root", str(root)
+    )
     assert result.returncode == 11
     assert "Thesis" in result.stdout + result.stderr
 
