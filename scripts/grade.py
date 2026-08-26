@@ -88,11 +88,16 @@ def _drafts_dir(args: argparse.Namespace) -> Path:
     return args.drafts or (args.root / "drafts" / args.batch)
 
 
-def _profile_or_exit(args: argparse.Namespace):
+def _profile_or_exit(
+    args: argparse.Namespace, *, error_prefix: str | None = None
+):
     path = profile_path(args.course, args.root)
     try:
         return load_profile(path)
     except ProfileError as error:
+        if error_prefix is not None:
+            print(f"{error_prefix} {error}", file=sys.stderr)
+            raise SystemExit(EXIT_NO_PROFILE) from error
         print(str(error), file=sys.stderr)
         print(
             f"Run `/grade calibrate --course {args.course}` first. Grading "
@@ -319,13 +324,15 @@ def _brief_error(error: Exception) -> int:
 
 
 def _brief_profile_and_rubric(args: argparse.Namespace):
-    profile = _profile_or_exit(args)
+    profile = _profile_or_exit(args, error_prefix="ERROR assignment-brief:")
     rubric = load_rubric(args.rubric)
     drifted = profile.drift(rubric)
     if drifted:
-        print("ERROR assignment-brief: The rubric changed since calibration:", file=sys.stderr)
-        for name in drifted:
-            print(f"  {name}", file=sys.stderr)
+        print(
+            "ERROR assignment-brief: The rubric changed since calibration: "
+            + "; ".join(drifted),
+            file=sys.stderr,
+        )
         raise SystemExit(EXIT_DRIFT)
     return profile, rubric
 

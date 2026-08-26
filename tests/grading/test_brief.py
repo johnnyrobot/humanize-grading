@@ -40,6 +40,10 @@ def _copy_profile(root: Path, profile: Path) -> None:
     (root / "profiles" / "phil210.md").write_bytes(profile.read_bytes())
 
 
+def _assignment_brief_errors(stderr: str) -> list[str]:
+    return [line for line in stderr.splitlines() if line.strip()]
+
+
 def _approved(path: Path, phil210: Path, profile: Path) -> None:
     prepare_brief(path, batch="essay-3", course="phil210", mode="local")
     _answer(path)
@@ -347,6 +351,9 @@ def test_brief_cli_preserves_missing_profile_exit_10(tmp_path, phil210):
     )
 
     assert result.returncode == 10
+    errors = _assignment_brief_errors(result.stderr)
+    assert len(errors) == 1
+    assert errors[0].startswith("ERROR assignment-brief:")
 
 
 def test_brief_cli_preserves_rubric_drift_exit_11(tmp_path, phil210, profile):
@@ -374,6 +381,9 @@ def test_brief_cli_preserves_rubric_drift_exit_11(tmp_path, phil210, profile):
     )
 
     assert result.returncode == 11
+    errors = _assignment_brief_errors(result.stderr)
+    assert len(errors) == 1
+    assert errors[0].startswith("ERROR assignment-brief:")
 
 
 def test_brief_cli_refuses_a_stale_brief_with_exit_13(tmp_path, phil210, profile):
