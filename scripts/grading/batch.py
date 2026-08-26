@@ -830,7 +830,7 @@ class GradingBatch:
         self, inputs: VerificationInputs, *, persist: bool = True
     ) -> VerificationReport:
         try:
-            check_brief(
+            approved_brief = check_brief(
                 inputs.brief,
                 batch=self.paths.batch,
                 course=inputs.course,
@@ -858,6 +858,26 @@ class GradingBatch:
             initial_digests = _verification_digests(self.paths, inputs, status)
         except OSError:
             initial_digests = {}
+        approved_digests = {
+            inputs.brief.resolve(): approved_brief.source_sha256,
+            inputs.rubric.resolve(): approved_brief.rubric_sha256,
+            inputs.profile.resolve(): approved_brief.profile_sha256,
+        }
+        if initial_digests and any(
+            initial_digests.get(path) != digest
+            for path, digest in approved_digests.items()
+        ):
+            blocking.append(
+                BlockingFinding(
+                    code="batch-changed",
+                    message=(
+                        "The approved assignment brief, rubric, or calibration "
+                        "profile changed before verification could snapshot it. Run "
+                        "verification again."
+                    ),
+                    token="",
+                )
+            )
         if not any(entry.record is not None for entry in status.entries):
             blocking.append(
                 BlockingFinding(

@@ -13,7 +13,6 @@ from pathlib import Path
 from scripts.path_safety import (
     has_symlink_component,
     read_bytes_limited,
-    read_text_limited,
     require_component,
 )
 from scripts.redaction.private_files import write_private_text
@@ -66,6 +65,7 @@ class AssignmentBrief:
     approved_at: str
     approval: str
     body: str
+    source_sha256: str = ""
 
 
 def brief_path(root: Path, batch: str) -> Path:
@@ -170,13 +170,16 @@ def check_brief(
 def _load(path: Path) -> AssignmentBrief:
     _reject_symlink_path(path)
     try:
-        text = read_text_limited(path, "The assignment brief", BRIEF_LIMIT)
+        source = read_bytes_limited(path, "The assignment brief", BRIEF_LIMIT)
+        text = source.decode("utf-8")
     except (OSError, UnicodeError, ValueError) as error:
         raise BriefError(str(error)) from error
-    return _parse_text(path, text)
+    return _parse_text(path, text, source_sha256=_digest_bytes(source))
 
 
-def _parse_text(path: Path, text: str) -> AssignmentBrief:
+def _parse_text(
+    path: Path, text: str, *, source_sha256: str = ""
+) -> AssignmentBrief:
     metadata, body = _split_front_matter(text)
     _validate_metadata(metadata)
     _validate_body(body, metadata["mode"])
@@ -192,6 +195,7 @@ def _parse_text(path: Path, text: str) -> AssignmentBrief:
         approved_at=metadata["approved_at"],
         approval=metadata["approval"],
         body=body,
+        source_sha256=source_sha256 or _digest_bytes(text.encode("utf-8")),
     )
 
 

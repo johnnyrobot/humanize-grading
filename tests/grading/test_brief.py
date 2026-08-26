@@ -1,5 +1,6 @@
 """Assignment briefs are explicit, inspectable grading approval state."""
 
+import hashlib
 import subprocess
 import sys
 from pathlib import Path
@@ -113,6 +114,7 @@ def test_approved_brief_binds_body_rubric_and_profile(tmp_path, phil210, profile
     assert approved.status == "approved"
     assert approved.approved_at.endswith("Z")
     assert len(approved.body_sha256) == 64
+    assert approved.source_sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
     assert check_brief(
         path,
         batch="essay-3",

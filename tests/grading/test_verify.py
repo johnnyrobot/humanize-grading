@@ -15,6 +15,7 @@ from scripts.grading.batch import (
     VerificationFailure,
     VerificationInputs,
 )
+from scripts.grading.brief import check_brief
 from scripts.grading.density import PATTERNS_PATH, load_terms
 from scripts.grading.profile import load_profile
 from scripts.grading.records import (
@@ -469,6 +470,52 @@ def test_assignment_brief_gate_runs_before_batch_status(
     assert [finding.code for finding in report.blocking_findings] == [
         "malformed-assignment-brief"
     ]
+
+
+@pytest.mark.parametrize("changed", ["brief", "rubric", "profile"])
+def test_approval_snapshot_change_before_initial_digest_blocks_receipt(
+    tmp_path, phil210, approved_brief, monkeypatch, changed
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    rubric = tmp_path / "rubric.md"
+    rubric.write_bytes((phil210 / "grading_rubric.md").read_bytes())
+    record = drafts / "STUDENT_01.json"
+    grade_record = GradeRecord.load(record)
+    grade_record.rubric = str(rubric)
+    grade_record.save(record)
+    _replace_approved_brief(root, phil210, approved_brief, rubric=rubric)
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=rubric,
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
+    )
+    changed_path = {
+        "brief": inputs.brief,
+        "rubric": inputs.rubric,
+        "profile": inputs.profile,
+    }[changed]
+    before = record.read_bytes()
+
+    def mutate_after_check(*args, **kwargs):
+        checked = check_brief(*args, **kwargs)
+        changed_path.write_bytes(changed_path.read_bytes() + b"\n")
+        return checked
+
+    monkeypatch.setattr("scripts.grading.batch.check_brief", mutate_after_check)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(inputs)
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "batch-changed"
+    ]
+    assert report.persisted is False
+    assert report.receipt is None
+    assert record.read_bytes() == before
+    assert not (drafts / "_verification.json").exists()
 
 
 def test_grading_batch_verifies_and_persists_a_clean_batch(
