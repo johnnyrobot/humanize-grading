@@ -196,6 +196,17 @@ python3 scripts/grade.py next \
    execute the commands in that order.
 3. Run `next --json` again. Repeat until it returns `review-publication`.
 
+Treat each command-tool call as a fresh shell unless the harness documents a
+persistent working directory. Set the tool's working directory to the package
+root, or prefix every command with `cd <package-root> &&`. The `--root` option
+names the grading state directory and defaults to `.grading`; it is not the
+repository root.
+
+If a harness suppresses an identical `next` call after the state changes, end
+the agent turn and ask the instructor to send `Continue`. In the new turn, run
+the same argument array. Do not change paths, add `--root`, or reorder lifecycle
+steps merely to bypass command deduplication.
+
 When the action is `review-redaction`, stop. Ask the instructor to
 inspect the review file locally,
 outside this conversation and confirm that review is complete. Never read or

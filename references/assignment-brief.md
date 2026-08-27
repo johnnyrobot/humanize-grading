@@ -50,7 +50,10 @@ fails, keep the brief unprepared, report the exact error, and retry with
 corrected arguments. Do not hand-build a replacement brief.
 
 Replace every `<!-- answer-required -->` marker with the instructor's answers.
-Then show a short summary with the course, assignment, batch, file paths,
+The generated `Host mode:` line already records local or cloud operation. In
+the `Boundaries` answer, record the privacy consequence and prohibited moves;
+do not repeat or replace that generated line. Then show a short summary with
+the course, assignment, batch, file paths,
 profile status, grading priorities, required evidence, feedback behavior,
 prohibited assumptions, host mode, and privacy consequence.
 

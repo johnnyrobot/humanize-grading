@@ -55,6 +55,11 @@ agent must not open the rehydrated files; the instructor reviews them locally.
    `grade.py next --json`, execute the returned action, and repeat. It prepares
    each draft pair from the rubric instead of inventing record JSON. Whole-batch
    verification binds the exact approved brief in a schema 2 receipt.
+   Sandboxed agent tools may reset their working directory between calls, so
+   the agent sets the package directory on every command. If a harness
+   suppresses a repeated `next` call, the agent pauses for `Continue` and runs
+   the same arguments in the new turn. It does not change `--root`, which means
+   the grading state directory and defaults to `.grading`.
 6. **Review the rehydrated drafts and submit them yourself.** Rehydration restores
    identities on the instructor's machine. The agent must not reopen those
    files, and the package never sends grades to an LMS.
@@ -104,6 +109,10 @@ The agent then follows this sequence:
    `brief check` only after that exact message.
 3. Run `grade.py next --json` and execute only its returned action. Repeat this
    after every action and after every non-zero lifecycle exit.
+   Set the package directory for every command-tool call. If the harness
+   deduplicates a repeated `next`, end the turn and rerun the same arguments
+   after the instructor sends `Continue`; do not alter path values to make the
+   command look different.
 4. Run local redaction when returned. Names, IDs, emails, filenames and document
    metadata become stable tokens such as `STUDENT_03`.
 5. Pause while the instructor inspects the private review file locally. The
@@ -490,7 +499,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
-- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, and invalidates prior clean state before a safe new attempt. Assignment briefing separates course display names from CLI keys and accepts only command-created, checked drafts. Verification stops before draft reads when manifest validation fails. The synthetic conformance harness binds trusted package revisions, checks clean redaction outcomes, catches partial synthetic identities, and requires `next` between actions. A trial without a read trace remains unverified.
+- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, and invalidates prior clean state before a safe new attempt. Assignment briefing separates course display names from CLI keys and accepts only command-created, checked drafts. Verification stops before draft reads when manifest validation fails. The synthetic conformance harness binds trusted package revisions, checks clean redaction outcomes, catches partial synthetic identities, and requires `next` between actions. Agent guidance now distinguishes the grading state root from the repository root and safely resumes when sandboxed tools reset their working directory or deduplicate commands. A trial without a read trace remains unverified.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.

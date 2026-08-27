@@ -252,6 +252,19 @@ def _next_run(
     )
 
 
+def test_next_help_distinguishes_state_root_from_repository_root():
+    result = subprocess.run(
+        [sys.executable, "scripts/grade.py", "next", "--help"],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    help_text = " ".join(result.stdout.split())
+    assert "Grading state root" in help_text
+    assert "not the repository root" in help_text
+
+
 @pytest.fixture
 def ready_batch(tmp_path, phil210, approved_brief) -> ReadyBatch:
     root = tmp_path / ".grading"

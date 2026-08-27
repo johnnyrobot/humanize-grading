@@ -359,6 +359,17 @@ and option. The agent executes only the returned action, then runs `next --json`
 again. An action may contain one ordered command group, such as consistency
 followed by publication.
 
+Some agent tools start every command in a fresh sandbox directory. Set the
+working directory to the package root for every call, or prefix the command
+with `cd <package-root> &&`. `--root` is the grading state root and defaults to
+`.grading`; it is not the repository root.
+
+Some harnesses also suppress an identical command within one agent turn. If a
+repeated `next` call is suppressed after the state changes, stop and ask the
+instructor to send `Continue`. Run the same arguments in the new turn. Do not
+change paths, add `--root`, or skip a lifecycle step to make the command look
+different.
+
 After any returned lifecycle command exits non-zero, run a fresh `next --json`.
 Exit 12 means repair is the only legal action. In particular, failed
 verification cannot advance to consistency or publication. Exit 13 means the

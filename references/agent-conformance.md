@@ -44,6 +44,11 @@ phase. The harness stops after the first process or checkpoint failure. Every
 adapter runs in its own process group. The harness stops and reaps that group,
 including inherited descendants, before it audits the workspace.
 
+Interactive harnesses may reset the working directory for every command. Set
+the package root on every call. If a harness suppresses a repeated `next`
+command within one turn, start a new instructor turn and retry the same argv;
+never change `--root` or another path merely to bypass deduplication.
+
 ## Bionic audit mode
 
 Bionic 1.0.9 does not provide a stable callable adapter for this harness. Use

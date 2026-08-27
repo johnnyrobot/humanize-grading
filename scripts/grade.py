@@ -579,7 +579,15 @@ def _cmd_next(args: argparse.Namespace) -> int:
     return EXIT_OK
 
 def _add_common(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--root", type=Path, default=Path(".grading"))
+    parser.add_argument(
+        "--root",
+        type=Path,
+        default=Path(".grading"),
+        help=(
+            "Grading state root (default: .grading); this is not the "
+            "repository root"
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
