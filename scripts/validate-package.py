@@ -134,7 +134,10 @@ if len(package_versions) != 1:
         f"Use one package version in all files: {sorted(package_versions)}"
     )
 
-skill_files = {path.relative_to(ROOT) for path in ROOT.rglob("SKILL.md")}
+# Inspect only files that the package inventory says will ship. A main checkout
+# can contain sibling Git worktrees under `.worktrees/`, and their skill files
+# are not part of this package.
+skill_files = {path for path in packaged_files if path.name == "SKILL.md"}
 expected_skills = {Path("SKILL.md"), Path("skills/humanizer/SKILL.md")}
 if skill_files != expected_skills:
     raise SystemExit(f"Expected exactly these skills: {sorted(expected_skills)}")
