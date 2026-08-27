@@ -50,10 +50,14 @@ Confirm that the course profile is current:
 python3 scripts/grade.py profile --course <course> --rubric <rubric.md>
 ```
 
+Keep the human-readable course name separate from the CLI course key. Use the
+path-safe key, such as `phil210`, for every `<course>` argument and profile path.
+
 Then ask these seven groups in order, one at a time when the rubric, profile,
 assignment prompt, course material, or earlier answers do not supply the answer:
 
-1. Course, assignment title, batch name, rubric path, and submissions folder.
+1. Course display name, CLI course key, assignment title, batch name, rubric
+   path, and submissions folder.
 2. Whether the course profile fits this assignment. Return to calibration when
    it is missing or the rubric has changed.
 3. Learning goals and rubric priorities. These notes must not change points or
@@ -77,6 +81,13 @@ instructor's answers:
 python3 scripts/grade.py brief prepare \
   --batch <batch> --course <course> --mode <local-or-cloud>
 ```
+
+The command must exit 0 and create the expected regular file before you edit
+its answer markers. If the command or agent command tool fails, report the
+exact error and retry with corrected arguments. Keep the brief unprepared;
+never hand-build a replacement or claim a file exists without checking it.
+Drafting is complete only when the file exists and no
+`<!-- answer-required -->` marker remains.
 
 Summarize the course, assignment, batch, paths, profile status, priorities,
 required evidence, feedback behavior, prohibited assumptions, host mode, and

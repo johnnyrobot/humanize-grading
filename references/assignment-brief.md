@@ -9,7 +9,10 @@ reads any submission.
 Ask these seven groups in order. Ask one group at a time when the rubric,
 profile, assignment prompt, or earlier answers do not already supply the answer.
 
-1. Course, assignment title, batch name, rubric path, and submissions folder.
+1. Course display name, CLI course key, assignment title, batch name, rubric
+   path, and submissions folder. The display name may contain spaces, such as
+   `PHIL 210`; the course key is the path-safe value used in every command,
+   such as `phil210`.
 2. Whether the current course profile fits this assignment. Return to
    calibration when the profile is missing or the rubric has changed.
 3. Learning goals and rubric priorities that need attention. These notes may
@@ -41,10 +44,19 @@ python3 scripts/grade.py brief prepare \
   --batch <batch> --course <course> --mode <local-or-cloud>
 ```
 
+Use the CLI course key for `<course>`. The prepared file is the only valid
+starting shape for an assignment brief. If the command or agent command tool
+fails, keep the brief unprepared, report the exact error, and retry with
+corrected arguments. Do not hand-build a replacement brief.
+
 Replace every `<!-- answer-required -->` marker with the instructor's answers.
 Then show a short summary with the course, assignment, batch, file paths,
 profile status, grading priorities, required evidence, feedback behavior,
 prohibited assumptions, host mode, and privacy consequence.
+
+Draft preparation is complete only after the command exits 0, the expected
+regular file exists, and no `<!-- answer-required -->` marker remains. Check
+those conditions before claiming the draft was saved.
 
 Wait for this exact message:
 

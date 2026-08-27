@@ -208,6 +208,9 @@ asks about the assignment and paths, profile fit, learning goals and rubric
 priorities, required evidence and common mistakes, feedback behavior, things to
 avoid, and the local or cloud privacy consequence.
 
+Record both the human-readable course name (`PHIL 210`) and its path-safe CLI
+key (`phil210`). Every `--course` argument and profile path uses the key.
+
 Before approval, the agent may read the rubric, profile, assignment prompt and
 instructor-authored course material. It must not read submissions, the roster,
 the redaction review file or the token map.
@@ -223,7 +226,11 @@ python3 scripts/grade.py brief prepare \
 
 The default path is `.grading/assignments/essay-2.md`. The agent fills every
 `<!-- answer-required -->` marker, then shows you one short identity-free
-summary. If it matches your instructions, respond with exactly:
+summary. The agent may claim the draft is saved only after the command exits 0,
+the regular file exists, and no answer marker remains. A command failure keeps
+the brief unprepared; the agent reports the exact error and retries instead of
+constructing another file shape. If the summary matches your instructions,
+respond with exactly:
 
 ```text
 Approve assignment brief for essay-2
