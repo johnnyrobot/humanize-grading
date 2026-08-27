@@ -28,28 +28,31 @@ def _write_schema_one_manifest(directory):
     output = directory / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
     RedactionManifest.create(
-        "essay-2", "run-identifier-1234", [output], reviewed=True
+        "essay-2", "run-identifier-1234", [output], reviewed=True, exit_code=0
     ).save(directory)
     path = directory / "_redaction.json"
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["schema"] = "redaction-batch/1"
     payload.pop("reviewed")
+    payload.pop("exit_code")
     path.write_text(json.dumps(payload), encoding="utf-8")
     return directory
 
 
-def test_manifest_round_trip_persists_reviewed_state(tmp_path):
+def test_manifest_round_trip_persists_reviewed_state_and_exit_code(tmp_path):
     redacted = tmp_path / "redacted"
     redacted.mkdir()
     (redacted / "STUDENT_01.md").write_text("safe", encoding="utf-8")
     RedactionManifest.create(
         "essay-2", "run-identifier-1234", [redacted / "STUDENT_01.md"],
         reviewed=True,
+        exit_code=2,
     ).save(redacted)
 
     loaded = RedactionManifest.load(redacted)
 
     assert loaded.reviewed is True
+    assert loaded.exit_code == 2
     assert (
         json.loads((redacted / "_redaction.json").read_text(encoding="utf-8"))["schema"]
         == "redaction-batch/2"
@@ -59,8 +62,36 @@ def test_manifest_round_trip_persists_reviewed_state(tmp_path):
 def test_legacy_manifest_is_treated_as_unreviewed(tmp_path):
     redacted = tmp_path / "redacted"
     redacted.mkdir()
+    loaded = RedactionManifest.load(_write_schema_one_manifest(redacted))
 
-    assert RedactionManifest.load(_write_schema_one_manifest(redacted)).reviewed is False
+    assert loaded.reviewed is False
+    assert loaded.exit_code is None
+
+
+@pytest.mark.parametrize("exit_code", [True, "2", None])
+def test_schema_two_manifest_requires_an_integer_exit_code(tmp_path, exit_code):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    output = redacted / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="integer exit code"):
+        RedactionManifest.create(
+            "essay-2",
+            "run-identifier-1234",
+            [output],
+            reviewed=True,
+            exit_code=exit_code,
+        )
+
+
+def test_schema_two_save_refuses_a_legacy_manifest_without_an_exit_code(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    legacy = RedactionManifest.load(_write_schema_one_manifest(redacted))
+
+    with pytest.raises(ValueError, match="integer exit code"):
+        legacy.save(redacted)
 
 
 @pytest.mark.parametrize("reviewed", [False, True])
@@ -146,6 +177,25 @@ def test_a_missing_roster_student_fails_closed(tmp_path):
     )
     assert result.exit_code == EXIT_ROSTER
     assert [e.name for e in result.unmatched_roster] == ["Tyler Brooks"]
+
+
+def test_reviewed_roster_failure_persists_the_final_exit_code(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Maya Lin argues that platforms curate.")
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin"), RosterEntry("Tyler Brooks")],
+        batch="essay-1",
+        reviewed=True,
+    )
+
+    manifest = RedactionManifest.load(tmp_path / "out")
+    assert result.exit_code == EXIT_ROSTER
+    assert manifest.reviewed is True
+    assert manifest.exit_code == EXIT_ROSTER
 
 
 def test_unreviewed_candidates_fail_closed(tmp_path):
@@ -294,6 +344,9 @@ def test_a_non_empty_destination_is_refused(tmp_path):
     result = run(**common)
 
     assert result.exit_code == EXIT_DESTINATION_NOT_EMPTY
+    assert RedactionManifest.load(tmp_path / "out").exit_code == (
+        EXIT_DESTINATION_NOT_EMPTY
+    )
     after = sorted(p.name for p in (tmp_path / "out").iterdir())
     assert after == before
 

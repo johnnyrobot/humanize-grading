@@ -865,6 +865,30 @@ class GradingBatch:
             manifest = RedactionManifest.load(self.paths.redacted)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
             manifest = None
+        if manifest is not None and manifest.exit_code != 0:
+            outcome = (
+                f"recorded exit {manifest.exit_code}"
+                if manifest.exit_code is not None
+                else "has no recorded clean exit"
+            )
+            blocking.append(
+                BlockingFinding(
+                    code="redaction-incomplete",
+                    message=(
+                        f"Redaction {outcome}. Run redaction again after fixing "
+                        "its reported inputs before verification reads draft feedback."
+                    ),
+                    token="",
+                )
+            )
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.FAILED,
+            )
         if manifest is not None and not manifest.reviewed:
             blocking.append(
                 BlockingFinding(

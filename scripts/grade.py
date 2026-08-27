@@ -442,6 +442,17 @@ def _cmd_record_prepare(args: argparse.Namespace) -> int:
             return _record_error(
                 "The redaction manifest belongs to another grading batch."
             )
+        if manifest.exit_code != EXIT_OK:
+            outcome = (
+                f"exited with code {manifest.exit_code}"
+                if manifest.exit_code is not None
+                else "has no recorded clean exit"
+            )
+            return _record_error(
+                f"Redaction {outcome}. Run redaction again after fixing its "
+                "reported inputs.",
+                exit_code=EXIT_FAILED,
+            )
         manifest.validate(args.redacted)
         if not manifest.reviewed:
             return _record_error(
@@ -525,7 +536,7 @@ def _cmd_next(args: argparse.Namespace) -> int:
                 drafts=_drafts_dir(args),
                 root=args.root,
                 patterns=args.patterns,
-                publication=args.publication,
+                publication=args.publication or Path("final") / args.batch,
                 submissions=args.submissions,
                 roster=args.roster,
                 instructor=tuple(args.instructor),
@@ -558,7 +569,12 @@ def _cmd_next(args: argparse.Namespace) -> int:
             print(
                 f"Finding: {finding.code}{where}: {_one_line(finding.message)}"
             )
-    if action.action in {"repair-brief", "repair-batch", "repair-verification"}:
+    if action.action in {
+        "repair-brief",
+        "repair-redaction",
+        "repair-batch",
+        "repair-verification",
+    }:
         return EXIT_FAILED
     return EXIT_OK
 
@@ -697,7 +713,7 @@ def build_parser() -> argparse.ArgumentParser:
     next_command.add_argument("--redacted", type=Path, default=Path("redacted"))
     next_command.add_argument("--drafts", type=Path, default=None)
     next_command.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
-    next_command.add_argument("--publication", type=Path, default=Path("final"))
+    next_command.add_argument("--publication", type=Path, default=None)
     next_command.add_argument("--submissions", type=Path, default=None)
     next_command.add_argument("--roster", type=Path, default=None)
     next_command.add_argument("--instructor", action="append", default=[])

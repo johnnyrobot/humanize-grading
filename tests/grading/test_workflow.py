@@ -177,30 +177,33 @@ def _private_sentinels(
     )
 
 
-def _next_run(context: WorkflowContext, *extra: str):
+def _next_run(
+    context: WorkflowContext, *extra: str, include_publication: bool = True
+):
+    command = [
+        sys.executable,
+        "scripts/grade.py",
+        "next",
+        "--batch",
+        context.batch,
+        "--course",
+        context.course,
+        "--rubric",
+        str(context.rubric),
+        "--redacted",
+        str(context.redacted),
+        "--drafts",
+        str(context.drafts),
+        "--root",
+        str(context.root),
+        "--patterns",
+        str(context.patterns),
+    ]
+    if include_publication:
+        command.extend(("--publication", str(context.publication)))
+    command.extend(extra)
     return subprocess.run(
-        [
-            sys.executable,
-            "scripts/grade.py",
-            "next",
-            "--batch",
-            context.batch,
-            "--course",
-            context.course,
-            "--rubric",
-            str(context.rubric),
-            "--redacted",
-            str(context.redacted),
-            "--drafts",
-            str(context.drafts),
-            "--root",
-            str(context.root),
-            "--patterns",
-            str(context.patterns),
-            "--publication",
-            str(context.publication),
-            *extra,
-        ],
+        command,
         capture_output=True,
         text=True,
     )
@@ -224,7 +227,7 @@ def ready_batch(tmp_path, phil210, approved_brief) -> ReadyBatch:
     source = redacted / "STUDENT_01.md"
     source.write_text("A redacted submission ready to grade.", encoding="utf-8")
     RedactionManifest.create(
-        "essay-2", "test-redaction-run", [source], reviewed=True
+        "essay-2", "test-redaction-run", [source], reviewed=True, exit_code=0
     ).save(redacted)
     drafts = tmp_path / "drafts"
     drafts.mkdir()
@@ -402,16 +405,115 @@ def test_symlinked_manifest_returns_repair_batch_without_following_it(
     assert action.findings[0].code == "symlink-redaction-manifest"
 
 
-def test_unreviewed_manifest_returns_review_redaction(tmp_path, ready_batch):
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_unreviewed_manifest_returns_review_redaction(
+    tmp_path, ready_batch, exit_code
+):
     context = ready_batch.context(tmp_path)
     source = context.redacted / "STUDENT_01.md"
     RedactionManifest.create(
-        context.batch, "test-redaction-run", [source], reviewed=False
+        context.batch,
+        "test-redaction-run",
+        [source],
+        reviewed=False,
+        exit_code=exit_code,
     ).save(context.redacted)
 
     action = next_action(context)
+    result = _next_run(context, "--json")
 
     assert action.action == "review-redaction"
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == action.as_dict()
+
+
+@pytest.mark.parametrize("exit_code", [2, 4, 5, 6, 7])
+def test_incomplete_redaction_returns_exact_repair_action_and_cli_exit(
+    tmp_path, ready_batch, exit_code
+):
+    context = ready_batch.context(tmp_path)
+    source = context.redacted / "STUDENT_01.md"
+    RedactionManifest.create(
+        context.batch,
+        "test-redaction-run",
+        [source],
+        reviewed=True,
+        exit_code=exit_code,
+    ).save(context.redacted)
+
+    action = next_action(context)
+    result = _next_run(context, "--json")
+
+    assert action.action == "repair-redaction"
+    assert action.commands == ()
+    assert len(action.findings) == 1
+    assert action.findings[0].code == "redaction-incomplete"
+    assert action.findings[0].token == ""
+    assert action.as_dict()["message"] == (
+        f"Repair the redaction inputs after exit {exit_code}, then run redaction again."
+    )
+    assert result.returncode == 12
+    assert json.loads(result.stdout) == action.as_dict()
+
+
+def test_reviewed_rerun_with_roster_failure_precedes_inventory_and_does_not_advance(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    source = context.redacted / "STUDENT_01.md"
+    RedactionManifest.create(
+        context.batch,
+        "test-redaction-run",
+        [source],
+        reviewed=True,
+        exit_code=2,
+    ).save(context.redacted)
+    (context.drafts / "STUDENT_99.json").write_text("{}", encoding="utf-8")
+
+    assert next_action(context).action == "repair-redaction"
+
+
+def test_record_prepare_cli_blocks_a_reviewed_incomplete_redaction(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    source = context.redacted / "STUDENT_01.md"
+    RedactionManifest.create(
+        context.batch,
+        "test-redaction-run",
+        [source],
+        reviewed=True,
+        exit_code=2,
+    ).save(context.redacted)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/grade.py",
+            "record",
+            "prepare",
+            "--batch",
+            context.batch,
+            "--course",
+            context.course,
+            "--rubric",
+            str(context.rubric),
+            "--source",
+            str(source),
+            "--redacted",
+            str(context.redacted),
+            "--drafts",
+            str(context.drafts),
+            "--root",
+            str(context.root),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 12
+    assert "Redaction exited with code 2" in result.stderr
+    assert list(context.drafts.iterdir()) == []
 
 
 def test_inventory_finding_returns_repair_batch(tmp_path, ready_batch):
@@ -735,6 +837,32 @@ def test_next_cli_emits_stable_json_argv(tmp_path, ready_batch):
     assert payload["schema"] == "grading-next-action/1"
     assert payload["action"] == "prepare-record"
     assert isinstance(payload["commands"][0], list)
+
+
+def test_next_cli_defaults_publication_to_batch_directory(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    report = GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(
+        VerificationInputs(
+            course=context.course,
+            rubric=context.rubric,
+            profile=context.root / "profiles" / "phil210.md",
+            patterns=context.patterns,
+            brief=context.root / "assignments" / "essay-2.md",
+        )
+    )
+    assert report.persisted is True
+
+    result = _next_run(context, "--json", include_publication=False)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "consistency-and-publish"
+    publication = payload["commands"][1]
+    assert publication[-2:] == ["--out", "final/essay-2"]
 
 
 def test_next_cli_prints_plain_repair_action_and_exits_twelve(

@@ -94,9 +94,9 @@ _Avoid_: Benchmark, model grade
 | Feedback skeleton | Rubric-derived sections plus explicit markers | The rubric remains the source of truth; markers prevent accidental publication. |
 | Workflow command | `grade.py next` | One short leading word is easy for agents to remember and repeat. |
 | Workflow output | Plain text by default; `grading-next-action/1` JSON on `--json` | Humans and agents use the same module interface. |
-| Review persistence | Redaction manifest schema 2 with `reviewed: bool` | It is identity-free, already receipt-bound, and survives interruptions. |
-| Legacy manifests | Read schema 1 as `reviewed=False` | Old batches fail safely and must rerun reviewed redaction. |
-| Verification | Block unreviewed redaction with exit 12 | The state is incomplete, not malformed. |
+| Redaction persistence | Redaction manifest schema 2 with `reviewed: bool` and integer `exit_code` | Identity-free durable state must prove both a clean run and private review. |
+| Legacy manifests | Read schema 1 as `reviewed=False`, `exit_code=None` | Old batches fail safely and must rerun reviewed redaction. |
+| Verification | Block nonzero or unreviewed redaction with exit 12 | The state is incomplete, not malformed. |
 | Conformance launch | JSON argv with placeholders; no shell command | Avoids injection and works with different CLIs. |
 | Read evidence | Optional trace; absent trace is `unverified` | Artifact checks cannot prove which files a model opened. |
 | Trial data | Shipped PHIL 210 synthetic fixture | Reproducible and safe to inspect locally. |
@@ -185,21 +185,24 @@ Change the current manifest to:
   "batch": "essay-2",
   "run_id": "...",
   "reviewed": true,
-  "outputs": []
+  "exit_code": 0,
+  "outputs": [{"path": "STUDENT_01.md", "sha256": "..."}]
 }
 ```
 
-`RedactionManifest.create()` requires `reviewed`. The pipeline passes the CLI
-flag through on every run. Schema 1 loads as `reviewed=False`, preserving its
+`RedactionManifest.create()` requires `reviewed` and the final integer
+`exit_code`. The pipeline calculates the final result before saving the
+manifest. Schema 1 loads as `reviewed=False`, `exit_code=None`, preserving its
 output bindings but requiring the instructor to rerun:
 
 ```bash
 python3 scripts/redact.py <submissions> ... --reviewed --force
 ```
 
-Whole-batch verification adds `redaction-review-required` before loading draft
-content when the manifest is not reviewed. The token map and private review
-file remain unchanged and outside `scripts/grading/`.
+Whole-batch verification adds `redaction-incomplete` before loading draft
+content when the manifest does not record exit 0. A clean unreviewed result adds
+`redaction-review-required`. The token map and private review file remain
+unchanged and outside `scripts/grading/`.
 
 ## Next-action module
 
@@ -245,16 +248,17 @@ Action codes, in precedence order:
 5. `approve-brief` — complete brief is still draft.
 6. `repair-brief` — approved brief is stale or malformed.
 7. `redact` — no manifest exists.
-8. `review-redaction` — manifest exists with `reviewed: false`.
-9. `repair-batch` — inventory or manifest is malformed, duplicated,
+8. `review-redaction` — exit 3 or clean manifest with `reviewed: false`.
+9. `repair-redaction` — manifest records nonzero exit 2, 4, 5, 6 or 7.
+10. `repair-batch` — inventory or manifest is malformed, duplicated,
    incomplete or orphaned.
-10. `prepare-record` — first sorted participant is pending.
-11. `complete-draft` — a prepared pair is still semantically incomplete.
-12. `repair-verification` — dry whole-batch verification has blocking findings.
-13. `verify` — every pair passes a dry run but no current receipt exists.
-14. `consistency-and-publish` — receipt is current; commands are consistency
+11. `prepare-record` — first sorted participant is pending.
+12. `complete-draft` — a prepared pair is still semantically incomplete.
+13. `repair-verification` — dry whole-batch verification has blocking findings.
+14. `verify` — every pair passes a dry run but no current receipt exists.
+15. `consistency-and-publish` — receipt is current; commands are consistency
     then explicit rehydration.
-15. `review-publication` — a publication exists and the instructor must review
+16. `review-publication` — a publication exists and the instructor must review
     its identity-bearing drafts outside model context. This is the terminal
     action; instructor sign-off is not stored or inferred.
 
@@ -266,7 +270,8 @@ Add CLI:
 
 ```bash
 python3 scripts/grade.py next --batch essay-2 --course phil210 \
-  --rubric tests/fixtures/phil210/grading_rubric.md --json
+  --rubric tests/fixtures/phil210/grading_rubric.md \
+  --publication final/essay-2 --json
 ```
 
 The JSON shape is stable and uses argv arrays, not shell strings:
@@ -293,6 +298,9 @@ Direct verification and publication gates remain authoritative.
 
 Create `scripts/grading/conformance.py` for trial state and scoring, plus the
 thin entry point `scripts/agent_conformance.py`.
+
+The following invocation shapes are illustrative until Task 6 records live
+evidence for an exact runtime and model combination.
 
 Public CLI:
 
@@ -364,7 +372,8 @@ pointers from `SKILL.md`; do not duplicate full schemas in the skill.
 
 - Template preparation is exclusive and pair-atomic.
 - A stale profile or brief blocks preparation and `next` advancement.
-- Schema 1 or unreviewed schema 2 manifests return `review-redaction` and block
+- Schema 1, exit 3, or clean unreviewed schema 2 manifests return
+  `review-redaction`. Other nonzero exits return `repair-redaction`. All block
   verification.
 - Invalid command JSON, missing placeholders, oversized output and process
   timeouts fail the conformance phase without a traceback.

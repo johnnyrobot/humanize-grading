@@ -93,6 +93,7 @@ def _refresh_density(redacted: Path, drafts: Path, token: str) -> None:
         manifest.run_id,
         [path for path in redacted.iterdir() if not path.name.startswith("_")],
         reviewed=manifest.reviewed,
+        exit_code=manifest.exit_code,
     ).save(redacted)
 
 

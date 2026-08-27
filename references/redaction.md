@@ -17,6 +17,11 @@ Output files are named by token, so a filename cannot carry a name. The map
 file and the review file are written with owner-only permissions and never
 enter a model's context.
 
+The identity-free `_redaction.json` manifest records the final redaction exit
+code and whether the instructor completed private review. Verification and
+`grade.py next` require exit 0 plus reviewed state. Review cannot override a
+different non-zero exit.
+
 ## What it misses
 
 Five limits matter. Each one is real, and each one will surprise you if you

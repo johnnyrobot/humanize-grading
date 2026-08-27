@@ -13,9 +13,12 @@
 ## Global Constraints
 
 - Package version is exactly `3.4.0` in both skills, the first README history entry, and `.claude-plugin/plugin.json`.
-- Redaction manifest schema is exactly `redaction-batch/2` and contains identity-free `reviewed: bool`.
-- Legacy `redaction-batch/1` manifests load as `reviewed=False`.
-- Whole-batch verification blocks an unreviewed manifest with `redaction-review-required` and exit 12.
+- Redaction manifest schema is exactly `redaction-batch/2` and contains
+  identity-free `reviewed: bool` plus the final integer `exit_code`.
+- Legacy `redaction-batch/1` manifests load as `reviewed=False`, `exit_code=None`.
+- Whole-batch verification blocks a nonzero manifest with
+  `redaction-incomplete`, or an unreviewed clean manifest with
+  `redaction-review-required`, and exit 12.
 - Draft pairs contain feedback Markdown and `grade-record/1` JSON for one token.
 - Feedback skeleton marker is exactly `<!-- replace-with-feedback -->` and always blocks unchanged feedback.
 - Record preparation reads only an approved brief, current profile/rubric, pattern reference, reviewed manifest, batch inventory, and redacted source.
@@ -44,9 +47,10 @@
 - Modify: `tests/grading/test_end_to_end.py`
 
 **Interfaces:**
-- Produces: `RedactionManifest(batch, run_id, reviewed, outputs)`, the required
-  `reviewed` keyword on `RedactionManifest.create()`, and verification finding
-  `redaction-review-required` for Tasks 2–4.
+- Produces: `RedactionManifest(batch, run_id, reviewed, exit_code, outputs)`,
+  required `reviewed` and `exit_code` keywords on
+  `RedactionManifest.create()`, and verification findings
+  `redaction-review-required` / `redaction-incomplete` for Tasks 2–4.
 - Preserves: output membership and SHA-256 validation, token-map isolation, receipt binding.
 
 - [ ] **Step 1: Write RED tests for schema 2 and legacy review state**
@@ -61,11 +65,13 @@ def test_manifest_round_trip_persists_reviewed_state(tmp_path):
     RedactionManifest.create(
         "essay-2", "run-identifier-1234", [redacted / "STUDENT_01.md"],
         reviewed=True,
+        exit_code=0,
     ).save(redacted)
 
     loaded = RedactionManifest.load(redacted)
 
     assert loaded.reviewed is True
+    assert loaded.exit_code == 0
     assert json.loads((redacted / "_redaction.json").read_text())["schema"] == "redaction-batch/2"
 
 
@@ -74,10 +80,10 @@ def test_legacy_manifest_is_treated_as_unreviewed(tmp_path):
     assert RedactionManifest.load(redacted).reviewed is False
 ```
 
-Add a pipeline test proving `reviewed=False` and `reviewed=True` are persisted,
-and a verification test proving an unreviewed manifest returns
-`redaction-review-required`, checks no tokens, writes no record or receipt and
-has `VerificationFailure.FAILED`.
+Add pipeline tests proving review state and the final exit are persisted. Add
+verification tests proving unreviewed or nonzero manifests return the matching
+token-free finding, check no tokens, write no record or receipt and have
+`VerificationFailure.FAILED`.
 
 - [ ] **Step 2: Run focused tests and confirm RED**
 
@@ -85,7 +91,8 @@ has `VerificationFailure.FAILED`.
 /Users/laccd/code/humanize_grading/.worktrees/.venv-assignment-briefing/bin/python -m pytest tests/redaction/test_pipeline.py tests/grading/test_verify.py -x -v
 ```
 
-Expected: manifest constructor/schema/review assertions fail before production changes.
+Expected: manifest constructor/schema/review/exit assertions fail before
+production changes.
 
 - [ ] **Step 3: Implement schema 2 with safe schema 1 loading**
 
@@ -100,16 +107,17 @@ class RedactionManifest:
     batch: str
     run_id: str
     reviewed: bool
+    exit_code: int | None
     outputs: tuple[tuple[str, str], ...] = ()
 ```
 
-Require `reviewed` in `create()`, write it in `save()`, require a JSON boolean
-for schema 2, and map schema 1 to `False`. Pass the pipeline's `reviewed`
-argument into `create()`.
+Require `reviewed` and integer `exit_code` in `create()`, write both in `save()`,
+require their JSON types for schema 2, and map schema 1 to `False` / `None`.
+Calculate the pipeline's final exit before creating the manifest.
 
 In `GradingBatch.verify()`, after the approved-brief snapshot and before entry
-loads, require the loaded manifest's `reviewed` value. Add one token-free
-blocking finding and return FAILED without reading draft content when false.
+loads, require exit 0 and reviewed state. Add one token-free blocking finding
+and return FAILED without reading draft content when either gate is incomplete.
 
 - [ ] **Step 4: Update every explicit test manifest construction**
 
@@ -314,7 +322,8 @@ Create fixture states and literal assertions for every precedence branch:
 | `test_complete_draft_brief_returns_approve_brief` | Markers replaced, status draft | `approve-brief` |
 | `test_stale_approved_brief_returns_repair_brief` | Approved brief then edit its body | `repair-brief` |
 | `test_missing_manifest_returns_redact` | Current approved brief, no manifest | `redact` |
-| `test_unreviewed_manifest_returns_review_redaction` | Valid schema 2 reviewed false | `review-redaction` |
+| `test_unreviewed_manifest_returns_review_redaction` | Exit 3 or clean schema 2 reviewed false | `review-redaction` |
+| `test_incomplete_redaction_returns_exact_repair_action_and_cli_exit` | Schema 2 exit 2, 4, 5, 6 or 7 | `repair-redaction` |
 | `test_inventory_finding_returns_repair_batch` | Reviewed manifest plus orphan JSON | `repair-batch` |
 | `test_template_pair_returns_complete_draft` | Pair from Task 2 unchanged | `complete-draft` |
 | `test_invalid_record_returns_repair_verification` | Structurally loadable pair with wrong total | `repair-verification` |
@@ -334,7 +343,8 @@ the expected redaction or publication argv without opening the sentinels.
 - [ ] **Step 6: Add `grade.py next` CLI tests and implementation**
 
 CLI args: required batch/course/rubric; optional redacted/drafts/root/patterns,
-publication/submissions/roster/instructor; `--json`.
+publication/submissions/roster/instructor; `--json`. Omitted publication resolves
+to `final/<batch>`.
 
 JSON test:
 
@@ -438,6 +448,9 @@ after each stage. Run parsed argv with
 - [ ] **Step 6: Add CLI subprocess tests and thin entry point**
 
 Test:
+
+These commands prove the deterministic harness interface. They are illustrative
+agent invocations, not live runtime-support evidence.
 
 ```bash
 python3 scripts/agent_conformance.py run --runtime fake \

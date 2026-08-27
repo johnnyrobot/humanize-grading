@@ -23,14 +23,23 @@ class RedactionManifest:
     batch: str
     run_id: str
     reviewed: bool
+    exit_code: int | None
     outputs: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def create(
-        cls, batch: str, run_id: str, outputs: list[Path], *, reviewed: bool
+        cls,
+        batch: str,
+        run_id: str,
+        outputs: list[Path],
+        *,
+        reviewed: bool,
+        exit_code: int,
     ) -> "RedactionManifest":
         if not isinstance(reviewed, bool):
             raise ValueError("The redaction manifest needs a reviewed decision.")
+        if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+            raise ValueError("The redaction manifest needs an integer exit code.")
         bound = tuple(
             sorted(
                 (
@@ -44,9 +53,17 @@ class RedactionManifest:
                 for path in outputs
             )
         )
-        return cls(batch=batch, run_id=run_id, reviewed=reviewed, outputs=bound)
+        return cls(
+            batch=batch,
+            run_id=run_id,
+            reviewed=reviewed,
+            exit_code=exit_code,
+            outputs=bound,
+        )
 
     def save(self, directory: Path) -> Path:
+        if not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool):
+            raise ValueError("The redaction manifest needs an integer exit code.")
         path = directory / NAME
         write_private_text(
             path,
@@ -56,6 +73,7 @@ class RedactionManifest:
                     "batch": self.batch,
                     "run_id": self.run_id,
                     "reviewed": self.reviewed,
+                    "exit_code": self.exit_code,
                     "outputs": [
                         {"path": path, "sha256": digest}
                         for path, digest in self.outputs
@@ -79,8 +97,12 @@ class RedactionManifest:
             reviewed = payload.get("reviewed")
             if not isinstance(reviewed, bool):
                 raise ValueError("The redaction manifest needs a reviewed decision.")
+            exit_code = payload.get("exit_code")
+            if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                raise ValueError("The redaction manifest needs an integer exit code.")
         elif schema == LEGACY_SCHEMA:
             reviewed = False
+            exit_code = None
         else:
             raise ValueError("The redaction manifest has an unknown schema.")
         batch = payload.get("batch")
@@ -90,7 +112,9 @@ class RedactionManifest:
         if not isinstance(run_id, str) or len(run_id) < 16:
             raise ValueError("The redaction manifest needs a redaction-run ID.")
         raw_outputs = payload.get("outputs")
-        if not isinstance(raw_outputs, list) or not raw_outputs:
+        if not isinstance(raw_outputs, list) or (
+            not raw_outputs and (schema == LEGACY_SCHEMA or exit_code == 0)
+        ):
             raise ValueError("The redaction manifest needs its output list.")
         outputs: list[tuple[str, str]] = []
         seen: set[str] = set()
@@ -114,6 +138,7 @@ class RedactionManifest:
             batch=batch,
             run_id=run_id,
             reviewed=reviewed,
+            exit_code=exit_code,
             outputs=tuple(sorted(outputs)),
         )
 

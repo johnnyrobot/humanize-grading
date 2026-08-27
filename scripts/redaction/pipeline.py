@@ -218,6 +218,13 @@ def run(
 
     if destination.exists() and any(destination.iterdir()):
         if not force:
+            RedactionManifest.create(
+                batch,
+                TokenMap(batch).run_id,
+                [],
+                reviewed=reviewed,
+                exit_code=EXIT_DESTINATION_NOT_EMPTY,
+            ).save(destination)
             return BatchResult(
                 exit_code=EXIT_DESTINATION_NOT_EMPTY,
                 message=(
@@ -324,17 +331,7 @@ def run(
         entry.output = output
         result.files.append(entry)
 
-    RedactionManifest.create(
-        batch,
-        tmap.run_id,
-        [file.output for file in result.files if file.output is not None],
-        reviewed=reviewed,
-    ).save(destination)
-    tmap.save(map_path)
-
     result.unmatched_roster = [e for e in roster if e.name not in matched_names]
-    _write_review(review_path, result)
-
     collisions = [f.error for f in result.files if f.error.startswith("Duplicate output")]
     if collisions:
         result.exit_code = EXIT_COLLISION
@@ -345,6 +342,16 @@ def run(
         result.exit_code = EXIT_ROSTER
     elif any(f.candidates for f in result.files) and not reviewed:
         result.exit_code = EXIT_CANDIDATES
+
+    RedactionManifest.create(
+        batch,
+        tmap.run_id,
+        [file.output for file in result.files if file.output is not None],
+        reviewed=reviewed,
+        exit_code=result.exit_code,
+    ).save(destination)
+    tmap.save(map_path)
+    _write_review(review_path, result)
 
     return result
 

@@ -232,8 +232,11 @@ After approval, the agent uses one executable loop:
 python3 scripts/grade.py next \
   --batch essay-3 --course phil210 --rubric grading_rubric.md \
   --submissions submissions/essay-3 --roster roster.csv \
-  --instructor "Dr. Vance" --json
+  --instructor "Dr. Vance" --publication final/essay-3 --json
 ```
+
+When `--publication` is omitted, `next` uses that same batch-specific default:
+`final/essay-3`.
 
 The result names one legal action and gives commands as argument arrays rather
 than shell strings:
@@ -259,10 +262,13 @@ unfinished feedback-and-record pair together. Exit 12 means the current state
 requires repair; verification failures cannot advance to consistency or
 publication.
 
-Redaction manifests now use `redaction-batch/2` and persist `reviewed: true` or
-`false`. A schema 1 manifest remains readable but is treated as unreviewed. The
-instructor must inspect the private review file, then rerun the same redaction
-with `--reviewed --force` before verification can pass.
+Redaction manifests now use `redaction-batch/2` and persist both the instructor's
+review decision and the final redaction exit code. Exit 3 or a clean unreviewed
+result requires private review. Other non-zero exits return
+`repair-redaction`; a reviewed flag cannot make a failed redaction advance. A
+schema 1 manifest remains readable with no recorded exit and is treated as
+unreviewed. The instructor must inspect the private review file, then rerun the
+same redaction with `--reviewed --force` before verification can pass.
 
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
 calibration, a graded batch end to end, every command and exit code, and what
@@ -294,7 +300,8 @@ bypass.
 ## Synthetic agent conformance
 
 `scripts/agent_conformance.py` can launch a command-line agent against the
-shipped synthetic fixture or audit an existing synthetic workspace:
+shipped synthetic fixture or audit an existing synthetic workspace. These
+invocations are illustrative until Task 6 records live evidence:
 
 ```bash
 python3 scripts/agent_conformance.py run \
@@ -469,7 +476,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
-- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review in schema 2 manifests and ships synthetic agent-conformance evidence that stays unverified without a read trace.
+- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, and ships a synthetic agent-conformance harness. A trial without a read trace remains unverified.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.

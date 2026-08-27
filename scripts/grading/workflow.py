@@ -320,7 +320,22 @@ def next_action(context: WorkflowContext) -> NextAction:
             message="Repair the malformed redaction manifest.",
             findings=(finding,),
         )
-    if not manifest.reviewed:
+    if manifest.batch != context.batch:
+        finding = BlockingFinding(
+            "malformed-redaction-manifest",
+            "The redaction manifest belongs to another grading batch.",
+            "",
+        )
+        return _action(
+            context,
+            stage="redaction",
+            action="repair-batch",
+            message="Repair the redaction result before grading.",
+            findings=(finding,),
+        )
+    if manifest.exit_code == 3 or (
+        manifest.exit_code in {None, 0} and not manifest.reviewed
+    ):
         return _action(
             context,
             stage="redaction",
@@ -328,11 +343,26 @@ def next_action(context: WorkflowContext) -> NextAction:
             message="Review the private redaction report, then confirm the rerun.",
             commands=_redaction_commands(context, reviewed=True),
         )
+    if manifest.exit_code != 0:
+        finding = BlockingFinding(
+            "redaction-incomplete",
+            (
+                f"Redaction exited with code {manifest.exit_code}. Fix its reported "
+                "inputs or paths, then run redaction again."
+            ),
+            "",
+        )
+        return _action(
+            context,
+            stage="redaction",
+            action="repair-redaction",
+            message=(
+                f"Repair the redaction inputs after exit {manifest.exit_code}, "
+                "then run redaction again."
+            ),
+            findings=(finding,),
+        )
     try:
-        if manifest.batch != context.batch:
-            raise ValueError(
-                "The redaction manifest belongs to another grading batch."
-            )
         manifest.validate(context.redacted)
     except (OSError, UnicodeError, ValueError) as error:
         finding = BlockingFinding("malformed-redaction-manifest", str(error), "")

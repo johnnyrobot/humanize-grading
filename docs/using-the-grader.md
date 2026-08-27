@@ -276,10 +276,13 @@ paste or ask an agent to read this file.
 Output files are named by token, so a filename can never carry a name.
 The identity-free `_redaction.json` manifest beside them binds this exact
 redaction result to its private token map. Current manifests use
-`redaction-batch/2` and store `reviewed: true` or `false`. A legacy schema 1
-manifest still loads, but it is treated as unreviewed. Inspect the private
-review file, then rerun the same redaction command with `--reviewed --force` to
-create current durable state. Verification exits 12 until that happens.
+`redaction-batch/2` and store the review decision plus the final integer
+`exit_code`. Exit 3 or a clean unreviewed result requires private review. Codes
+2, 4, 5, 6 and 7 require `repair-redaction`; `reviewed: true` never overrides a
+failed run. A legacy schema 1 manifest still loads with no recorded exit and is
+treated as unreviewed. Inspect the private review file, then rerun the same
+redaction command with `--reviewed --force` to create current durable state.
+Verification exits 12 until redaction records both exit 0 and reviewed state.
 
 **A non-zero exit stops redaction.** The codes:
 
@@ -292,9 +295,8 @@ create current durable state. Verification exits 12 until that happens.
 | 6 | A batch name or private/output path is unsafe or overlaps another role |
 | 7 | Two source files resolve to the same grading-batch participant |
 
-Exit 2 is common and benign — it means your roster is bigger than the batch.
-Trim the roster to who actually submitted, or accept that those students are
-missing.
+Exit 2 is common when the roster is bigger than the batch, but it still blocks
+grading. Trim the roster to who actually submitted, then rerun redaction.
 
 ### 2.5 Ask for the next legal action
 
@@ -308,8 +310,12 @@ python3 scripts/grade.py next \
   --submissions submissions/essay-2 \
   --roster roster.csv \
   --instructor "Marcus Vance" \
+  --publication final/essay-2 \
   --json
 ```
+
+If `--publication` is omitted, `next` resolves it to `final/essay-2` for this
+batch.
 
 The versioned result contains argument arrays rather than shell strings:
 
@@ -394,22 +400,8 @@ has the exact rubric criteria and current pattern-density object. Fill every
 assessable score, rubric level and supporting quote; leave a criterion
 `cannot assess` only when the work cannot support a score. Read
 `references/rubric-format.md` for the complete `grade-record/1` reference.
-
-For criterion-4 evidence it runs:
-
-```bash
-python3 scripts/grade.py density redacted/STUDENT_02.md --json
-```
-
-```json
-{
-  "words": 383,
-  "count": 0,
-  "per_thousand": 0.0,
-  "by_pattern": {},
-  "examples": []
-}
-```
+`record prepare` computed that density from the redacted source; there is no
+separate density stage in the `next` lifecycle.
 
 ### 2.7 Verify
 
@@ -592,8 +584,9 @@ guard that blocks every tool call would also block the calls needed to fix it.
 
 ## Synthetic agent conformance
 
-Use only synthetic data for conformance. A callable command-line adapter can be
-launched with JSON arguments:
+Use only synthetic data for conformance. The invocations in this section are
+illustrative until Task 6 records live evidence. A callable command-line adapter
+can be launched with JSON arguments:
 
 ```bash
 python3 scripts/agent_conformance.py run \
@@ -630,7 +623,7 @@ interfaces alone are not evidence that any particular runtime or model works.
 | `grade.py brief prepare --batch B --course C --mode local\|cloud` | Create an identity-free draft assignment brief |
 | `grade.py brief approve --batch B --course C --rubric R --approval TEXT` | Bind the answered brief to the current rubric and profile |
 | `grade.py brief check --batch B --course C --rubric R` | Confirm the exact approved brief is current |
-| `grade.py next --batch B --course C --rubric R --json` | Return the next legal action as versioned JSON argv |
+| `grade.py next --batch B --course C --rubric R --publication final/B --json` | Return the next legal action as versioned JSON argv |
 | `grade.py record prepare --batch B --course C --rubric R --source S` | Create one pending token's unfinished draft pair |
 | `grade.py status --batch B` | Show what still needs grading |
 | `grade.py density FILE [--json]` | Count watched AI terms |

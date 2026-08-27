@@ -177,7 +177,7 @@ private path locators, and `--json` so it can return exact JSON argument arrays:
 python3 scripts/grade.py next \
   --batch <batch> --course <course> --rubric <rubric.md> \
   --submissions <submissions/> --roster <roster.csv> \
-  --instructor "<Your Name>" --json
+  --instructor "<Your Name>" --publication final/<batch> --json
 ```
 
 1. Run `next --json`.
@@ -202,8 +202,9 @@ requirements.
 After any returned lifecycle command exits non-zero, run a fresh `next --json`
 call. Execute its repair action before anything else. Exit 12 means the current
 action is blocked and repair is the only legal next step. A verification failure
-stays `repair-verification`; consistency and publication remain unavailable
-until a later verification succeeds.
+stays `repair-verification`; a non-zero redaction other than the review-only
+exit 3 stays `repair-redaction`. Consistency and publication remain unavailable
+until the relevant gate succeeds.
 
 At `review-publication`, tell the instructor where the local rehydrated drafts
 were written. Do not open or quote them. They contain real identities and remain

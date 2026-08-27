@@ -376,21 +376,28 @@ def _replace_approved_brief(
     )
 
 
-def _refresh_redaction_manifest(redacted, batch="essay-2", reviewed=None):
+def _refresh_redaction_manifest(
+    redacted, batch="essay-2", reviewed=None, exit_code=None
+):
     try:
         manifest = RedactionManifest.load(redacted)
         run_id = manifest.run_id
         if reviewed is None:
             reviewed = manifest.reviewed
+        if exit_code is None:
+            exit_code = manifest.exit_code
     except (OSError, ValueError, json.JSONDecodeError):
         run_id = "test-redaction-run"
         if reviewed is None:
             reviewed = True
+        if exit_code is None:
+            exit_code = 0
     RedactionManifest.create(
         batch,
         run_id,
         [path for path in redacted.iterdir() if not path.name.startswith("_")],
         reviewed=reviewed,
+        exit_code=exit_code,
     ).save(redacted)
 
 
@@ -512,6 +519,41 @@ def test_unreviewed_redaction_stops_verification_before_entry_loads(
     assert report.failure is VerificationFailure.FAILED
     assert record.read_bytes() == before
     assert not (drafts / "_verification.json").exists()
+
+
+@pytest.mark.parametrize("exit_code", [2, 4, 5, 6, 7])
+def test_incomplete_redaction_stops_verification_before_entry_loads(
+    tmp_path, phil210, approved_brief, monkeypatch, exit_code
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    _refresh_redaction_manifest(redacted, reviewed=True, exit_code=exit_code)
+
+    def fail_entry_load(*args, **kwargs):
+        raise AssertionError("verification read a draft after failed redaction")
+
+    monkeypatch.setattr("scripts.grading.batch._load_entry", fail_entry_load)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+
+    assert [finding.code for finding in report.blocking_findings] == [
+        "redaction-incomplete"
+    ]
+    assert report.blocking_findings[0].token == ""
+    assert f"exit {exit_code}" in report.blocking_findings[0].message
+    assert "Run redaction again" in report.blocking_findings[0].message
+    assert report.checked_tokens == ()
+    assert report.persisted is False
+    assert report.failure is VerificationFailure.FAILED
 
 
 @pytest.mark.parametrize("changed", ["brief", "rubric", "profile"])

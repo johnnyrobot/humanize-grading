@@ -216,6 +216,7 @@ def _record_prepare_context(tmp_path, phil210, approved_brief, *, reviewed=True)
         "run-identifier-1234",
         [source],
         reviewed=reviewed,
+        exit_code=0,
     ).save(redacted)
     return root, redacted, source
 

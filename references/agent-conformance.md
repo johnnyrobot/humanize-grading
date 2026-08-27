@@ -6,6 +6,10 @@ about which files the agent read.
 
 It does not prove grading quality. It does not accept real student work.
 
+Every invocation below is illustrative until Task 6 records live evidence for
+an exact runtime and model combination. The harness itself is not conformance
+evidence.
+
 ## Callable adapters
 
 Use `run` when the agent has a command-line adapter that accepts a prompt:
