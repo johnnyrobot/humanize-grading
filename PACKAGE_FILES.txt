@@ -103,6 +103,7 @@ tests/grading/test_drafts.py
 tests/grading/test_end_to_end.py
 tests/grading/test_holdout.py
 tests/grading/test_hook.py
+tests/grading/test_package_validation.py
 tests/grading/test_profile.py
 tests/grading/test_publication.py
 tests/grading/test_records.py
@@ -110,7 +111,6 @@ tests/grading/test_rubric.py
 tests/grading/test_samples.py
 tests/grading/test_verify.py
 tests/grading/test_workflow.py
-tests/grading/test_package_validation.py
 tests/redaction/test_candidates.py
 tests/redaction/test_documents.py
 tests/redaction/test_leak.py
