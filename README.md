@@ -269,11 +269,18 @@ result requires private review. Other non-zero exits return
 schema 1 manifest remains readable with no recorded exit and is treated as
 unreviewed. The instructor must inspect the private review file, then rerun the
 same redaction with `--reviewed --force` before verification can pass.
+Starting a new safe attempt first invalidates any regular same-batch clean
+manifest, so roster or input failures cannot leave earlier success eligible for
+grading.
 
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
-calibration, a graded batch end to end, every command and exit code, and what
-the tool deliberately does not do. Every command in it was run against the
-synthetic corpus, and the output shown is real.
+calibration, a graded batch end to end, the core command and exit-code
+reference, and what the tool deliberately does not do. Synthetic runs covered
+`calibrate.py inputs` and `holdout`; `grade.py profile`, `brief`, `next`,
+`record prepare`, `status`, `verify` and `consistency`; plus `redact.py` and
+`rehydrate.py`. The lifecycle output shown comes from that synthetic work. The
+conformance `run` and `audit` commands remain illustrative until Task 6 records
+live agent evidence.
 
 Read `references/redaction.md` before sending anything to a cloud model.
 Pseudonymization is not anonymization, and your institution's policy decides

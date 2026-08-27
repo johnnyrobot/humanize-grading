@@ -199,6 +199,12 @@ output bindings but requiring the instructor to rerun:
 python3 scripts/redact.py <submissions> ... --reviewed --force
 ```
 
+Before roster loading or any pipeline input check, a new attempt invalidates a
+regular same-batch manifest at a safe destination. It preserves the run ID and
+output digests, writes `reviewed: false`, and records the nonzero attempt code.
+It does not follow links or write when roots overlap. First-ever failures with
+no manifest remain retryable and cannot advance to drafting.
+
 Whole-batch verification adds `redaction-incomplete` before loading draft
 content when the manifest does not record exit 0. A clean unreviewed result adds
 `redaction-review-required`. The token map and private review file remain
@@ -322,6 +328,8 @@ python3 scripts/agent_conformance.py audit \
 2. Writes a one-row synthetic roster and current synthetic profile.
 3. Runs three self-contained phases: briefing, approval/redaction and
    reviewed-grading/publication.
+   The trial publication path is exactly `final/agent-e2e` in phase prompts,
+   next-action argv and artifact audit.
 4. Replaces only `{prompt}` and `{workspace}` in the parsed JSON argv.
 5. Uses `subprocess.run(..., shell=False)` with a per-phase timeout.
 6. Captures stdout/stderr to owner-only files and records SHA-256 digests in the

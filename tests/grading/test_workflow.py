@@ -16,6 +16,13 @@ from scripts.grading.rubric import load_rubric
 from scripts.grading.records import GradeRecord
 from scripts.grading.workflow import WorkflowContext, WorkflowError, next_action
 from scripts.redaction.manifest import RedactionManifest
+from scripts.redaction.pipeline import (
+    EXIT_OK as REDACTION_OK,
+    EXIT_UNREADABLE as REDACTION_UNREADABLE,
+    EXIT_UNSAFE_PATH as REDACTION_UNSAFE,
+    run as redact_batch,
+)
+from scripts.redaction.roster import RosterEntry
 from tests.grading.test_verify import _write_batch
 from tests.grading.test_publication import FakeRenderer
 
@@ -175,6 +182,42 @@ def _private_sentinels(
         map_path,
         review,
     )
+
+
+def _install_clean_reviewed_redaction(
+    context: WorkflowContext, tmp_path: Path
+) -> RedactionManifest:
+    source = tmp_path / "clean-submissions"
+    source.mkdir()
+    (source / "paper.md").write_text(
+        "Maya Lin argues that platforms curate.", encoding="utf-8"
+    )
+    result = redact_batch(
+        source=source,
+        destination=context.redacted,
+        map_path=context.root / "maps" / f"{context.batch}.json",
+        review_path=context.root / "maps" / "reviews" / f"{context.batch}.json",
+        roster=[RosterEntry("Maya Lin")],
+        batch=context.batch,
+        reviewed=True,
+        force=True,
+    )
+    assert result.exit_code == REDACTION_OK
+    return RedactionManifest.load(context.redacted)
+
+
+def _assert_prior_redaction_is_invalidated(
+    context: WorkflowContext,
+    previous: RedactionManifest,
+    exit_code: int,
+) -> None:
+    current = RedactionManifest.load(context.redacted)
+    assert current.batch == previous.batch
+    assert current.run_id == previous.run_id
+    assert current.outputs == previous.outputs
+    assert current.reviewed is False
+    assert current.exit_code == exit_code
+    assert next_action(context).action == "repair-redaction"
 
 
 def _next_run(
@@ -387,6 +430,116 @@ def test_missing_manifest_returns_redact(tmp_path, ready_batch):
     action = next_action(context)
 
     assert action.action == "redact"
+
+
+def test_roster_load_failure_invalidates_prior_clean_redaction(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    previous = _install_clean_reviewed_redaction(context, tmp_path)
+    source = tmp_path / "new-submissions"
+    source.mkdir()
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/redact.py",
+            str(source),
+            "--roster",
+            str(tmp_path / "missing-roster.csv"),
+            "--batch",
+            context.batch,
+            "--out",
+            str(context.redacted),
+            "--map",
+            str(context.root / "maps" / f"{context.batch}.json"),
+            "--review",
+            str(context.root / "maps" / "reviews" / f"{context.batch}.json"),
+            "--reviewed",
+            "--force",
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == REDACTION_UNREADABLE
+    _assert_prior_redaction_is_invalidated(
+        context, previous, REDACTION_UNREADABLE
+    )
+
+
+def test_oversized_file_count_invalidates_prior_clean_redaction(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    previous = _install_clean_reviewed_redaction(context, tmp_path)
+    source = tmp_path / "too-many-submissions"
+    source.mkdir()
+    for index in range(501):
+        (source / f"paper-{index:03d}.md").write_text("safe", encoding="utf-8")
+
+    result = redact_batch(
+        source=source,
+        destination=context.redacted,
+        map_path=context.root / "maps" / f"{context.batch}.json",
+        roster=[],
+        batch=context.batch,
+        reviewed=True,
+        force=True,
+    )
+
+    assert result.exit_code == REDACTION_UNREADABLE
+    _assert_prior_redaction_is_invalidated(
+        context, previous, REDACTION_UNREADABLE
+    )
+
+
+def test_unsafe_source_invalidates_safe_prior_redaction(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    previous = _install_clean_reviewed_redaction(context, tmp_path)
+    real_source = tmp_path / "real-new-submissions"
+    real_source.mkdir()
+    unsafe_source = tmp_path / "linked-new-submissions"
+    unsafe_source.symlink_to(real_source, target_is_directory=True)
+
+    result = redact_batch(
+        source=unsafe_source,
+        destination=context.redacted,
+        map_path=context.root / "maps" / f"{context.batch}.json",
+        roster=[],
+        batch=context.batch,
+        reviewed=True,
+        force=True,
+    )
+
+    assert result.exit_code == REDACTION_UNSAFE
+    _assert_prior_redaction_is_invalidated(context, previous, REDACTION_UNSAFE)
+
+
+def test_first_failure_without_manifest_cannot_advance_to_drafting(
+    tmp_path, ready_batch
+):
+    context = ready_batch.context(tmp_path)
+    (context.redacted / "_redaction.json").unlink()
+    source = tmp_path / "first-too-many-submissions"
+    source.mkdir()
+    for index in range(501):
+        (source / f"paper-{index:03d}.md").write_text("safe", encoding="utf-8")
+
+    result = redact_batch(
+        source=source,
+        destination=context.redacted,
+        map_path=context.root / "maps" / f"{context.batch}.json",
+        roster=[],
+        batch=context.batch,
+        reviewed=True,
+        force=True,
+    )
+
+    assert result.exit_code == REDACTION_UNREADABLE
+    assert next_action(context).action == "redact"
 
 
 def test_symlinked_manifest_returns_repair_batch_without_following_it(

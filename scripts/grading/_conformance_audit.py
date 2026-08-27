@@ -468,8 +468,15 @@ def _phase_findings(
     if expected_phase not in {"briefing", "redaction", "grading"}:
         raise ConformanceError("The expected conformance phase is unknown.")
     later_roots = {
-        "briefing": ("redacted", "drafts/essay-2", "final"),
-        "redaction": ("drafts/essay-2", "final"),
+        "briefing": (
+            TRIAL_REDACTED.as_posix(),
+            TRIAL_DRAFTS.as_posix(),
+            TRIAL_PUBLICATION.as_posix(),
+        ),
+        "redaction": (
+            TRIAL_DRAFTS.as_posix(),
+            TRIAL_PUBLICATION.as_posix(),
+        ),
         "grading": (),
     }[expected_phase]
     later = [

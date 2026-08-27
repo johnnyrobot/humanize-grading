@@ -19,6 +19,9 @@
 - Whole-batch verification blocks a nonzero manifest with
   `redaction-incomplete`, or an unreviewed clean manifest with
   `redaction-review-required`, and exit 12.
+- A new safe redaction attempt invalidates regular same-batch clean state before
+  roster and input processing while preserving identity-free bindings. Links
+  and overlapping roots are never rewritten.
 - Draft pairs contain feedback Markdown and `grade-record/1` JSON for one token.
 - Feedback skeleton marker is exactly `<!-- replace-with-feedback -->` and always blocks unchanged feedback.
 - Record preparation reads only an approved brief, current profile/rubric, pattern reference, reviewed manifest, batch inventory, and redacted source.
@@ -444,6 +447,7 @@ Generate three self-contained prompts that require `grade.py next` before and
 after each stage. Run parsed argv with
 `subprocess.run(argv, shell=False, cwd=trial, timeout=timeout_seconds)` and
 `GRADER_CONFORMANCE_TRACE` set to the phase trace path.
+Use `final/agent-e2e` for the trial publication in prompts, next argv and audit.
 
 - [ ] **Step 6: Add CLI subprocess tests and thin entry point**
 

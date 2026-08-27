@@ -16,6 +16,9 @@ redaction exit code plus whether the instructor completed the private review. A
 schema 1 manifest loads as unreviewed with no recorded exit. Verification blocks
 unless schema 2 records exit 0 and reviewed state because chat history and an
 artifact's existence do not prove that redaction completed or review happened.
+Before roster or input processing, a new safe attempt invalidates any regular
+same-batch clean manifest while preserving its identity-free bindings. Unsafe,
+linked or overlapping destinations are left untouched.
 
 Conformance adapters are JSON argument arrays. The harness replaces only its
 documented placeholders and launches the result without shell interpolation.

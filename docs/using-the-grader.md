@@ -3,9 +3,13 @@
 A walkthrough of the whole system, from a folder of student essays to feedback
 you can paste into your LMS.
 
-Every command here was run against the synthetic PHIL 210 corpus in
-`tests/fixtures/phil210/`, and the output shown is real. You can follow along
-with that corpus before you point this at anything of your own.
+Synthetic runs covered `calibrate.py inputs` and `holdout`; `grade.py profile`,
+`brief`, `next`, `record prepare`, `status`, `verify` and `consistency`; plus
+`redact.py` and `rehydrate.py`. The lifecycle output shown comes from that work
+against `tests/fixtures/phil210/`. The conformance `run` and `audit` commands
+near the end are illustrative until Task 6 records live agent evidence. You can
+follow the deterministic sections with the synthetic corpus before using your
+own files.
 
 ## What you are working with
 
@@ -283,6 +287,9 @@ failed run. A legacy schema 1 manifest still loads with no recorded exit and is
 treated as unreviewed. Inspect the private review file, then rerun the same
 redaction command with `--reviewed --force` to create current durable state.
 Verification exits 12 until redaction records both exit 0 and reviewed state.
+For a safe existing destination, a new attempt clears prior reviewed state
+before roster and input checks. Early failures preserve the prior run ID and
+output digests but make `next` return `repair-redaction` instead of drafting.
 
 **A non-zero exit stops redaction.** The codes:
 

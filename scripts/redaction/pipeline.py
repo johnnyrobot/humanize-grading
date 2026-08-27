@@ -65,6 +65,35 @@ MAX_BATCH_FILES = 500
 MAX_BATCH_BYTES = 500 * 1024 * 1024
 
 
+def invalidate_existing_redaction(
+    *,
+    source: Path,
+    destination: Path,
+    map_path: Path,
+    review_path: Path,
+    batch: str,
+    exit_code: int,
+) -> bool:
+    """Invalidate prior clean state only when every destination role is safe."""
+    try:
+        if has_symlink_component(destination) or paths_overlap(source, destination):
+            return False
+        if map_path == review_path or map_path.resolve() == review_path.resolve():
+            return False
+        for private_path in (map_path, review_path):
+            if has_symlink_component(private_path) or any(
+                is_within(private_path, root, follow_symlinks=follow)
+                for root in (source, destination)
+                for follow in (False, True)
+            ):
+                return False
+    except OSError:
+        return False
+    return RedactionManifest.invalidate_existing(
+        destination, batch=batch, exit_code=exit_code
+    )
+
+
 def _named_students(
     text: str, roster: list[RosterEntry]
 ) -> list[tuple[int, RosterEntry]]:
@@ -169,20 +198,32 @@ def run(
         require_component(batch, "The grading batch")
     except ValueError as error:
         return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
+
+    def early_failure(exit_code: int, message: str) -> BatchResult:
+        invalidate_existing_redaction(
+            source=source,
+            destination=destination,
+            map_path=map_path,
+            review_path=review_path,
+            batch=batch,
+            exit_code=exit_code,
+        )
+        return BatchResult(exit_code=exit_code, message=message)
+
     if has_symlink_component(source) or has_symlink_component(destination):
-        return BatchResult(
-            exit_code=EXIT_UNSAFE_PATH,
-            message="Submission and redacted-output roots must not be symlinks.",
+        return early_failure(
+            EXIT_UNSAFE_PATH,
+            "Submission and redacted-output roots must not be symlinks.",
         )
     if paths_overlap(source, destination):
-        return BatchResult(
-            exit_code=EXIT_UNSAFE_PATH,
-            message="Submission and redacted-output directories must be separate.",
+        return early_failure(
+            EXIT_UNSAFE_PATH,
+            "Submission and redacted-output directories must be separate.",
         )
     if map_path == review_path or map_path.resolve() == review_path.resolve():
-        return BatchResult(
-            exit_code=EXIT_UNSAFE_PATH,
-            message="The token map and review file must use separate paths.",
+        return early_failure(
+            EXIT_UNSAFE_PATH,
+            "The token map and review file must use separate paths.",
         )
     for label, private_path in (("token map", map_path), ("review file", review_path)):
         if has_symlink_component(private_path) or any(
@@ -190,9 +231,9 @@ def run(
             for root in (source, destination)
             for follow in (False, True)
         ):
-            return BatchResult(
-                exit_code=EXIT_UNSAFE_PATH,
-                message=(
+            return early_failure(
+                EXIT_UNSAFE_PATH,
+                (
                     f"The {label} must be a regular local file outside the "
                     "submission and redacted-output directories."
                 ),
@@ -202,32 +243,25 @@ def run(
         p for p in source.rglob("*") if p.is_file() or p.is_symlink()
     )
     if len(source_paths) > MAX_BATCH_FILES:
-        return BatchResult(
-            exit_code=EXIT_UNREADABLE,
-            message=f"A grading batch may contain at most {MAX_BATCH_FILES} files.",
+        return early_failure(
+            EXIT_UNREADABLE,
+            f"A grading batch may contain at most {MAX_BATCH_FILES} files.",
         )
     try:
         batch_bytes = sum(path.lstat().st_size for path in source_paths)
     except OSError as error:
-        return BatchResult(exit_code=EXIT_UNREADABLE, message=str(error))
+        return early_failure(EXIT_UNREADABLE, str(error))
     if batch_bytes > MAX_BATCH_BYTES:
-        return BatchResult(
-            exit_code=EXIT_UNREADABLE,
-            message="The grading batch is too large. The input limit is 500 MiB.",
+        return early_failure(
+            EXIT_UNREADABLE,
+            "The grading batch is too large. The input limit is 500 MiB.",
         )
 
     if destination.exists() and any(destination.iterdir()):
         if not force:
-            RedactionManifest.create(
-                batch,
-                TokenMap(batch).run_id,
-                [],
-                reviewed=reviewed,
-                exit_code=EXIT_DESTINATION_NOT_EMPTY,
-            ).save(destination)
-            return BatchResult(
-                exit_code=EXIT_DESTINATION_NOT_EMPTY,
-                message=(
+            return early_failure(
+                EXIT_DESTINATION_NOT_EMPTY,
+                (
                     f"{destination} is not empty. Empty it, choose a "
                     "different destination, or pass --force to overwrite "
                     "the earlier redaction's token-named outputs."

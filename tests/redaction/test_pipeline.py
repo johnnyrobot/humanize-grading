@@ -94,6 +94,40 @@ def test_schema_two_save_refuses_a_legacy_manifest_without_an_exit_code(tmp_path
         legacy.save(redacted)
 
 
+@pytest.mark.parametrize("linked", ["destination", "manifest"])
+def test_invalidation_never_follows_a_symbolic_link(tmp_path, linked):
+    real = tmp_path / "real-redacted"
+    real.mkdir()
+    output = real / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(real)
+    external_manifest = real / "_redaction.json"
+    before = external_manifest.read_bytes()
+
+    if linked == "destination":
+        destination = tmp_path / "linked-redacted"
+        destination.symlink_to(real, target_is_directory=True)
+    else:
+        destination = tmp_path / "linked-manifest-redacted"
+        destination.mkdir()
+        (destination / "_redaction.json").symlink_to(external_manifest)
+
+    changed = RedactionManifest.invalidate_existing(
+        destination,
+        batch="essay-2",
+        exit_code=EXIT_UNREADABLE,
+    )
+
+    assert changed is False
+    assert external_manifest.read_bytes() == before
+
+
 @pytest.mark.parametrize("reviewed", [False, True])
 def test_pipeline_persists_the_instructor_review_decision(tmp_path, reviewed):
     source = tmp_path / "in"

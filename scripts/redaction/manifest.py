@@ -8,9 +8,17 @@ from dataclasses import dataclass
 from pathlib import Path
 
 try:
-    from scripts.path_safety import read_bytes_limited, read_text_limited
+    from scripts.path_safety import (
+        has_symlink_component,
+        read_bytes_limited,
+        read_text_limited,
+    )
 except ModuleNotFoundError:  # direct scripts/redact.py execution
-    from path_safety import read_bytes_limited, read_text_limited
+    from path_safety import (
+        has_symlink_component,
+        read_bytes_limited,
+        read_text_limited,
+    )
 from .private_files import write_private_text
 
 SCHEMA = "redaction-batch/2"
@@ -85,6 +93,37 @@ class RedactionManifest:
             + "\n",
         )
         return path
+
+    @classmethod
+    def invalidate_existing(
+        cls, directory: Path, *, batch: str, exit_code: int
+    ) -> bool:
+        """Mark same-batch regular manifest state as an incomplete new attempt."""
+        if (
+            not isinstance(exit_code, int)
+            or isinstance(exit_code, bool)
+            or exit_code == 0
+        ):
+            raise ValueError("Manifest invalidation needs a non-zero integer exit code.")
+        path = directory / NAME
+        if has_symlink_component(directory) or has_symlink_component(path):
+            return False
+        try:
+            if not directory.is_dir() or not path.is_file():
+                return False
+            current = cls.load(directory)
+            if current.batch != batch:
+                return False
+            cls(
+                batch=current.batch,
+                run_id=current.run_id,
+                reviewed=False,
+                exit_code=exit_code,
+                outputs=current.outputs,
+            ).save(directory)
+        except (OSError, UnicodeError, ValueError):
+            return False
+        return True
 
     @classmethod
     def load(cls, directory: Path) -> "RedactionManifest":

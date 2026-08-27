@@ -10,6 +10,9 @@ Every invocation below is illustrative until Task 6 records live evidence for
 an exact runtime and model combination. The harness itself is not conformance
 evidence.
 
+The synthetic grading publication path is `final/agent-e2e`. Phase prompts,
+next-action argv and artifact audits use that same batch directory.
+
 ## Callable adapters
 
 Use `run` when the agent has a command-line adapter that accepts a prompt:

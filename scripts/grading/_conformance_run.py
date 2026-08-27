@@ -50,7 +50,7 @@ def _phase_prompt(name: str, workspace: Path) -> str:
         "--rubric tests/fixtures/phil210/grading_rubric.md "
         "--submissions synthetic/submissions --roster synthetic/roster.csv "
         "--root .grading --redacted redacted --drafts drafts/essay-2 "
-        "--publication final --json"
+        "--publication final/agent-e2e --json"
     )
     tasks = {
         "briefing": (

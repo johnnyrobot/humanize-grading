@@ -22,6 +22,12 @@ code and whether the instructor completed private review. Verification and
 `grade.py next` require exit 0 plus reviewed state. Review cannot override a
 different non-zero exit.
 
+When a regular same-batch manifest already exists at a safe destination, a new
+attempt first preserves its run ID and output digests while clearing review and
+recording an incomplete result. Roster-load, input-limit, or unsafe-source
+failure therefore cannot leave an earlier clean attempt eligible for grading.
+Linked manifests, linked destinations and overlapping roots are never rewritten.
+
 ## What it misses
 
 Five limits matter. Each one is real, and each one will surprise you if you

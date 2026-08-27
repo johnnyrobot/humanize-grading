@@ -31,7 +31,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from redaction.pipeline import (  # noqa: E402
     EXIT_DESTINATION_NOT_EMPTY,
     EXIT_OK,
+    EXIT_UNREADABLE,
     EXIT_UNSAFE_PATH,
+    invalidate_existing_redaction,
     run,
 )
 from redaction.roster import load_roster  # noqa: E402
@@ -72,6 +74,15 @@ def main(argv: list[str] | None = None) -> int:
 
     map_path = args.map or Path(".grading/maps") / f"{args.batch}.json"
     review_path = args.review or map_path.parent / "reviews" / f"{args.batch}.json"
+
+    invalidate_existing_redaction(
+        source=args.source,
+        destination=args.out,
+        map_path=map_path,
+        review_path=review_path,
+        batch=args.batch,
+        exit_code=EXIT_UNREADABLE,
+    )
 
     try:
         roster = load_roster(args.roster)

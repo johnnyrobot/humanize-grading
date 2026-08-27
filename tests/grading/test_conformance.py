@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 import scripts.grading._conformance_run as conformance_run
+from scripts.grading._conformance_model import TRIAL_PUBLICATION
 from scripts.grading.brief import ANSWER_REQUIRED, approve_brief, prepare_brief
 from scripts.grading.conformance import (
     ConformanceError,
@@ -224,7 +225,7 @@ def _complete_trial(workspace: Path) -> None:
             "--map",
             ".grading/maps/essay-2.json",
             "--out",
-            "final",
+            "final/agent-e2e",
         ],
         cwd=workspace,
         capture_output=True,
@@ -232,6 +233,15 @@ def _complete_trial(workspace: Path) -> None:
         check=False,
     )
     assert published.returncode == 0, published.stderr
+
+
+def test_conformance_uses_exact_batch_publication_path(tmp_path):
+    workspace = _trial(tmp_path)
+    prompt = conformance_run._phase_prompt("grading", workspace)
+
+    assert TRIAL_PUBLICATION == Path("final/agent-e2e")
+    assert "--publication final/agent-e2e --json" in prompt
+    assert "--publication final --json" not in prompt
 
 
 def _write_trace(workspace: Path, name: str, events: list[dict]) -> Path:
@@ -837,7 +847,9 @@ def test_audit_rejects_phase_overshoot_artifacts(tmp_path):
     )
 
 
-@pytest.mark.parametrize("relative", ["redacted", "drafts/essay-2", "final"])
+@pytest.mark.parametrize(
+    "relative", ["redacted", "drafts/essay-2", "final/agent-e2e"]
+)
 def test_audit_rejects_empty_later_stage_directory_overshoot(tmp_path, relative):
     workspace = _trial(tmp_path)
     _approve_trial_brief(workspace)
