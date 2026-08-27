@@ -46,9 +46,10 @@ short version:
 - **Redaction fails closed.** A non-zero exit means the batch is not safe to
   send. There is no override flag.
 - **The map is bound without exposing it.** `redacted/_redaction.json` holds a
-  random redaction-run ID and no identities. The token map holds the same ID.
-  Verification binds the manifest, and rehydration refuses a stale same-label
-  map from another redaction result.
+  random redaction-run ID, the instructor's durable reviewed state, and no
+  identities. The token map holds the same ID. Verification binds the manifest,
+  refuses unreviewed state, and rehydration refuses a stale same-label map from
+  another redaction result.
 - **Verification produces the evidence gate.** `_verification.json` binds the
   exact approved assignment brief, redacted submissions, drafts, grade records,
   rubric, calibration profile, redaction manifest and pattern reference that
@@ -244,7 +245,10 @@ inputs have not changed. A change to the brief body, course, batch, host mode,
 rubric or profile requires approval again. Chat approval records workflow state.
 It is not a signature, human authentication or privacy permission.
 
-### 2.4 Redact
+### 2.4 Run the next action, then redact
+
+After approval, run the `next --json` command shown in the next section. At
+this stage it returns the redaction action. Execute that returned command:
 
 ```bash
 python3 scripts/redact.py submissions/essay-2 \
@@ -271,7 +275,11 @@ paste or ask an agent to read this file.
 
 Output files are named by token, so a filename can never carry a name.
 The identity-free `_redaction.json` manifest beside them binds this exact
-redaction result to its private token map.
+redaction result to its private token map. Current manifests use
+`redaction-batch/2` and store `reviewed: true` or `false`. A legacy schema 1
+manifest still loads, but it is treated as unreviewed. Inspect the private
+review file, then rerun the same redaction command with `--reviewed --force` to
+create current durable state. Verification exits 12 until that happens.
 
 **A non-zero exit stops redaction.** The codes:
 
@@ -288,7 +296,49 @@ Exit 2 is common and benign — it means your roster is bigger than the batch.
 Trim the roster to who actually submitted, or accept that those students are
 missing.
 
-### 2.5 See what the batch owes
+### 2.5 Ask for the next legal action
+
+After every returned action, the agent runs this again before the next stage:
+
+```bash
+python3 scripts/grade.py next \
+  --batch essay-2 \
+  --course phil210 \
+  --rubric grading_rubric.md \
+  --submissions submissions/essay-2 \
+  --roster roster.csv \
+  --instructor "Marcus Vance" \
+  --json
+```
+
+The versioned result contains argument arrays rather than shell strings:
+
+```json
+{
+  "schema": "grading-next-action/1",
+  "batch": "essay-2",
+  "course": "phil210",
+  "stage": "drafting",
+  "action": "prepare-record",
+  "message": "Prepare the draft pair for STUDENT_01.",
+  "token": "STUDENT_01",
+  "commands": [["python3", "scripts/grade.py", "record", "prepare"]],
+  "findings": []
+}
+```
+
+This example shortens the command array. The live result includes every path
+and option. The agent executes only the returned action, then runs `next --json`
+again. An action may contain one ordered command group, such as consistency
+followed by publication.
+
+After any returned lifecycle command exits non-zero, run a fresh `next --json`.
+Exit 12 means repair is the only legal action. In particular, failed
+verification cannot advance to consistency or publication. Exit 13 means the
+workflow state or command input is malformed.
+
+Plain `next` shows the same action for a human. The earlier status command
+remains available when you want the full participant table:
 
 ```bash
 python3 scripts/grade.py status --batch essay-2 --redacted redacted
@@ -314,7 +364,20 @@ both.
 
 ### 2.6 Grade each pending submission
 
-The skill reads one file at a time from `redacted/` and writes two files to
+For each `prepare-record` action, execute the returned command. Its base form
+is:
+
+```bash
+python3 scripts/grade.py record prepare \
+  --batch essay-2 \
+  --course phil210 \
+  --rubric grading_rubric.md \
+  --source redacted/STUDENT_01.md
+```
+
+The command creates a structurally valid, deliberately unfinished draft pair.
+The skill reads that token's file from `redacted/` and edits the generated pair
+instead of creating either file from memory. It writes both files under
 `.grading/drafts/<batch>/`:
 
 - `STUDENT_03.md` — the feedback you will read
@@ -324,6 +387,13 @@ The skill reads one file at a time from `redacted/` and writes two files to
 It uses the approved assignment brief for priorities, required evidence,
 expected mistakes, feedback behavior and boundaries. The brief may clarify the
 rubric but cannot change points or add criteria.
+
+The Markdown follows the rubric's feedback protocol and contains
+`<!-- replace-with-feedback -->` markers. Replace every marker. The JSON already
+has the exact rubric criteria and current pattern-density object. Fill every
+assessable score, rubric level and supporting quote; leave a criterion
+`cannot assess` only when the work cannot support a score. Read
+`references/rubric-format.md` for the complete `grade-record/1` reference.
 
 For criterion-4 evidence it runs:
 
@@ -391,11 +461,12 @@ Status now shows the receipt-derived state:
 0 pending, 0 drafted, 0 incomplete, 0 orphaned, 5 verified, 0 rehydrated.
 ```
 
-Exit 13 means the assignment brief is missing, still a draft, malformed, or
-stale. Exit 12 means at least one generated draft failed verification. A failed
-batch writes neither offsets nor a receipt. Approve or correct the brief, or fix
-the generated draft, then run verification again. `--no-write` checks the batch
-but writes neither artifact.
+Exit 13 means the assignment brief or workflow input is missing, still a draft,
+malformed, or stale. Exit 12 means the current action is blocked and needs
+repair, including when a generated draft fails verification. A failed batch
+writes neither offsets nor a receipt. Run `next --json`, repair the reported
+state, then run `next --json` again. `--no-write` checks the batch but writes
+neither artifact.
 
 ### 2.8 Look at the outliers
 
@@ -519,6 +590,34 @@ strings, so it stops accidents and instruction drift rather than a determined
 bypass; and if it cannot parse its input it allows rather than denies, because a
 guard that blocks every tool call would also block the calls needed to fix it.
 
+## Synthetic agent conformance
+
+Use only synthetic data for conformance. A callable command-line adapter can be
+launched with JSON arguments:
+
+```bash
+python3 scripts/agent_conformance.py run \
+  --runtime local-agent \
+  --command-json '["local-agent", "--prompt", "{prompt}"]' \
+  --timeout 300
+```
+
+An existing synthetic workspace can be audited from a separate trusted
+checkout:
+
+```bash
+python3 scripts/agent_conformance.py audit \
+  --runtime local-agent \
+  --workspace /tmp/humanize-grading-agent-e2e
+```
+
+Read `references/agent-conformance.md` before running either command. Reports
+use `grading-agent-conformance/1`. They record observable commands, elapsed
+time, artifacts, lifecycle exits and available read traces. Artifact success
+does not prove which files an agent opened. Without a usable read trace, the
+privacy result is `UNVERIFIED` even when deterministic checks pass. The harness
+interfaces alone are not evidence that any particular runtime or model works.
+
 ## Command reference
 
 | Command | Purpose |
@@ -531,10 +630,14 @@ guard that blocks every tool call would also block the calls needed to fix it.
 | `grade.py brief prepare --batch B --course C --mode local\|cloud` | Create an identity-free draft assignment brief |
 | `grade.py brief approve --batch B --course C --rubric R --approval TEXT` | Bind the answered brief to the current rubric and profile |
 | `grade.py brief check --batch B --course C --rubric R` | Confirm the exact approved brief is current |
+| `grade.py next --batch B --course C --rubric R --json` | Return the next legal action as versioned JSON argv |
+| `grade.py record prepare --batch B --course C --rubric R --source S` | Create one pending token's unfinished draft pair |
 | `grade.py status --batch B` | Show what still needs grading |
 | `grade.py density FILE [--json]` | Count watched AI terms |
 | `grade.py verify --batch B --course C --rubric R` | Check every draft; write offsets and the verification receipt |
 | `grade.py consistency --batch B [--fail-on-findings]` | Flag outliers across the batch |
+| `agent_conformance.py run --runtime N --command-json JSON` | Launch a synthetic conformance trial |
+| `agent_conformance.py audit --runtime N --workspace D` | Audit an existing synthetic trial workspace |
 
 ### Exit codes
 
@@ -547,8 +650,8 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 | 5 | `rehydrate.py` | Receipt, map, rendering, token mapping or publication failure |
 | 10 | `grade.py` | No profile for this course |
 | 11 | `grade.py` | The rubric drifted since calibration |
-| 12 | `grade.py verify` | At least one generated draft failed verification |
-| 13 | both CLIs | Malformed input; `grade.py brief` and `grade.py verify` also use it for a missing, draft, malformed, or stale assignment brief |
+| 12 | `grade.py`, `agent_conformance.py` | The current action needs repair, including failed verification, or a completed conformance trial failed |
+| 13 | grading and conformance CLIs | Malformed input or workflow state; assignment brief commands also use it for a missing, draft, malformed, or stale brief |
 
 ## What this does not do
 

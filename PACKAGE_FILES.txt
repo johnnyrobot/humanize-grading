@@ -19,6 +19,7 @@ SKILL.md
 agents/openai.yaml
 docs/adr/0001-verification-receipts-gate-atomic-rehydration.md
 docs/adr/0002-approved-assignment-briefs-gate-grading.md
+docs/adr/0003-agent-workflow-navigation-and-conformance.md
 docs/agents/domain.md
 docs/agents/issue-tracker.md
 docs/agents/triage-labels.md

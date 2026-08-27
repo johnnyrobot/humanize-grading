@@ -10,9 +10,12 @@ Subcommands:
     density      Count watched AI terms in one file.
     consistency  Flag outliers across a graded batch.
     brief        Prepare, approve, or check an assignment brief.
+    record       Prepare one pending submission's draft pair.
+    next         Show the next legal grading action.
 
 Exit codes: 0 clean, 10 no profile, 11 the rubric drifted since calibration,
-12 a draft failed verification, 13 malformed input.
+12 a grading action is blocked or requested findings are present, including
+failed verification, 13 malformed input.
 
 Nothing here loads the token map. Quotes and tokens are checked against the
 redacted source, which is the file the model actually read.
@@ -659,7 +662,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common(brief_check)
     brief_check.set_defaults(handler=_cmd_brief_check)
 
-    record = subparsers.add_parser("record", help="Prepare a grade record pair")
+    record = subparsers.add_parser(
+        "record", help="Prepare one pending submission's draft pair."
+    )
     record_actions = record.add_subparsers(dest="record_action", required=True)
     record_prepare = record_actions.add_parser(
         "prepare", help="Prepare one pending submission's draft pair"
@@ -680,7 +685,7 @@ def build_parser() -> argparse.ArgumentParser:
     record_prepare.set_defaults(handler=_cmd_record_prepare)
 
     next_command = subparsers.add_parser(
-        "next", help="Show the next legal grading action"
+        "next", help="Show the next legal grading action."
     )
     next_command.add_argument(
         "--batch", required=True, type=_component("The grading batch")

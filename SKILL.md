@@ -6,7 +6,7 @@ description: |
   Redacts student identity before any work reaches a cloud model.
 license: MIT
 metadata:
-  version: "3.3.0"
+  version: "3.4.0"
 ---
 
 # Grader
@@ -166,164 +166,48 @@ Read `references/calibration.md` first.
 
 ## Grade
 
-### 1. Gate and profile
+Complete the gate and assignment briefing first. Do not begin redaction until
+`brief check` confirms the exact approved file is current.
 
-Ask the gate question. Then:
-
-```bash
-python3 scripts/grade.py profile --course <course> --rubric <rubric.md>
-```
-
-| Exit | Meaning | What to do |
-| --- | --- | --- |
-| 0 | Profile is current | Continue |
-| 10 | No profile | Refuse. Offer `/grade calibrate --course <course>`. |
-| 11 | The rubric drifted | Name the drifted criteria. Ask before continuing. |
-
-### 2. Check the assignment brief
-
-Follow [Assignment briefing](#assignment-briefing). Do not begin redaction until
-`brief check` confirms the exact approved file is current for this batch,
-rubric, and profile.
-
-### 3. Redact
+After approval, use the executable next action for every stage. The navigation
+command is `python3 scripts/grade.py next`; pass the batch, course, rubric,
+private path locators, and `--json` so it can return exact JSON argument arrays:
 
 ```bash
-python3 scripts/redact.py <submissions/> --roster <roster.csv> \
-  --batch <batch> --out redacted/ --instructor "<Your Name>"
-```
-
-Pause and ask the instructor to inspect the review file locally, outside this
-conversation. It contains candidate names, passages that may identify their
-author, and every bare surname substituted. Never read or quote it yourself.
-After the instructor confirms the local review is complete, re-run with
-`--reviewed`.
-
-A non-zero exit stops the cloud path. There is no override. Report the exit
-code and what caused it.
-
-Tell the instructor what redaction does and does not catch, from
-`references/redaction.md`. Do not imply that everything is scrubbed.
-Pseudonymization is not anonymization.
-
-### 4. Survey
-
-```bash
-python3 scripts/grade.py status --batch <batch>
-```
-
-Grade only what is `pending`. A submission that already has a draft has already
-been graded; regrading it produces a second, different grade for the same
-student. Report anything `orphan` or `incomplete` rather than working around it.
-
-### 5. Grade each pending submission
-
-For each one, read only its file under `redacted/`.
-
-Use the approved assignment brief to apply its priorities, required evidence,
-expected mistakes, feedback behavior, and boundaries. It may clarify the rubric
-but must not change point values or add criteria.
-
-**Score every criterion.** For each, give a score out of its point value, name
-the level from the rubric's own language, and attach at least one quote from the
-essay that supports it. Copy quotes verbatim. Use at least four words. Do not
-add offsets; verification writes those.
-
-- A criterion the work does not let you assess gets `"assessable": false`,
-  `"score": null`, and the level `"cannot assess"`. Never infer a score.
-- A score you cannot support with a quote is not a score. Leave it unassessed
-  and flag it for the instructor.
-
-**Get the density evidence for the prose criterion.**
-
-```bash
-python3 scripts/grade.py density redacted/<TOKEN>.md --json
-```
-
-Paste that output into the record's `pattern_density` field unchanged.
-Verification recounts it. This is evidence about prose, which the rubric asks
-you to assess. It is not evidence about authorship, and you must never present
-it as such. Do not say or imply that a submission was written by AI.
-
-**Draft the feedback** from the profile and approved assignment brief, in the
-structure the rubric states. Follow the profile's Voice and Feedback structure
-sections. Use the comment bank for phrasing, adapted to this essay. Never use a
-phrase from the never-use list.
-
-**Run the voice pass.** Check the draft against `references/ai-patterns.md`, the
-same 35 patterns the Humanizer skill uses. Feedback that reads like a chatbot
-defeats the point of calibrating.
-
-**Write both files** to `.grading/drafts/<batch>/`:
-
-- `<TOKEN>.md` — the feedback the instructor reads.
-- `<TOKEN>.json` — the record. Schema `grade-record/1`, status `draft`.
-
-### 6. Verify
-
-```bash
-python3 scripts/grade.py verify --batch <batch> --course <course> \
-  --rubric <rubric.md>
-```
-
-Before reading submissions or drafts, verification checks the approved
-assignment brief against the current rubric and profile. It then checks every
-quote against the source, the arithmetic against itself, the letter against the
-rubric's scale, the structure against the protocol, the phrasing against the
-never-use list, and the density figures against a fresh count. It writes the
-located offsets back into each record.
-
-After every draft passes, verification also writes the identity-free schema 2
-`_verification.json` receipt beside the drafts. Its token-free
-`assignment-brief` evidence binds the exact approved file alongside the
-redacted submissions, drafts, grade records, rubric, calibration profile,
-redaction manifest, and pattern reference that passed. Any later edit makes the
-receipt stale and requires verification again. The `--no-write` check writes
-neither offsets nor a receipt.
-
-Exit 13 means the assignment brief is missing, still a draft, malformed, or
-stale. Exit 12 means at least one generated draft failed verification. Approve
-or correct the brief, or fix the generated draft, then run verification again.
-Do not rehydrate a batch that failed verification.
-
-### 7. Consistency
-
-```bash
-python3 scripts/grade.py consistency --batch <batch>
-```
-
-Show the instructor everything it flags. These are flags, not failures. An
-outlier is often a genuinely unusual essay.
-
-### 8. Rehydrate
-
-```bash
-python3 scripts/rehydrate.py .grading/drafts/<batch>/ \
+python3 scripts/grade.py next \
   --batch <batch> --course <course> --rubric <rubric.md> \
-  --profile .grading/profiles/<course>.md --redacted redacted/ \
-  --brief .grading/assignments/<batch>.md \
-  --map .grading/maps/<batch>.json --out final/<batch>/
+  --submissions <submissions/> --roster <roster.csv> \
+  --instructor "<Your Name>" --json
 ```
 
-Local only. Rehydration first requires the current trusted grading context,
-revalidates the receipt, and reruns semantic verification before it restores
-identities through the local token map. It prepares every draft in staging
-before publishing anything. A missing, stale, malformed, or self-authored
-receipt, a token with no mapping, or a rendering failure leaves the destination
-unchanged.
-It refuses a legacy schema 1 receipt. Approve an assignment brief and run
-verification again to produce current schema 2 whole-batch evidence.
-Successful publication includes the identity-free `_publication.json` marker.
-Pass `--force` only to replace an unchanged publication recognized by that marker.
-Safe force stages the complete replacement, moves the prior publication to a
-backup, installs the replacement, and restores or recovers the backup on failure.
-The destination may be briefly absent during that portable directory swap, but
-it is never exposed as a partly populated new grading batch.
+1. Run `next --json`.
+2. Execute only the returned action. When it returns an ordered command group,
+   execute the commands in that order.
+3. Run `next --json` again. Repeat until it returns `review-publication`.
 
-Every rehydrated feedback file is a draft pending the instructor's sign-off.
-Do not open or quote the rehydrated files after publication. They contain real
-identities and must stay outside model context. Tell the instructor where the
-local drafts were written so they can review the feedback and numeric grades.
+When the action is `review-redaction`, stop. Ask the instructor to
+inspect the review file locally,
+outside this conversation and confirm that review is complete. Never read or
+quote the review file or token map. Execute the returned reviewed-redaction
+command only after that confirmation. Read
+`references/redaction.md` before describing what redaction covers.
+
+When the action is `prepare-record`, use the returned command. Its base form is
+`python3 scripts/grade.py record prepare`. It creates the feedback Markdown and
+`grade-record/1` JSON together. Read only the returned token's file under
+`redacted/`, then edit both generated files. Do not create either file from
+memory. Read `references/rubric-format.md` for the complete record and feedback
+requirements.
+
+After any returned lifecycle command exits non-zero, run a fresh `next --json`
+call. Execute its repair action before anything else. Exit 12 means the current
+action is blocked and repair is the only legal next step. A verification failure
+stays `repair-verification`; consistency and publication remain unavailable
+until a later verification succeeds.
+
+At `review-publication`, tell the instructor where the local rehydrated drafts
+were written. Do not open or quote them. They contain real identities and remain
+drafts until the instructor reviews the feedback and numeric grades.
 
 ## Errors
 
@@ -363,5 +247,6 @@ Every condition refuses rather than guesses.
 | `references/redaction.md` | Before telling the instructor what redaction covers |
 | `references/assignment-brief.md` | Before preparing or checking an assignment brief |
 | `references/calibration.md` | Before running `calibrate` |
-| `references/rubric-format.md` | When a rubric will not parse |
+| `references/rubric-format.md` | Before editing a prepared draft pair, or when a rubric will not parse |
 | `references/ai-patterns.md` | During the voice pass, every draft |
+| `references/agent-conformance.md` | Before running or auditing a synthetic agent conformance trial |

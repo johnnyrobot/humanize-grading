@@ -178,6 +178,7 @@ if readme_numbers != set(range(1, 36)):
     raise SystemExit("List patterns 1 through 35 in the README table")
 
 required_references = {
+    "agent-conformance.md",
     "ai-patterns.md",
     "assignment-brief.md",
     "calibration.md",
@@ -215,6 +216,17 @@ if missing_assignment_brief_workflow:
     raise SystemExit(
         "Document the assignment brief workflow in SKILL.md: "
         + "; ".join(missing_assignment_brief_workflow)
+    )
+
+agent_workflow = (
+    "python3 scripts/grade.py next",
+    "python3 scripts/grade.py record prepare",
+)
+missing_agent_workflow = [text for text in agent_workflow if text not in SKILL]
+if missing_agent_workflow:
+    raise SystemExit(
+        "Document the executable agent workflow in SKILL.md: "
+        + "; ".join(missing_agent_workflow)
     )
 
 if (ROOT / "hooks" / "hooks.json").exists():

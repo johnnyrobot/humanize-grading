@@ -60,6 +60,91 @@ How each item is read:
 A parenthetical in a label is dropped, so `What Worked (Strengths)` becomes
 the section `What Worked`.
 
+## The prepared draft pair
+
+When `grade.py next --json` returns `prepare-record`, execute its command. The
+base command is:
+
+```bash
+python3 scripts/grade.py record prepare \
+  --batch <batch> --course <course> --rubric <rubric.md> \
+  --source redacted/<TOKEN>.md
+```
+
+The command creates `.grading/drafts/<batch>/<TOKEN>.md` and
+`.grading/drafts/<batch>/<TOKEN>.json` together. It refuses to replace either
+file. The Markdown already has the rubric's required sections, annotation
+shape, and first allowed sign-off. Replace every
+`<!-- replace-with-feedback -->` marker. An unchanged marker blocks
+verification.
+
+The JSON is a loadable but deliberately unassessed `grade-record/1`. Keep its
+generated `schema`, `batch`, `token`, `source`, `course`, `rubric`, `profile`,
+`pattern_density`, and `status` fields. The full record shape is:
+
+```json
+{
+  "schema": "grade-record/1",
+  "batch": "essay-2",
+  "token": "STUDENT_01",
+  "source": "redacted/STUDENT_01.md",
+  "course": "phil210",
+  "rubric": "grading_rubric.md",
+  "profile": ".grading/profiles/phil210.md",
+  "criteria": [
+    {
+      "number": 1,
+      "name": "Thesis",
+      "points_possible": 25,
+      "score": 21,
+      "level": "Proficient",
+      "assessable": true,
+      "justifications": [
+        {
+          "quote": "At least four exact words from the redacted source.",
+          "note": "How this passage supports the score."
+        }
+      ]
+    }
+  ],
+  "total": 21,
+  "total_possible": 25,
+  "letter": "B",
+  "pattern_density": {
+    "words": 600,
+    "count": 0,
+    "per_thousand": 0.0,
+    "by_pattern": {},
+    "examples": []
+  },
+  "status": "draft"
+}
+```
+
+Keep every rubric criterion in its original order with its exact number, name,
+and point value. For each assessable criterion:
+
+- set `assessable` to `true`;
+- give an integer `score` within the criterion's point value;
+- use the rubric's exact performance-level name; and
+- add at least one exact quote of four or more words from the redacted source.
+
+Use `occurrence` only when the same quote appears more than once. Verification
+writes `offset`, `line`, and `length`; the agent does not. For a criterion the
+work cannot support, keep `assessable: false`, `score: null`, level
+`cannot assess`, and an empty `justifications` list. Never infer a score.
+
+Set `total` to the sum of assessed scores and `total_possible` to the sum of
+their possible points. Compute `letter` from the rubric's grading scale. Leave
+the generated `pattern_density` object unchanged; verification recounts it.
+Density is rubric evidence about prose, not evidence of authorship. Never use it
+to claim that a person or model wrote the submission.
+
+Write feedback from the current profile and approved assignment brief. Keep the
+rubric's section order and allowed sign-off. Use the profile's voice, structure,
+comment-bank phrasing, and never-use list. Check the finished feedback against
+`references/ai-patterns.md` before running `next --json` again.
+
 ## Drift
 
 Each criterion carries a digest of its own wording. When you edit a

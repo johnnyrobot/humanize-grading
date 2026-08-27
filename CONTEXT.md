@@ -17,6 +17,21 @@ An identity-free, instructor-approved record of how the rubric and calibration
 profile apply to one grading batch. Verification binds the exact approved file.
 _Avoid_: Prompt, config, approval receipt
 
+**Draft pair**:
+The feedback Markdown and `grade-record/1` JSON for one redacted submission.
+Both files must exist before the submission is drafted.
+_Avoid_: Output files, grade bundle
+
+**Next action**:
+The one legal workflow stage derived from current identity-free grading state.
+It may include one command or one ordered command group.
+_Avoid_: Suggestion, plan
+
+**Conformance trial**:
+A synthetic agent run scored from observable commands, elapsed time, artifacts,
+lifecycle exits, and available read traces.
+_Avoid_: Benchmark, model grade
+
 **Verified draft**:
 Draft feedback and its grade record after every required check has passed
 against the approved assignment brief, redacted submission, rubric, and

@@ -51,9 +51,10 @@ agent must not open the rehydrated files; the instructor reviews them locally.
 4. **Approve the exact summary.** The agent prepares an identity-free assignment
    brief, summarizes it and waits for the exact batch-specific phrase. A casual
    “yes” does not approve anything.
-5. **Let the agent redact, grade and verify.** Only after approval does the agent
-   read submissions through the redaction workflow. Whole-batch verification
-   binds the exact approved brief in a schema 2 receipt.
+5. **Let the agent follow the next action.** Only after approval does it run
+   `grade.py next --json`, execute the returned action, and repeat. It prepares
+   each draft pair from the rubric instead of inventing record JSON. Whole-batch
+   verification binds the exact approved brief in a schema 2 receipt.
 6. **Review the rehydrated drafts and submit them yourself.** Rehydration restores
    identities on the instructor's machine. The agent must not reopen those
    files, and the package never sends grades to an LMS.
@@ -78,7 +79,7 @@ brief body, course, batch, host mode, rubric or calibration profile changes.
 | --- | --- |
 | Loads the Grader or Humanizer skill | Chooses local or cloud operation |
 | Prepares and checks an identity-free assignment brief | Approves the exact batch summary |
-| Runs redaction, grading, verification and consistency commands | Inspects the private review file outside the AI conversation |
+| Runs `next --json` and only the returned grading actions | Inspects the private review file outside the AI conversation |
 | Reads only tokenized submissions from `redacted/` | Decides whether institutional policy permits cloud processing |
 | Writes draft feedback and structured grade records | Reviews, edits and signs off on every draft |
 | Rehydrates a verified batch through the local script | Submits approved grades or feedback to the LMS |
@@ -101,18 +102,20 @@ The agent then follows this sequence:
 2. Ask the assignment-specific questions, prepare the identity-free brief and
    wait for `Approve assignment brief for essay-2`. Run `brief approve` and
    `brief check` only after that exact message.
-3. Run local redaction. Names, IDs, emails, filenames and document metadata
-   become stable tokens such as `STUDENT_03`.
-4. Pause while the instructor inspects the private review file locally. The
+3. Run `grade.py next --json` and execute only its returned action. Repeat this
+   after every action and after every non-zero lifecycle exit.
+4. Run local redaction when returned. Names, IDs, emails, filenames and document
+   metadata become stable tokens such as `STUDENT_03`.
+5. Pause while the instructor inspects the private review file locally. The
    agent must never read that identity-bearing file.
-5. Grade only the pending files under `redacted/`. For each rubric criterion,
-   write a score and a supporting quote into the grade record under
-   `.grading/drafts/<batch>/`.
-6. Verify the whole grading batch. A missing, unapproved or stale brief, failed
+6. For each returned `prepare-record` action, generate the draft pair, read only
+   that pending token under `redacted/`, and edit the generated Markdown and
+   `grade-record/1` JSON.
+7. Verify the whole grading batch. A missing, unapproved or stale brief, failed
    quote, total, letter grade, feedback section, density measurement or file
    binding blocks publication.
-7. Show the instructor the advisory consistency flags across the batch.
-8. Rehydrate the verified drafts locally. Real names return only after the
+8. Show the instructor the advisory consistency flags across the batch.
+9. Rehydrate the verified drafts locally. Real names return only after the
    schema 2 receipt, approved brief, redaction manifest, token map and output
    set all match.
 
@@ -223,6 +226,44 @@ python3 scripts/grade.py brief check \
   --batch essay-3 --course phil210 --rubric grading_rubric.md
 ```
 
+After approval, the agent uses one executable loop:
+
+```bash
+python3 scripts/grade.py next \
+  --batch essay-3 --course phil210 --rubric grading_rubric.md \
+  --submissions submissions/essay-3 --roster roster.csv \
+  --instructor "Dr. Vance" --json
+```
+
+The result names one legal action and gives commands as argument arrays rather
+than shell strings:
+
+```json
+{
+  "schema": "grading-next-action/1",
+  "batch": "essay-3",
+  "course": "phil210",
+  "stage": "drafting",
+  "action": "prepare-record",
+  "message": "Prepare the draft pair for STUDENT_01.",
+  "token": "STUDENT_01",
+  "commands": [["python3", "scripts/grade.py", "record", "prepare"]],
+  "findings": []
+}
+```
+
+The displayed array is shortened here; the live command includes the exact
+batch, course, rubric, source and path options. The agent executes only the
+returned action, then runs `next --json` again. `record prepare` creates a valid,
+unfinished feedback-and-record pair together. Exit 12 means the current state
+requires repair; verification failures cannot advance to consistency or
+publication.
+
+Redaction manifests now use `redaction-batch/2` and persist `reviewed: true` or
+`false`. A schema 1 manifest remains readable but is treated as unreviewed. The
+instructor must inspect the private review file, then rerun the same redaction
+with `--reviewed --force` before verification can pass.
+
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
 calibration, a graded batch end to end, every command and exit code, and what
 the tool deliberately does not do. Every command in it was run against the
@@ -249,6 +290,29 @@ cat hooks/block-raw-reads.json   # then merge the "hooks" key into your settings
 It is Claude Code specific, and Grader works without it. Its Bash check matches
 command strings, so it stops accidents and instruction drift, not a determined
 bypass.
+
+## Synthetic agent conformance
+
+`scripts/agent_conformance.py` can launch a command-line agent against the
+shipped synthetic fixture or audit an existing synthetic workspace:
+
+```bash
+python3 scripts/agent_conformance.py run \
+  --runtime local-agent \
+  --command-json '["local-agent", "--prompt", "{prompt}"]' \
+  --timeout 300
+
+python3 scripts/agent_conformance.py audit \
+  --runtime local-agent \
+  --workspace /tmp/humanize-grading-agent-e2e
+```
+
+Read `references/agent-conformance.md` before a trial. Reports use
+`grading-agent-conformance/1` and score commands, time, artifacts, lifecycle
+exits and available read traces. Deterministic artifacts cannot prove what an
+agent read. A trial without a usable read trace is `UNVERIFIED`, even when every
+artifact and lifecycle check passes. These interfaces do not claim support for
+any agent runtime or model before a live retest records that exact combination.
 
 ## How it works
 
@@ -405,6 +469,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
+- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review in schema 2 manifests and ships synthetic agent-conformance evidence that stays unverified without a read trace.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.

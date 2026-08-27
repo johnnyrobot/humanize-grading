@@ -574,3 +574,15 @@ def test_brief_cli_help_lists_every_action():
     assert "prepare" in result.stdout
     assert "approve" in result.stdout
     assert "check" in result.stdout
+
+
+def test_grade_cli_help_describes_navigation_and_repair_exit():
+    result = _grade("--help")
+
+    assert result.returncode == 0
+    assert "Prepare one pending submission's draft pair." in result.stdout
+    assert "Show the next legal grading action." in result.stdout
+    assert (
+        "12 a grading action is blocked or requested findings are present, including failed "
+        "verification"
+    ) in " ".join(result.stdout.split())
