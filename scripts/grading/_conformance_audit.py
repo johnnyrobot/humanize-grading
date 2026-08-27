@@ -265,6 +265,13 @@ def audit_trace(
         commands = phase_commands[phase]
         successful_next = [index for is_next, index in commands if is_next]
         work = phase_work[phase]
+        work_events = set(work)
+        commands_alternate = all(
+            is_next
+            if position % 2 == 0
+            else (not is_next and event_index in work_events)
+            for position, (is_next, event_index) in enumerate(commands)
+        )
         if not commands or (not successful_next and not work):
             if not prohibited and not (findings - {"missing-command-evidence"}):
                 findings.add("missing-command-evidence")
@@ -278,6 +285,7 @@ def audit_trace(
             or not successful_next[0] < min(work)
             or not max(work) < successful_next[-1]
             or phase in incomplete_next_phases
+            or not commands_alternate
         ):
             evidence_complete = False
     blocking_findings = findings - {"missing-command-evidence"}
@@ -368,7 +376,11 @@ def _lifecycle(workspace: Path) -> dict[str, object]:
     try:
         manifest = RedactionManifest.load(workspace / TRIAL_REDACTED)
         manifest.validate(workspace / TRIAL_REDACTED)
-        manifest_status = "passed" if manifest.reviewed else "failed"
+        manifest_status = (
+            "passed"
+            if manifest.reviewed and manifest.exit_code == 0
+            else "failed"
+        )
     except Exception:
         manifest_status = "failed"
 
@@ -633,9 +645,18 @@ def audit_workspace(
     )
     package["trusted_root"] = trusted_root
     package["marker_digest"] = str(marker["package"].get("digest", ""))
-    package["marker_matches"] = package["marker_digest"] == package_baseline.get(
-        "digest"
+    trusted_revision = str(package_baseline.get("repository_revision", ""))
+    marker_revision = str(marker.get("repository_revision", ""))
+    package["marker_revision"] = marker_revision
+    package["marker_matches"] = (
+        package["marker_digest"] == package_baseline.get("digest")
+        and marker_revision == trusted_revision
     )
+    if not package["marker_matches"]:
+        package["status"] = "failed"
+        package["findings"] = tuple(
+            sorted({*package["findings"], "package-marker-mismatch"})
+        )
     if package["status"] == "passed":
         lifecycle = _lifecycle(root)
         lifecycle["phase"] = {
@@ -665,7 +686,7 @@ def audit_workspace(
     report = ConformanceReport(
         runtime=runtime,
         mode="audit",
-        repository_revision=str(marker["repository_revision"]),
+        repository_revision=trusted_revision,
         workspace=root,
         passed=passed,
         phases=phases,

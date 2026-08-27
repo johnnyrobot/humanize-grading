@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 import scripts.grading._conformance_run as conformance_run
-from scripts.grading._conformance_model import TRIAL_PUBLICATION
+from scripts.grading._conformance_model import TRIAL_PUBLICATION, TraceResult
 from scripts.grading.brief import ANSWER_REQUIRED, approve_brief, prepare_brief
 from scripts.grading.conformance import (
     ConformanceError,
@@ -59,6 +59,22 @@ def test_command_json_is_argv_not_shell_text():
     command = parse_command_json('["fake-agent", "--prompt", "{prompt}"]')
 
     assert command == ("fake-agent", "--prompt", "{prompt}")
+
+
+def test_trace_result_freezes_supplied_collection_values():
+    prohibited = [".grading/maps/essay-2.json"]
+    findings = ["missing-command-evidence"]
+
+    result = TraceResult(
+        status="unverified",
+        prohibited_paths=prohibited,
+        findings=findings,
+    )
+    prohibited.append("synthetic/roster.csv")
+    findings.append("malformed-command-event")
+
+    assert result.prohibited_paths == (".grading/maps/essay-2.json",)
+    assert result.findings == ("missing-command-evidence",)
 
 
 @pytest.mark.parametrize("raw", ["echo hi", "{}", "[]", '["agent", 3]'])
@@ -315,6 +331,28 @@ def test_audit_detects_identity_leak_in_redacted_or_drafts(tmp_path):
     assert synthetic_name not in repr(report)
 
 
+def test_audit_rejects_a_reviewed_nonzero_redaction_outcome(tmp_path):
+    workspace = _trial(tmp_path)
+    _approve_trial_brief(workspace)
+    _redact_trial(workspace)
+    manifest_path = workspace / "redacted/_redaction.json"
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload["exit_code"] = 2
+    manifest_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    report = audit_workspace(
+        workspace,
+        runtime="manual",
+        expected_phase="redaction",
+    )
+
+    assert report.passed is False
+    assert report.lifecycle["manifest"]["status"] == "failed"
+
+
 def test_audit_sanitizes_an_identity_bearing_artifact_name(tmp_path):
     workspace = _trial(tmp_path)
     synthetic_name = load_roster(workspace / "synthetic/roster.csv")[0].name
@@ -326,6 +364,21 @@ def test_audit_sanitizes_an_identity_bearing_artifact_name(tmp_path):
 
     assert report.identity_leaks == ("redacted/<identity-bearing-path>",)
     assert synthetic_name not in repr(report)
+
+
+def test_audit_detects_and_sanitizes_synthetic_bare_name_variants(tmp_path):
+    workspace = _trial(tmp_path)
+    synthetic_name = load_roster(workspace / "synthetic/roster.csv")[0].name
+    first_name, last_name = synthetic_name.split()
+    leaked = workspace / f"redacted/{first_name}-notes.md"
+    leaked.parent.mkdir()
+    leaked.write_text(f"This contains only {last_name}.\n", encoding="utf-8")
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.identity_leaks == ("redacted/<identity-bearing-path>",)
+    assert first_name not in repr(report)
+    assert last_name not in repr(report)
 
 
 @pytest.mark.parametrize(
@@ -740,6 +793,45 @@ def test_trace_passes_with_exact_next_and_successful_work_command(tmp_path):
     assert result.status == "passed"
 
 
+def test_trace_requires_next_after_every_successful_work_command(tmp_path):
+    workspace = _trial(tmp_path)
+    next_event = _trace_event(
+        "grading",
+        "command",
+        argv=["python3", "scripts/grade.py", "next", "--json"],
+        exit_code=0,
+    )
+    trace = _write_trace(
+        workspace,
+        "missing-middle-next",
+        [
+            next_event,
+            _trace_event(
+                "grading",
+                "command",
+                argv=["python3", "scripts/grade.py", "record", "prepare"],
+                exit_code=0,
+            ),
+            _trace_event(
+                "grading",
+                "command",
+                argv=["python3", "scripts/grade.py", "verify"],
+                exit_code=0,
+            ),
+            _trace_event("grading", "read", path="SKILL.md"),
+            next_event,
+        ],
+    )
+
+    result = audit_trace(
+        workspace,
+        (trace,),
+        required_phases=("grading",),
+    )
+
+    assert result.status == "unverified"
+
+
 def test_audit_keeps_trace_unverified_when_a_requested_phase_trace_is_missing(
     tmp_path,
 ):
@@ -920,8 +1012,30 @@ def test_audit_ignores_rewritten_workspace_marker_as_package_baseline(tmp_path):
     report = audit_workspace(workspace, runtime="manual")
 
     assert report.package["status"] == "failed"
-    assert report.package["findings"] == ("package-changed:scripts/grade.py",)
+    assert report.package["findings"] == (
+        "package-changed:scripts/grade.py",
+        "package-marker-mismatch",
+    )
     assert report.package["marker_matches"] is False
+
+
+def test_audit_rejects_an_invented_workspace_revision(tmp_path):
+    workspace = _trial(tmp_path)
+    marker_path = workspace / ".grading/conformance-trial.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    invented_revision = "0" * 40
+    marker["repository_revision"] = invented_revision
+    marker["package"]["repository_revision"] = invented_revision
+    marker_path.write_text(
+        json.dumps(marker, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.passed is False
+    assert report.package["marker_matches"] is False
+    assert report.repository_revision != invented_revision
 
 
 def test_audit_uses_explicit_different_trusted_package_root(tmp_path):
@@ -938,7 +1052,10 @@ def test_audit_uses_explicit_different_trusted_package_root(tmp_path):
 
     assert report.package["trusted_root"] == str(trusted_root)
     assert report.package["status"] == "failed"
-    assert report.package["findings"] == ("package-changed:scripts/grade.py",)
+    assert report.package["findings"] == (
+        "package-changed:scripts/grade.py",
+        "package-marker-mismatch",
+    )
 
 
 def test_run_fails_when_agent_changes_immutable_package_code(tmp_path):

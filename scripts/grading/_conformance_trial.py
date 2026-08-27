@@ -277,6 +277,7 @@ def _package_document(
     return {
         "schema": "grading-agent-package/1",
         "digest": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        "repository_revision": revision,
         "dirty": revision.endswith("+dirty"),
         "files": files,
     }
@@ -378,6 +379,9 @@ def read_trial_marker(workspace: Path) -> dict[str, object]:
         package.get("schema") != "grading-agent-package/1"
         or not isinstance(package.get("digest"), str)
         or len(package["digest"]) != 64
+        or not isinstance(package.get("repository_revision"), str)
+        or not _REVISION.fullmatch(str(package.get("repository_revision")))
+        or package.get("repository_revision") != payload.get("repository_revision")
         or not isinstance(package.get("dirty"), bool)
         or not isinstance(package.get("files"), list)
     ):
@@ -471,7 +475,12 @@ def attest_package(
     files.sort(key=lambda item: item["path"])
     canonical = json.dumps(tuple(files), sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-    if expected.get("digest") != digest or not isinstance(expected.get("dirty"), bool):
+    if (
+        expected.get("digest") != digest
+        or not isinstance(expected.get("repository_revision"), str)
+        or not _REVISION.fullmatch(str(expected.get("repository_revision")))
+        or not isinstance(expected.get("dirty"), bool)
+    ):
         raise ConformanceError("The conformance package attestation is malformed.")
 
     root_fd = os.open(workspace, _directory_flags())
@@ -502,6 +511,7 @@ def attest_package(
         "status": "failed" if findings else "passed",
         "digest": digest,
         "actual_digest": hashlib.sha256(actual_canonical.encode("utf-8")).hexdigest(),
+        "repository_revision": str(expected["repository_revision"]),
         "dirty": bool(expected["dirty"]),
         "files": tuple(files),
         "findings": tuple(sorted(findings)),
@@ -630,7 +640,7 @@ def workspace_directory_matches(
 
 
 def _report_path(relative: str, identities: tuple[str, ...]) -> str:
-    if any(value.casefold() in relative.casefold() for value in identities):
+    if _contains_identity(relative, identities):
         parent = Path(relative).parent.as_posix()
         return (
             f"{parent}/<identity-bearing-path>"
@@ -638,6 +648,18 @@ def _report_path(relative: str, identities: tuple[str, ...]) -> str:
             else "<identity-bearing-path>"
         )
     return relative
+
+
+def _contains_identity(text: str, identities: tuple[str, ...]) -> bool:
+    folded = text.casefold()
+    return any(
+        re.search(
+            rf"(?<![\w]){re.escape(identity.casefold())}(?![\w])",
+            folded,
+        )
+        is not None
+        for identity in identities
+    )
 
 
 def _artifact_entry(
@@ -736,13 +758,22 @@ def identity_values(workspace: Path) -> tuple[str, ...]:
         text = read_text_limited(
             workspace / TRIAL_ROSTER, "The synthetic roster", 1024 * 1024
         )
-        rows = csv.DictReader(text.splitlines())
+        rows = tuple(csv.DictReader(text.splitlines()))
         values = {
             value.strip()
             for row in rows
             for value in row.values()
             if isinstance(value, str) and len(value.strip()) >= 3
         }
+        for row in rows:
+            name = row.get("name")
+            if not isinstance(name, str):
+                continue
+            parts = tuple(part for part in name.split() if len(part) >= 2)
+            values.update(parts)
+            if len(parts) >= 2:
+                values.add(f"{parts[0][0]}. {parts[-1]}")
+                values.add(f"{parts[0][0]} {parts[-1]}")
     except (OSError, UnicodeError, ValueError, csv.Error) as error:
         raise ConformanceError("Cannot read the trusted synthetic roster.") from error
     if not values:
@@ -781,7 +812,6 @@ def identity_scan(
     workspace: Path, identities: tuple[str, ...] | None = None
 ) -> tuple[tuple[str, ...], tuple[dict[str, str], ...]]:
     trusted = identities if identities is not None else identity_values(workspace)
-    folded_identities = tuple(value.casefold() for value in trusted)
     leaks: set[str] = set()
     findings: dict[str, str] = {}
     root_fd = os.open(workspace, _directory_flags())
@@ -834,8 +864,7 @@ def identity_scan(
             except UnicodeError:
                 findings[relative] = "artifact-invalid-utf8"
                 continue
-            folded = text.casefold()
-            if any(value in folded for value in folded_identities):
+            if _contains_identity(text, trusted):
                 leaks.add(relative)
     finally:
         os.close(root_fd)

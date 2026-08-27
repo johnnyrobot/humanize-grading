@@ -3,6 +3,7 @@
 import json
 import os
 import tempfile
+from pathlib import Path
 
 import pytest
 
@@ -363,6 +364,50 @@ def test_invalidation_atomically_replaces_an_unchanged_manifest(tmp_path):
     assert current.exit_code == EXIT_UNREADABLE
     assert manifest.stat().st_ino != original_inode
     assert list(destination.glob("._redaction.json.*.tmp")) == []
+
+
+def test_direct_pipeline_invalidates_clean_state_before_source_traversal(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "submissions"
+    source.mkdir()
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    original_rglob = Path.rglob
+
+    def interrupt_during_traversal(path, pattern):
+        if path == source:
+            current = RedactionManifest.load(destination)
+            assert current.reviewed is False
+            assert current.exit_code == EXIT_UNREADABLE
+            raise RuntimeError("synthetic interruption during traversal")
+        return original_rglob(path, pattern)
+
+    monkeypatch.setattr(Path, "rglob", interrupt_during_traversal)
+
+    with pytest.raises(RuntimeError, match="synthetic interruption"):
+        run(
+            source=source,
+            destination=destination,
+            map_path=tmp_path / "map.json",
+            roster=[],
+            batch="essay-2",
+            reviewed=True,
+            force=True,
+        )
+
+    current = RedactionManifest.load(destination)
+    assert current.reviewed is False
+    assert current.exit_code == EXIT_UNREADABLE
 
 
 def test_invalidation_uses_bound_descriptor_after_atomic_replace_fails(

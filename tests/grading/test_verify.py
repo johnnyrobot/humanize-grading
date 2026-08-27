@@ -556,6 +556,52 @@ def test_incomplete_redaction_stops_verification_before_entry_loads(
     assert report.failure is VerificationFailure.FAILED
 
 
+@pytest.mark.parametrize(
+    "manifest_state",
+    ["missing", "malformed", "foreign-batch", "membership-invalid"],
+)
+def test_unusable_redaction_manifest_stops_before_entry_loads(
+    tmp_path, phil210, approved_brief, monkeypatch, manifest_state
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    manifest_path = redacted / "_redaction.json"
+    if manifest_state == "missing":
+        manifest_path.unlink()
+    elif manifest_state == "malformed":
+        manifest_path.write_text("{not-json", encoding="utf-8")
+    elif manifest_state == "foreign-batch":
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        payload["batch"] = "another-batch"
+        manifest_path.write_text(json.dumps(payload), encoding="utf-8")
+    else:
+        source = redacted / "STUDENT_01.md"
+        source.write_text(source.read_text(encoding="utf-8") + "\nchanged", encoding="utf-8")
+
+    def fail_entry_load(*args, **kwargs):
+        raise AssertionError("verification read draft feedback without a valid manifest")
+
+    monkeypatch.setattr("scripts.grading.batch._load_entry", fail_entry_load)
+
+    report = GradingBatch.open(
+        BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
+    ).verify(
+        VerificationInputs(
+            course="phil210",
+            rubric=phil210 / "grading_rubric.md",
+            profile=root / "profiles" / "phil210.md",
+            patterns=PATTERNS_PATH,
+            brief=root / "assignments" / "essay-2.md",
+        )
+    )
+
+    assert "malformed-redaction-manifest" in {
+        finding.code for finding in report.blocking_findings
+    }
+    assert report.checked_tokens == ()
+    assert report.persisted is False
+    assert report.failure is VerificationFailure.FAILED
+
+
 @pytest.mark.parametrize("changed", ["brief", "rubric", "profile"])
 def test_approval_snapshot_change_before_initial_digest_blocks_receipt(
     tmp_path, phil210, approved_brief, monkeypatch, changed

@@ -861,6 +861,17 @@ class GradingBatch:
             )
         status = self._status(check_receipt=False, require_manifest=True)
         blocking = list(status.blocking_findings)
+        if any(
+            finding.code == "malformed-redaction-manifest" for finding in blocking
+        ):
+            return VerificationReport(
+                status=status,
+                blocking_findings=tuple(blocking),
+                warnings=(),
+                checked_tokens=(),
+                persisted=False,
+                failure=VerificationFailure.FAILED,
+            )
         try:
             manifest = RedactionManifest.load(self.paths.redacted)
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError):

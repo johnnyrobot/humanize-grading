@@ -301,7 +301,7 @@ def test_staging_cleanup_failure_rolls_back_both_installed_destinations(
     assert [path for path in drafts.iterdir()] == [blocked_stage]
 
 
-def test_feedback_without_protocol_sections_has_one_fallback_marker(
+def test_feedback_without_protocol_sections_keeps_annotation_scaffolding(
     tmp_path, phil210
 ):
     source = tmp_path / "redacted" / "STUDENT_01.md"
@@ -327,5 +327,5 @@ def test_feedback_without_protocol_sections_has_one_fallback_marker(
     )
 
     feedback = pair.feedback.read_text(encoding="utf-8")
-    assert feedback.startswith("**Feedback**\n")
-    assert feedback.count(TEMPLATE_MARKER) == 1
+    assert feedback.startswith(f"[{TEMPLATE_MARKER}]\n\n**Feedback**\n")
+    assert feedback.count(TEMPLATE_MARKER) == 2

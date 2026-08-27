@@ -67,7 +67,10 @@ def _install_without_overwrite(staged: Path, destination: Path) -> None:
 
 def _feedback_template(rubric: Rubric) -> str:
     if not rubric.protocol.sections:
-        lines = ["**Feedback**", "", TEMPLATE_MARKER]
+        lines: list[str] = []
+        if rubric.protocol.requires_inline_annotations:
+            lines.extend((f"[{TEMPLATE_MARKER}]", ""))
+        lines.extend(("**Feedback**", "", TEMPLATE_MARKER))
         if rubric.protocol.sign_offs:
             lines.extend(("", rubric.protocol.sign_offs[0]))
         return "\n".join(lines) + "\n"

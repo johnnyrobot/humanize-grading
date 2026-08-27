@@ -201,6 +201,18 @@ def run(
     except ValueError as error:
         return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
 
+    try:
+        invalidate_existing_redaction(
+            source=source,
+            destination=destination,
+            map_path=map_path,
+            review_path=review_path,
+            batch=batch,
+            exit_code=EXIT_UNREADABLE,
+        )
+    except RedactionInvalidationError as error:
+        return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
+
     def early_failure(exit_code: int, message: str) -> BatchResult:
         try:
             invalidate_existing_redaction(

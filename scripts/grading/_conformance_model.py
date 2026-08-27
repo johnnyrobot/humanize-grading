@@ -99,6 +99,10 @@ class TraceResult:
     prohibited_paths: tuple[str, ...] = ()
     findings: tuple[str, ...] = ()
 
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "prohibited_paths", tuple(self.prohibited_paths))
+        object.__setattr__(self, "findings", tuple(self.findings))
+
 
 @dataclass(frozen=True)
 class ConformanceReport:

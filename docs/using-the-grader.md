@@ -643,7 +643,7 @@ interfaces alone are not evidence that any particular runtime or model works.
 | `grade.py density FILE [--json]` | Count watched AI terms |
 | `grade.py verify --batch B --course C --rubric R` | Check every draft; write offsets and the verification receipt |
 | `grade.py consistency --batch B [--fail-on-findings]` | Flag outliers across the batch |
-| `agent_conformance.py run --runtime N --command-json JSON` | Launch a synthetic conformance trial |
+| `agent_conformance.py run --runtime N --command-json JSON --timeout SECONDS` | Launch a synthetic conformance trial |
 | `agent_conformance.py audit --runtime N --workspace D` | Audit an existing synthetic trial workspace |
 
 ### Exit codes
