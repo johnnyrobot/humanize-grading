@@ -271,7 +271,8 @@ unreviewed. The instructor must inspect the private review file, then rerun the
 same redaction with `--reviewed --force` before verification can pass.
 Starting a new safe attempt first invalidates any regular same-batch clean
 manifest, so roster or input failures cannot leave earlier success eligible for
-grading.
+grading. If that invalidation cannot be completed, redaction stops with an
+unsafe-path failure before it loads the roster or processes submissions.
 
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
 calibration, a graded batch end to end, the core command and exit-code

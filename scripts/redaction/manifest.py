@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +26,11 @@ from .private_files import write_private_text
 SCHEMA = "redaction-batch/2"
 LEGACY_SCHEMA = "redaction-batch/1"
 NAME = "_redaction.json"
+MAX_MANIFEST_BYTES = 1_048_576
+
+
+class RedactionInvalidationError(RuntimeError):
+    """Eligible prior redaction state could not be made ineligible."""
 
 
 @dataclass(frozen=True)
@@ -73,8 +80,11 @@ class RedactionManifest:
         if not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool):
             raise ValueError("The redaction manifest needs an integer exit code.")
         path = directory / NAME
-        write_private_text(
-            path,
+        write_private_text(path, self._text())
+        return path
+
+    def _text(self) -> str:
+        return (
             json.dumps(
                 {
                     "schema": SCHEMA,
@@ -90,9 +100,24 @@ class RedactionManifest:
                 indent=2,
                 sort_keys=True,
             )
-            + "\n",
+            + "\n"
         )
-        return path
+
+    @classmethod
+    def _read_descriptor(cls, descriptor: int) -> "RedactionManifest":
+        state = os.fstat(descriptor)
+        if state.st_size > MAX_MANIFEST_BYTES:
+            raise ValueError("The redaction manifest is too large.")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        data = bytearray()
+        while True:
+            chunk = os.read(descriptor, min(64 * 1024, MAX_MANIFEST_BYTES + 1))
+            if not chunk:
+                break
+            data.extend(chunk)
+            if len(data) > MAX_MANIFEST_BYTES:
+                raise ValueError("The redaction manifest is too large.")
+        return cls._from_payload(json.loads(bytes(data).decode("utf-8")))
 
     @classmethod
     def invalidate_existing(
@@ -108,27 +133,151 @@ class RedactionManifest:
         path = directory / NAME
         if has_symlink_component(directory) or has_symlink_component(path):
             return False
+        descriptor = -1
+        eligible = False
         try:
-            if not directory.is_dir() or not path.is_file():
+            if not directory.is_dir():
                 return False
-            current = cls.load(directory)
+            path_state = path.lstat()
+            if not stat.S_ISREG(path_state.st_mode):
+                return False
+            if path_state.st_nlink != 1:
+                raise RedactionInvalidationError(
+                    "The redaction manifest must be one regular file with a single link."
+                )
+            eligible = True
+            flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags)
+            opened_state = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened_state.st_mode)
+                or opened_state.st_nlink != 1
+                or (
+                    opened_state.st_dev,
+                    opened_state.st_ino,
+                    opened_state.st_nlink,
+                )
+                != (path_state.st_dev, path_state.st_ino, path_state.st_nlink)
+            ):
+                raise RedactionInvalidationError(
+                    "The redaction manifest changed during invalidation."
+                )
+            current = cls._read_descriptor(descriptor)
             if current.batch != batch:
                 return False
-            cls(
+            invalidated = cls(
                 batch=current.batch,
                 run_id=current.run_id,
                 reviewed=False,
                 exit_code=exit_code,
                 outputs=current.outputs,
-            ).save(directory)
-        except (OSError, UnicodeError, ValueError):
-            return False
-        return True
+            )
+            text = invalidated._text()
+            try:
+                write_private_text(path, text)
+                return True
+            except (OSError, ValueError) as atomic_error:
+                cls._invalidate_in_place(
+                    path,
+                    descriptor,
+                    opened_state,
+                    text.encode("utf-8"),
+                    atomic_error,
+                )
+                return True
+        except FileNotFoundError as error:
+            if not eligible:
+                return False
+            raise RedactionInvalidationError(
+                "The redaction manifest changed during invalidation."
+            ) from error
+        except RedactionInvalidationError:
+            raise
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+            if not eligible:
+                return False
+            raise RedactionInvalidationError(
+                f"Could not invalidate prior redaction state: {error}"
+            ) from error
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
+
+    @staticmethod
+    def _invalidate_in_place(
+        path: Path,
+        descriptor: int,
+        opened_state,
+        data: bytes,
+        atomic_error: Exception,
+    ) -> None:
+        try:
+            current_state = path.lstat()
+            descriptor_state = os.fstat(descriptor)
+            expected = (
+                opened_state.st_dev,
+                opened_state.st_ino,
+                opened_state.st_nlink,
+            )
+            if (
+                not stat.S_ISREG(current_state.st_mode)
+                or not stat.S_ISREG(descriptor_state.st_mode)
+                or current_state.st_nlink != 1
+                or descriptor_state.st_nlink != 1
+                or (
+                    current_state.st_dev,
+                    current_state.st_ino,
+                    current_state.st_nlink,
+                )
+                != expected
+                or (
+                    descriptor_state.st_dev,
+                    descriptor_state.st_ino,
+                    descriptor_state.st_nlink,
+                )
+                != expected
+            ):
+                raise RedactionInvalidationError(
+                    "The redaction manifest changed during invalidation."
+                )
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            os.ftruncate(descriptor, 0)
+            offset = 0
+            while offset < len(data):
+                written = os.write(descriptor, data[offset:])
+                if written <= 0:
+                    raise OSError("The in-place manifest write made no progress.")
+                offset += written
+            os.ftruncate(descriptor, len(data))
+            os.fsync(descriptor)
+            os.fchmod(descriptor, 0o600)
+            final_state = path.lstat()
+            if (
+                final_state.st_dev,
+                final_state.st_ino,
+                final_state.st_nlink,
+            ) != expected:
+                raise RedactionInvalidationError(
+                    "The redaction manifest changed during invalidation."
+                )
+        except RedactionInvalidationError:
+            raise
+        except OSError as inplace_error:
+            raise RedactionInvalidationError(
+                "Could not invalidate prior redaction state: atomic replacement "
+                f"failed ({atomic_error}); in-place write failed ({inplace_error})."
+            ) from inplace_error
 
     @classmethod
     def load(cls, directory: Path) -> "RedactionManifest":
         path = directory / NAME
-        payload = json.loads(read_text_limited(path, "The redaction manifest", 1_048_576))
+        payload = json.loads(
+            read_text_limited(path, "The redaction manifest", MAX_MANIFEST_BYTES)
+        )
+        return cls._from_payload(payload)
+
+    @classmethod
+    def _from_payload(cls, payload: object) -> "RedactionManifest":
         if not isinstance(payload, dict):
             raise ValueError("The redaction manifest has an unknown schema.")
         schema = payload.get("schema")

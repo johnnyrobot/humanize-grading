@@ -205,6 +205,14 @@ output digests, writes `reviewed: false`, and records the nonzero attempt code.
 It does not follow links or write when roots overlap. First-ever failures with
 no manifest remain retryable and cannot advance to drafting.
 
+Open an eligible manifest with `O_NOFOLLOW` where available and bind it by
+regular-file type, device, inode and single-link count. Try atomic owner-only
+replacement first. If the directory cannot create or rename the temporary file,
+rewrite the complete reviewed-false nonzero payload through the bound descriptor,
+truncate and sync it, and set mode 0600. A partial write is malformed and blocks
+grading. If neither write completes, raise a dedicated plain invalidation error;
+the CLI and pipeline return exit 6 before roster or input processing.
+
 Whole-batch verification adds `redaction-incomplete` before loading draft
 content when the manifest does not record exit 0. A clean unreviewed result adds
 `redaction-review-required`. The token map and private review file remain

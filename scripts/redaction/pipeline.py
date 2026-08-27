@@ -40,7 +40,7 @@ from .candidates import Candidate, find_candidates
 from .documents import extract, output_name
 from .patterns import redact_structured
 from .private_files import write_private_text
-from .manifest import RedactionManifest
+from .manifest import RedactionInvalidationError, RedactionManifest
 from .roster import BareHit, RosterEntry, full_name_variants, redact_roster
 from .selfid import SelfIdWarning, find_self_identifying
 from .tokens import TokenMap
@@ -87,8 +87,10 @@ def invalidate_existing_redaction(
                 for follow in (False, True)
             ):
                 return False
-    except OSError:
-        return False
+    except OSError as error:
+        raise RedactionInvalidationError(
+            f"Could not validate prior redaction state for invalidation: {error}"
+        ) from error
     return RedactionManifest.invalidate_existing(
         destination, batch=batch, exit_code=exit_code
     )
@@ -200,14 +202,17 @@ def run(
         return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
 
     def early_failure(exit_code: int, message: str) -> BatchResult:
-        invalidate_existing_redaction(
-            source=source,
-            destination=destination,
-            map_path=map_path,
-            review_path=review_path,
-            batch=batch,
-            exit_code=exit_code,
-        )
+        try:
+            invalidate_existing_redaction(
+                source=source,
+                destination=destination,
+                map_path=map_path,
+                review_path=review_path,
+                batch=batch,
+                exit_code=exit_code,
+            )
+        except RedactionInvalidationError as error:
+            return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
         return BatchResult(exit_code=exit_code, message=message)
 
     if has_symlink_component(source) or has_symlink_component(destination):

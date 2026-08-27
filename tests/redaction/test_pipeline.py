@@ -1,9 +1,13 @@
 """The pipeline must produce redacted output and fail closed."""
 
 import json
+import os
 
 import pytest
 
+import scripts.redact as redact_cli
+import scripts.redaction.manifest as manifest_module
+import redaction.manifest as cli_manifest_module
 from scripts.redaction.pipeline import (
     EXIT_CANDIDATES,
     EXIT_COLLISION,
@@ -126,6 +130,207 @@ def test_invalidation_never_follows_a_symbolic_link(tmp_path, linked):
 
     assert changed is False
     assert external_manifest.read_bytes() == before
+
+
+def test_invalidation_refuses_a_hard_linked_regular_manifest(tmp_path):
+    real = tmp_path / "real-redacted"
+    real.mkdir()
+    output = real / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(real)
+    external_manifest = real / "_redaction.json"
+    before = external_manifest.read_bytes()
+    destination = tmp_path / "hard-linked-redacted"
+    destination.mkdir()
+    os.link(external_manifest, destination / "_redaction.json")
+
+    with pytest.raises(RuntimeError, match="single link"):
+        RedactionManifest.invalidate_existing(
+            destination,
+            batch="essay-2",
+            exit_code=EXIT_UNREADABLE,
+        )
+
+    assert external_manifest.read_bytes() == before
+
+
+def test_read_only_destination_uses_descriptor_bound_invalidation(tmp_path):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    destination.chmod(0o555)
+    try:
+        changed = RedactionManifest.invalidate_existing(
+            destination,
+            batch="essay-2",
+            exit_code=EXIT_UNREADABLE,
+        )
+        current = RedactionManifest.load(destination)
+    finally:
+        destination.chmod(0o755)
+
+    assert changed is True
+    assert current.reviewed is False
+    assert current.exit_code == EXIT_UNREADABLE
+    assert (destination / "_redaction.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_invalidation_refuses_a_manifest_replaced_after_open(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    manifest = destination / "_redaction.json"
+    replacement_bytes = b"replacement must stay untouched"
+
+    def replace_then_fail(path, text):
+        replacement = destination / "replacement"
+        replacement.write_bytes(replacement_bytes)
+        os.replace(replacement, path)
+        raise OSError("synthetic atomic replacement failure")
+
+    monkeypatch.setattr(manifest_module, "write_private_text", replace_then_fail)
+
+    with pytest.raises(RuntimeError, match="manifest changed during invalidation"):
+        RedactionManifest.invalidate_existing(
+            destination,
+            batch="essay-2",
+            exit_code=EXIT_UNREADABLE,
+        )
+
+    assert manifest.read_bytes() == replacement_bytes
+
+
+def test_cli_stops_before_roster_when_both_invalidation_writes_fail(
+    tmp_path, monkeypatch, capsys
+):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+
+    def fail_atomic(path, text):
+        raise OSError("synthetic atomic failure")
+
+    def fail_in_place(descriptor, data):
+        raise OSError("synthetic in-place failure")
+
+    def fail_roster(path):
+        raise AssertionError("roster loading must not run")
+
+    monkeypatch.setattr(cli_manifest_module, "write_private_text", fail_atomic)
+    monkeypatch.setattr(os, "write", fail_in_place)
+    monkeypatch.setattr(redact_cli, "load_roster", fail_roster)
+
+    result = redact_cli.main(
+        [
+            str(tmp_path / "submissions"),
+            "--roster",
+            str(tmp_path / "roster.csv"),
+            "--batch",
+            "essay-2",
+            "--out",
+            str(destination),
+            "--map",
+            str(tmp_path / "map.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert result == EXIT_UNSAFE_PATH
+    assert "Could not invalidate prior redaction state" in captured.err
+    assert "Traceback" not in captured.err
+    with pytest.raises((ValueError, json.JSONDecodeError)):
+        RedactionManifest.load(destination)
+
+
+def test_pipeline_returns_unsafe_when_both_invalidation_writes_fail(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    source = tmp_path / "too-many"
+    source.mkdir()
+    for index in range(501):
+        (source / f"paper-{index:03d}.md").write_text("safe", encoding="utf-8")
+
+    monkeypatch.setattr(
+        manifest_module,
+        "write_private_text",
+        lambda path, text: (_ for _ in ()).throw(OSError("synthetic atomic failure")),
+    )
+    monkeypatch.setattr(
+        os,
+        "write",
+        lambda descriptor, data: (_ for _ in ()).throw(
+            OSError("synthetic in-place failure")
+        ),
+    )
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        roster=[],
+        batch="essay-2",
+        force=True,
+    )
+
+    assert result.exit_code == EXIT_UNSAFE_PATH
+    assert "Could not invalidate prior redaction state" in result.message
+
+
+def test_invalidation_without_an_existing_manifest_is_a_noop(tmp_path):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+
+    assert (
+        RedactionManifest.invalidate_existing(
+            destination,
+            batch="essay-2",
+            exit_code=EXIT_UNREADABLE,
+        )
+        is False
+    )
 
 
 @pytest.mark.parametrize("reviewed", [False, True])

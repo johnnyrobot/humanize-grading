@@ -28,6 +28,15 @@ recording an incomplete result. Roster-load, input-limit, or unsafe-source
 failure therefore cannot leave an earlier clean attempt eligible for grading.
 Linked manifests, linked destinations and overlapping roots are never rewritten.
 
+Invalidation uses atomic private replacement first. If directory permissions
+prevent creating or renaming a temporary file, it verifies the already-opened
+manifest's device, inode, regular-file type and single-link count, then writes
+the full reviewed-false payload through that descriptor and syncs it at mode
+0600. A partial write is malformed and blocks grading. If both methods fail,
+redaction reports a dedicated unsafe failure and stops before roster or input
+processing. `False` is safe to ignore only when no eligible same-batch regular
+manifest exists.
+
 ## What it misses
 
 Five limits matter. Each one is real, and each one will surprise you if you
