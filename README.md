@@ -14,6 +14,34 @@ meant to be operated by an AI agent working with an instructor. It is not a
 hosted grading service, a standalone desktop app, or an autonomous grade
 publisher.
 
+## Current compatibility and release scope
+
+This repository has been smoke-tested with Claude Code CLI 2.1.243 using Ollama
+and the local Gemma 4 12B model (`gemma4:12b-mlx`). The test ran real,
+read-only repository commands and passed with a 64K context configuration. Use
+the documented Ollama launcher, keep the model context at 64K or higher, and
+keep ordinary instructor approvals and permission prompts enabled for grading.
+
+If Claude Code reports `unrecognized_model` for the raw Ollama tag, give the
+local model a current Claude-compatible alias using Ollama's documented
+Anthropic-compatible setup, then launch Claude Code with that alias. The alias
+is only a routing label; the weights remain local Gemma 4 12B weights.
+
+This is compatibility evidence for the Claude Code + Ollama + Gemma 4 12B
+path. It is not a claim that every agent harness works, that the full grading
+lifecycle has passed in every harness, or that the package is an unattended
+public grading service.
+
+For the current scoped release, Codex CLI, LM Studio Bionic, and Unsloth Studio
+are deferred compatibility targets. They are not release gates and are not
+claimed as supported runtimes. Their deferred status does not block the
+deterministic package checks or the verified Claude Code local path.
+
+The package is suitable for a scoped, instructor-supervised public alpha after
+the repository's deterministic release checks pass. It is not a public beta,
+an unattended grading service, or a claim of compatibility with every agent
+harness.
+
 The agent follows the Grader skill, runs the repository's safety scripts,
 grades only redacted submissions, and produces verified draft feedback. The
 instructor controls the privacy decision, reviews identity-bearing information
@@ -499,7 +527,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
-- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, and invalidates prior clean state before a safe new attempt. Assignment briefing separates course display names from CLI keys and accepts only command-created, checked drafts. Verification stops before draft reads when manifest validation fails. The synthetic conformance harness binds trusted package revisions, checks clean redaction outcomes, catches partial synthetic identities, and requires `next` between actions. Agent guidance now distinguishes the grading state root from the repository root and safely resumes when sandboxed tools reset their working directory or deduplicate commands. A trial without a read trace remains unverified.
+- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, and invalidates prior clean state before a safe new attempt. Assignment briefing separates course display names from CLI keys and accepts only command-created, checked drafts. Verification stops before draft reads when manifest validation fails. The synthetic conformance harness binds trusted package revisions, checks clean redaction outcomes, catches partial synthetic identities, and requires `next` between actions. Agent guidance now distinguishes the grading state root from the repository root and safely resumes when sandboxed tools reset their working directory or deduplicate commands. Claude Code CLI + Ollama + local Gemma 4 12B now has a documented, verified read-only smoke path at 64K context. Codex CLI, LM Studio Bionic, and Unsloth Studio remain deferred and non-blocking for the scoped instructor-supervised alpha; no unattended public-service claim is made. A trial without a read trace remains unverified.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.

@@ -10,6 +10,13 @@ Every invocation below is illustrative until Task 6 records live evidence for
 an exact runtime and model combination. The harness itself is not conformance
 evidence.
 
+## Current release scope
+
+The current supported local path is the instructor-supervised Claude Code CLI
+plus Ollama plus local Gemma 4 12B smoke path documented in the README. Codex
+CLI, LM Studio Bionic, and Unsloth Studio are deferred compatibility targets;
+they are not release gates and must not be described as supported runtimes.
+
 The synthetic grading publication path is `final/agent-e2e`. Phase prompts,
 next-action argv and artifact audits use that same batch directory.
 
