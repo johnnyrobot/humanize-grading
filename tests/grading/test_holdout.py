@@ -31,6 +31,13 @@ def _record(total: int, letter: str) -> GradeRecord:
     )
 
 
+def _copy_graded_samples(phil210, destination):
+    destination.mkdir()
+    for source in (phil210 / "graded").iterdir():
+        (destination / source.name).write_bytes(source.read_bytes())
+    return destination
+
+
 def test_it_reports_the_score_gap(phil210):
     sample = load_sample(phil210 / PAPER_5)
     delta = compare(_record(86, "B"), "Solid work.", sample)
@@ -168,6 +175,158 @@ def test_calibrate_inputs_refuses_fewer_than_three_samples(phil210, tmp_path):
     )
     assert result.returncode == 13
     assert "three" in result.stderr.lower()
+
+
+def test_calibrate_inputs_refuses_an_incomplete_roster_without_writing_or_naming(
+    phil210, tmp_path
+):
+    roster = tmp_path / "incomplete.csv"
+    roster.write_text(
+        "name,student_id,email\nUnrelated Person,S9999999,other@example.edu\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "inputs.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/calibrate.py",
+            "inputs",
+            "--rubric",
+            str(phil210 / "grading_rubric.md"),
+            "--samples",
+            str(phil210 / "graded"),
+            "--roster",
+            str(roster),
+            "--holdout",
+            "paper_5_graded_subscription_software_paradox.md",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 13
+    assert not out.exists()
+    assert "exactly one roster entry" in result.stderr
+    for private_name in ("Maya", "Samantha", "Marcus", "David"):
+        assert private_name not in result.stderr
+
+
+def test_calibrate_inputs_validates_the_holdout_identity_before_writing(
+    phil210, tmp_path
+):
+    samples = _copy_graded_samples(phil210, tmp_path / "graded")
+    holdout = samples / "paper_5_graded_subscription_software_paradox.md"
+    holdout.write_text(
+        holdout.read_text(encoding="utf-8").replace(
+            "**Student**: David Morales  \n", "**Student** David Morales  \n"
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "inputs.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/calibrate.py",
+            "inputs",
+            "--rubric",
+            str(phil210 / "grading_rubric.md"),
+            "--samples",
+            str(samples),
+            "--roster",
+            str(phil210 / "roster.csv"),
+            "--holdout",
+            holdout.name,
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 13
+    assert not out.exists()
+    assert "Student header" in result.stderr
+    assert "David" not in result.stderr
+    assert "Morales" not in result.stderr
+
+
+def test_calibrate_inputs_refuses_ambiguous_normalized_roster_names(
+    phil210, tmp_path
+):
+    roster = tmp_path / "ambiguous.csv"
+    roster.write_text(
+        (phil210 / "roster.csv").read_text(encoding="utf-8")
+        + "  mAyA   LiN  ,S9999999,duplicate@example.edu\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "inputs.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/calibrate.py",
+            "inputs",
+            "--rubric",
+            str(phil210 / "grading_rubric.md"),
+            "--samples",
+            str(phil210 / "graded"),
+            "--roster",
+            str(roster),
+            "--holdout",
+            "paper_5_graded_subscription_software_paradox.md",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 13
+    assert not out.exists()
+    assert "exactly one roster entry" in result.stderr
+    assert "Maya" not in result.stderr
+    assert "Lin" not in result.stderr
+
+
+def test_calibrate_inputs_matches_student_headers_with_case_and_space_changes(
+    phil210, tmp_path
+):
+    samples = _copy_graded_samples(phil210, tmp_path / "graded")
+    sample = samples / "paper_1_graded_algorithmic_gatekeeping.md"
+    sample.write_text(
+        sample.read_text(encoding="utf-8").replace(
+            "**Student**: Maya Lin  \n", "**Student**:   mAyA   LiN  \n"
+        ),
+        encoding="utf-8",
+    )
+    out = tmp_path / "inputs.json"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/calibrate.py",
+            "inputs",
+            "--rubric",
+            str(phil210 / "grading_rubric.md"),
+            "--samples",
+            str(samples),
+            "--roster",
+            str(phil210 / "roster.csv"),
+            "--holdout",
+            "paper_5_graded_subscription_software_paradox.md",
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Maya" not in out.read_text(encoding="utf-8")
 
 
 def test_a_name_bearing_filename_never_reaches_the_packet(phil210, tmp_path):

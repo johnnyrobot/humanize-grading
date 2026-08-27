@@ -14,17 +14,16 @@ try:
     from scripts.path_safety import (
         has_symlink_component,
         read_bytes_limited,
-        read_text_limited,
     )
 except ModuleNotFoundError:  # direct scripts/redact.py execution
     from path_safety import (
         has_symlink_component,
         read_bytes_limited,
-        read_text_limited,
     )
 from .private_files import write_private_text
 
-SCHEMA = "redaction-batch/2"
+SCHEMA = "redaction-batch/3"
+SCHEMA_TWO = "redaction-batch/2"
 LEGACY_SCHEMA = "redaction-batch/1"
 NAME = "_redaction.json"
 MAX_MANIFEST_BYTES = 1_048_576
@@ -32,6 +31,18 @@ MAX_MANIFEST_BYTES = 1_048_576
 
 class RedactionInvalidationError(RuntimeError):
     """Eligible prior redaction state could not be made ineligible."""
+
+
+def _require_digest(value: object, label: str) -> str:
+    """Return one canonical SHA-256 digest or raise a plain validation error."""
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"The redaction manifest needs a lowercase {label} SHA-256.")
+    return value
 
 
 def _manifest_identity(state: os.stat_result) -> tuple[int, int, int, int]:
@@ -111,7 +122,10 @@ class RedactionManifest:
     run_id: str
     reviewed: bool
     exit_code: int | None
+    map_sha256: str
+    review_sha256: str
     outputs: tuple[tuple[str, str], ...] = ()
+    schema: str = SCHEMA
 
     @classmethod
     def create(
@@ -122,11 +136,15 @@ class RedactionManifest:
         *,
         reviewed: bool,
         exit_code: int,
+        map_sha256: str,
+        review_sha256: str,
     ) -> "RedactionManifest":
         if not isinstance(reviewed, bool):
             raise ValueError("The redaction manifest needs a reviewed decision.")
         if not isinstance(exit_code, int) or isinstance(exit_code, bool):
             raise ValueError("The redaction manifest needs an integer exit code.")
+        map_sha256 = _require_digest(map_sha256, "token-map")
+        review_sha256 = _require_digest(review_sha256, "review")
         bound = tuple(
             sorted(
                 (
@@ -145,12 +163,18 @@ class RedactionManifest:
             run_id=run_id,
             reviewed=reviewed,
             exit_code=exit_code,
+            map_sha256=map_sha256,
+            review_sha256=review_sha256,
             outputs=bound,
         )
 
     def save(self, directory: Path) -> Path:
+        if self.schema != SCHEMA:
+            raise ValueError("Only the current redaction manifest schema can be saved.")
         if not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool):
             raise ValueError("The redaction manifest needs an integer exit code.")
+        _require_digest(self.map_sha256, "token-map")
+        _require_digest(self.review_sha256, "review")
         path = directory / NAME
         write_private_text(path, self._text())
         return path
@@ -164,6 +188,8 @@ class RedactionManifest:
                     "run_id": self.run_id,
                     "reviewed": self.reviewed,
                     "exit_code": self.exit_code,
+                    "map_sha256": self.map_sha256,
+                    "review_sha256": self.review_sha256,
                     "outputs": [
                         {"path": path, "sha256": digest}
                         for path, digest in self.outputs
@@ -189,7 +215,7 @@ class RedactionManifest:
             data.extend(chunk)
             if len(data) > MAX_MANIFEST_BYTES:
                 raise ValueError("The redaction manifest is too large.")
-        return cls._from_payload(json.loads(bytes(data).decode("utf-8")))
+        return cls.from_bytes(bytes(data))
 
     @classmethod
     def invalidate_existing(
@@ -235,13 +261,15 @@ class RedactionManifest:
                     "The redaction manifest changed during invalidation."
                 )
             current = cls._read_descriptor(descriptor)
-            if current.batch != batch:
+            if current.schema != SCHEMA:
                 return False
             invalidated = cls(
                 batch=current.batch,
                 run_id=current.run_id,
                 reviewed=False,
                 exit_code=exit_code,
+                map_sha256=current.map_sha256,
+                review_sha256=current.review_sha256,
                 outputs=current.outputs,
             )
             text = invalidated._text()
@@ -344,10 +372,16 @@ class RedactionManifest:
     @classmethod
     def load(cls, directory: Path) -> "RedactionManifest":
         path = directory / NAME
-        payload = json.loads(
-            read_text_limited(path, "The redaction manifest", MAX_MANIFEST_BYTES)
+        return cls.from_bytes(
+            read_bytes_limited(path, "The redaction manifest", MAX_MANIFEST_BYTES)
         )
-        return cls._from_payload(payload)
+
+    @classmethod
+    def from_bytes(cls, data: bytes) -> "RedactionManifest":
+        """Parse one exact saved-manifest byte snapshot."""
+        if len(data) > MAX_MANIFEST_BYTES:
+            raise ValueError("The redaction manifest is too large.")
+        return cls._from_payload(json.loads(data.decode("utf-8")))
 
     @classmethod
     def _from_payload(cls, payload: object) -> "RedactionManifest":
@@ -361,9 +395,20 @@ class RedactionManifest:
             exit_code = payload.get("exit_code")
             if not isinstance(exit_code, int) or isinstance(exit_code, bool):
                 raise ValueError("The redaction manifest needs an integer exit code.")
+            map_sha256 = _require_digest(payload.get("map_sha256"), "token-map")
+            review_sha256 = _require_digest(payload.get("review_sha256"), "review")
+        elif schema == SCHEMA_TWO:
+            reviewed = False
+            exit_code = payload.get("exit_code")
+            if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                raise ValueError("The redaction manifest needs an integer exit code.")
+            map_sha256 = ""
+            review_sha256 = ""
         elif schema == LEGACY_SCHEMA:
             reviewed = False
             exit_code = None
+            map_sha256 = ""
+            review_sha256 = ""
         else:
             raise ValueError("The redaction manifest has an unknown schema.")
         batch = payload.get("batch")
@@ -400,16 +445,15 @@ class RedactionManifest:
             run_id=run_id,
             reviewed=reviewed,
             exit_code=exit_code,
+            map_sha256=map_sha256,
+            review_sha256=review_sha256,
             outputs=tuple(sorted(outputs)),
+            schema=schema,
         )
 
     def validate(self, directory: Path) -> None:
         """Require the exact token-named file set and bytes from redaction."""
-        actual = {
-            path.name
-            for path in directory.iterdir()
-            if path.is_file() and not path.name.startswith("_")
-        }
+        actual = {path.name for path in directory.iterdir() if path.name != NAME}
         expected = {name for name, _ in self.outputs}
         if actual != expected:
             raise ValueError("The redaction manifest output membership changed.")

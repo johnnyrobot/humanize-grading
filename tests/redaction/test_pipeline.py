@@ -22,6 +22,15 @@ from scripts.redaction.manifest import RedactionManifest
 from scripts.redaction.roster import RosterEntry
 from scripts.redaction.tokens import TokenMap
 
+TEST_MAP_SHA256 = "62d325824da560ffec8bc44d147e265e4ae1b77656cfde632b72c7a633f711e7"
+TEST_REVIEW_SHA256 = "31f937c105ebe8e03a0dcd1396a5b3cd3675fdc257cdd5bc5fd8598ab130de7b"
+
+
+def _create_manifest(*args, **kwargs):
+    kwargs.setdefault("map_sha256", TEST_MAP_SHA256)
+    kwargs.setdefault("review_sha256", TEST_REVIEW_SHA256)
+    return RedactionManifest.create(*args, **kwargs)
+
 
 def _write(directory, name, body):
     directory.mkdir(parents=True, exist_ok=True)
@@ -31,7 +40,7 @@ def _write(directory, name, body):
 def _write_schema_one_manifest(directory):
     output = directory / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2", "run-identifier-1234", [output], reviewed=True, exit_code=0
     ).save(directory)
     path = directory / "_redaction.json"
@@ -47,7 +56,7 @@ def test_manifest_round_trip_persists_reviewed_state_and_exit_code(tmp_path):
     redacted = tmp_path / "redacted"
     redacted.mkdir()
     (redacted / "STUDENT_01.md").write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2", "run-identifier-1234", [redacted / "STUDENT_01.md"],
         reviewed=True,
         exit_code=2,
@@ -59,7 +68,7 @@ def test_manifest_round_trip_persists_reviewed_state_and_exit_code(tmp_path):
     assert loaded.exit_code == 2
     assert (
         json.loads((redacted / "_redaction.json").read_text(encoding="utf-8"))["schema"]
-        == "redaction-batch/2"
+        == "redaction-batch/3"
     )
 
 
@@ -80,7 +89,7 @@ def test_schema_two_manifest_requires_an_integer_exit_code(tmp_path, exit_code):
     output.write_text("safe", encoding="utf-8")
 
     with pytest.raises(ValueError, match="integer exit code"):
-        RedactionManifest.create(
+        _create_manifest(
             "essay-2",
             "run-identifier-1234",
             [output],
@@ -94,7 +103,7 @@ def test_schema_two_save_refuses_a_legacy_manifest_without_an_exit_code(tmp_path
     redacted.mkdir()
     legacy = RedactionManifest.load(_write_schema_one_manifest(redacted))
 
-    with pytest.raises(ValueError, match="integer exit code"):
+    with pytest.raises(ValueError, match="current redaction manifest schema"):
         legacy.save(redacted)
 
 
@@ -104,7 +113,7 @@ def test_invalidation_never_follows_a_symbolic_link(tmp_path, linked):
     real.mkdir()
     output = real / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -137,7 +146,7 @@ def test_invalidation_refuses_a_hard_linked_regular_manifest(tmp_path):
     real.mkdir()
     output = real / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -165,7 +174,7 @@ def test_read_only_destination_uses_descriptor_bound_invalidation(tmp_path):
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -196,7 +205,7 @@ def test_invalidation_refuses_a_manifest_replaced_after_open(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -232,7 +241,7 @@ def test_cli_stops_when_manifest_is_replaced_before_atomic_write(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -291,7 +300,7 @@ def test_pipeline_stops_when_manifest_gains_a_hard_link_before_atomic_write(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -342,7 +351,7 @@ def test_invalidation_atomically_replaces_an_unchanged_manifest(tmp_path):
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -375,7 +384,7 @@ def test_direct_pipeline_invalidates_clean_state_before_source_traversal(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -401,7 +410,6 @@ def test_direct_pipeline_invalidates_clean_state_before_source_traversal(
             map_path=tmp_path / "map.json",
             roster=[],
             batch="essay-2",
-            reviewed=True,
             force=True,
         )
 
@@ -417,7 +425,7 @@ def test_invalidation_uses_bound_descriptor_after_atomic_replace_fails(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -453,7 +461,7 @@ def test_cli_stops_before_roster_when_both_invalidation_writes_fail(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -503,7 +511,7 @@ def test_pipeline_returns_unsafe_when_both_invalidation_writes_fail(
     destination.mkdir()
     output = destination / "STUDENT_01.md"
     output.write_text("safe", encoding="utf-8")
-    RedactionManifest.create(
+    _create_manifest(
         "essay-2",
         "run-identifier-1234",
         [output],
@@ -557,8 +565,7 @@ def test_invalidation_without_an_existing_manifest_is_a_noop(tmp_path):
     )
 
 
-@pytest.mark.parametrize("reviewed", [False, True])
-def test_pipeline_persists_the_instructor_review_decision(tmp_path, reviewed):
+def test_pipeline_stays_unreviewed_until_exact_approval(tmp_path):
     source = tmp_path / "in"
     _write(source, "paper.md", "Maya Lin argues that platforms curate.")
 
@@ -568,10 +575,9 @@ def test_pipeline_persists_the_instructor_review_decision(tmp_path, reviewed):
         map_path=tmp_path / "map.json",
         roster=[RosterEntry("Maya Lin")],
         batch="essay-1",
-        reviewed=reviewed,
     )
 
-    assert RedactionManifest.load(tmp_path / "out").reviewed is reviewed
+    assert RedactionManifest.load(tmp_path / "out").reviewed is False
 
 
 def test_a_clean_batch_exits_zero(tmp_path):
@@ -642,7 +648,7 @@ def test_a_missing_roster_student_fails_closed(tmp_path):
     assert [e.name for e in result.unmatched_roster] == ["Tyler Brooks"]
 
 
-def test_reviewed_roster_failure_persists_the_final_exit_code(tmp_path):
+def test_roster_failure_cannot_be_approved(tmp_path):
     source = tmp_path / "in"
     _write(source, "paper.md", "Maya Lin argues that platforms curate.")
 
@@ -652,13 +658,23 @@ def test_reviewed_roster_failure_persists_the_final_exit_code(tmp_path):
         map_path=tmp_path / "map.json",
         roster=[RosterEntry("Maya Lin"), RosterEntry("Tyler Brooks")],
         batch="essay-1",
-        reviewed=True,
     )
 
     manifest = RedactionManifest.load(tmp_path / "out")
     assert result.exit_code == EXIT_ROSTER
-    assert manifest.reviewed is True
+    assert manifest.reviewed is False
     assert manifest.exit_code == EXIT_ROSTER
+
+    approval = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        roster=[RosterEntry("Maya Lin"), RosterEntry("Tyler Brooks")],
+        batch="essay-1",
+        reviewed=True,
+    )
+    assert approval.exit_code == EXIT_CANDIDATES
+    assert RedactionManifest.load(tmp_path / "out").reviewed is False
 
 
 def test_unreviewed_candidates_fail_closed(tmp_path):
@@ -1018,3 +1034,569 @@ def test_skipped_empty_is_reported(tmp_path):
         (tmp_path / "reviews" / "essay-1.json").read_text(encoding="utf-8")
     )
     assert review["skipped_empty"] == ["blank.md"]
+
+
+def test_non_roster_docx_metadata_stays_out_of_model_visible_output(tmp_path):
+    docx = pytest.importorskip("docx")
+    source = tmp_path / "in"
+    source.mkdir()
+    document = docx.Document()
+    document.add_paragraph("Platforms curate public attention.")
+    document.core_properties.author = "Jane Smith"
+    document.save(str(source / "paper.docx"))
+    review_path = tmp_path / "review.json"
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        review_path=review_path,
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_OK
+    [output] = [p for p in (tmp_path / "out").iterdir() if not p.name.startswith("_")]
+    assert "Jane Smith" not in output.read_text(encoding="utf-8")
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review["document_metadata"] == [
+        {"file": "UNKNOWN_01.docx", "value": "Jane Smith"}
+    ]
+
+
+def test_protected_and_citation_suppressed_names_reach_private_review(tmp_path):
+    source = tmp_path / "in"
+    _write(
+        source,
+        "paper.md",
+        "Dr. Marcus Vance graded it. Gillespie (2014) frames algorithms. "
+        "I find Gillespie's framing useful.",
+    )
+    review_path = tmp_path / "review.json"
+
+    run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        review_path=review_path,
+        roster=[],
+        batch="essay-1",
+        protected=("Marcus Vance",),
+    )
+
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert {(item["name"], item["reason"]) for item in review["excluded_names"]} == {
+        ("Marcus Vance", "protected"),
+        ("Gillespie", "citation"),
+    }
+
+
+def test_redacted_outputs_are_owner_only_even_when_review_is_required(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "My brother Daniel drove me to the hearing.")
+    old_umask = os.umask(0o022)
+    try:
+        result = run(
+            source=source,
+            destination=tmp_path / "out",
+            map_path=tmp_path / "map.json",
+            roster=[],
+            batch="essay-1",
+        )
+    finally:
+        os.umask(old_umask)
+
+    assert result.exit_code == EXIT_CANDIDATES
+    [output] = [p for p in (tmp_path / "out").iterdir() if not p.name.startswith("_")]
+    assert output.stat().st_mode & 0o777 == 0o600
+
+
+def test_cli_reports_only_the_unmatched_roster_count(tmp_path, capsys):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    roster = tmp_path / "roster.csv"
+    roster.write_text(
+        "name,student_id,email\nMaya Lin,S1000431,mlin@example.edu\n",
+        encoding="utf-8",
+    )
+
+    exit_code = redact_cli.main(
+        [
+            str(source),
+            "--roster",
+            str(roster),
+            "--batch",
+            "essay-1",
+            "--out",
+            str(tmp_path / "out"),
+            "--map",
+            str(tmp_path / "map.json"),
+            "--review",
+            str(tmp_path / "review.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert exit_code == EXIT_ROSTER
+    assert "Maya Lin" not in captured.out
+    assert "1 unmatched roster entry" in captured.out
+    review = json.loads((tmp_path / "review.json").read_text(encoding="utf-8"))
+    assert review["unmatched_roster"] == [
+        {
+            "name": "Maya Lin",
+            "student_id": "S1000431",
+            "email": "mlin@example.edu",
+        }
+    ]
+
+
+def test_direct_reviewed_run_without_an_existing_exact_review_fails_closed(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        review_path=tmp_path / "review.json",
+        roster=[],
+        batch="essay-1",
+        reviewed=True,
+    )
+
+    assert result.exit_code == EXIT_CANDIDATES
+    assert not (tmp_path / "out" / "_redaction.json").exists()
+
+
+def test_review_approval_preserves_and_binds_the_exact_existing_run(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    destination = tmp_path / "out"
+    map_path = tmp_path / "map.json"
+    review_path = tmp_path / "review.json"
+    common = {
+        "source": source,
+        "destination": destination,
+        "map_path": map_path,
+        "review_path": review_path,
+        "roster": [],
+        "batch": "essay-1",
+    }
+    assert run(**common).exit_code == EXIT_OK
+    before = RedactionManifest.load(destination)
+    map_bytes = map_path.read_bytes()
+    review_bytes = review_path.read_bytes()
+
+    approved = run(**common, reviewed=True)
+    after = RedactionManifest.load(destination)
+
+    assert approved.exit_code == EXIT_OK
+    assert after.reviewed is True
+    assert after.run_id == before.run_id
+    assert after.outputs == before.outputs
+    assert map_path.read_bytes() == map_bytes
+    assert review_path.read_bytes() == review_bytes
+    assert after.map_sha256 == __import__("hashlib").sha256(map_bytes).hexdigest()
+    assert after.review_sha256 == __import__("hashlib").sha256(review_bytes).hexdigest()
+
+
+def test_review_approval_rejects_a_changed_source(tmp_path):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    destination = tmp_path / "out"
+    common = {
+        "source": source,
+        "destination": destination,
+        "map_path": tmp_path / "map.json",
+        "review_path": tmp_path / "review.json",
+        "roster": [],
+        "batch": "essay-1",
+    }
+    run(**common)
+    (source / "paper.md").write_text(
+        "My brother Daniel drove me to the hearing.", encoding="utf-8"
+    )
+
+    result = run(**common, reviewed=True)
+
+    assert result.exit_code == EXIT_CANDIDATES
+    assert RedactionManifest.load(destination).reviewed is False
+
+
+@pytest.mark.parametrize("artifact", ["map", "review", "output"])
+def test_review_approval_rejects_changed_bound_artifacts(tmp_path, artifact):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    destination = tmp_path / "out"
+    map_path = tmp_path / "map.json"
+    review_path = tmp_path / "review.json"
+    common = {
+        "source": source,
+        "destination": destination,
+        "map_path": map_path,
+        "review_path": review_path,
+        "roster": [],
+        "batch": "essay-1",
+    }
+    run(**common)
+    targets = {
+        "map": map_path,
+        "review": review_path,
+        "output": next(
+            path for path in destination.iterdir() if not path.name.startswith("_")
+        ),
+    }
+    targets[artifact].write_text(
+        targets[artifact].read_text(encoding="utf-8") + "changed",
+        encoding="utf-8",
+    )
+
+    result = run(**common, reviewed=True)
+
+    assert result.exit_code == EXIT_CANDIDATES
+    assert RedactionManifest.load(destination).reviewed is False
+
+
+def test_map_and_review_are_written_before_the_final_manifest(tmp_path, monkeypatch):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    destination = tmp_path / "out"
+    map_path = tmp_path / "map.json"
+    review_path = tmp_path / "review.json"
+
+    def fail_review(*args, **kwargs):
+        raise OSError("synthetic review write failure")
+
+    monkeypatch.setattr("scripts.redaction.pipeline._write_review", fail_review)
+
+    with pytest.raises(OSError, match="synthetic review write failure"):
+        run(
+            source=source,
+            destination=destination,
+            map_path=map_path,
+            review_path=review_path,
+            roster=[],
+            batch="essay-1",
+        )
+
+    assert map_path.exists()
+    assert not review_path.exists()
+    assert not (destination / "_redaction.json").exists()
+
+
+def test_cross_batch_force_invalidates_old_review_before_output_mutation(
+    tmp_path, monkeypatch
+):
+    first_source = tmp_path / "first"
+    _write(first_source, "paper.md", "Alice Smith wrote the same body.")
+    destination = tmp_path / "out"
+    first = {
+        "source": first_source,
+        "destination": destination,
+        "map_path": tmp_path / "alice-map.json",
+        "review_path": tmp_path / "alice-review.json",
+        "roster": [RosterEntry("Alice Smith")],
+        "batch": "alice-batch",
+    }
+    run(**first)
+    assert run(**first, reviewed=True).exit_code == EXIT_OK
+    assert RedactionManifest.load(destination).reviewed is True
+
+    second_source = tmp_path / "second"
+    _write(second_source, "paper.md", "Bob Jones wrote the same body.")
+
+    original_write_private_text = __import__(
+        "scripts.redaction.pipeline", fromlist=["write_private_text"]
+    ).write_private_text
+
+    def fail_map_write(path, text):
+        if path == tmp_path / "bob-map.json":
+            raise OSError("synthetic map write failure")
+        return original_write_private_text(path, text)
+
+    monkeypatch.setattr("scripts.redaction.pipeline.write_private_text", fail_map_write)
+    with pytest.raises(OSError, match="synthetic map write failure"):
+        run(
+            source=second_source,
+            destination=destination,
+            map_path=tmp_path / "bob-map.json",
+            review_path=tmp_path / "bob-review.json",
+            roster=[RosterEntry("Bob Jones")],
+            batch="bob-batch",
+            force=True,
+        )
+
+    assert RedactionManifest.load(destination).reviewed is False
+
+
+@pytest.mark.parametrize("unexpected", ["_raw.md", "nested/raw.md"])
+def test_review_approval_rejects_every_unbound_destination_entry(
+    tmp_path, unexpected
+):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    destination = tmp_path / "out"
+    unbound = destination / unexpected
+    unbound.parent.mkdir(parents=True, exist_ok=True)
+    unbound.write_text("identity-bearing material", encoding="utf-8")
+    common = {
+        "source": source,
+        "destination": destination,
+        "map_path": tmp_path / "map.json",
+        "review_path": tmp_path / "review.json",
+        "roster": [],
+        "batch": "essay-1",
+    }
+    run(**common, force=True)
+
+    approval = run(**common, reviewed=True)
+
+    assert approval.exit_code == EXIT_CANDIDATES
+    assert RedactionManifest.load(destination).reviewed is False
+
+
+def test_review_source_binding_reuses_the_extracted_snapshot(tmp_path, monkeypatch):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "Platforms curate public attention.")
+    original_sha256 = __import__("scripts.redaction.pipeline", fromlist=["_sha256"])._sha256
+
+    def reject_submission_reread(path, label, max_bytes):
+        if label == "The submission":
+            raise AssertionError("source binding reread the submission")
+        return original_sha256(path, label, max_bytes)
+
+    monkeypatch.setattr("scripts.redaction.pipeline._sha256", reject_submission_reread)
+
+    result = run(
+        source=source,
+        destination=tmp_path / "out",
+        map_path=tmp_path / "map.json",
+        review_path=tmp_path / "review.json",
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_OK
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit"),
+    [("MAX_TOKEN_MAP_ENTITIES", 1), ("MAX_TOKEN_MAP_BYTES", 300)],
+)
+def test_token_map_limits_fail_closed_with_durable_private_state(
+    tmp_path, monkeypatch, limit_name, limit
+):
+    source = tmp_path / "in"
+    _write(
+        source,
+        "paper.md",
+        "Contact first.person@example.edu and second.person@example.edu.",
+    )
+    monkeypatch.setattr(f"scripts.redaction.tokens.{limit_name}", limit, raising=False)
+    destination = tmp_path / "out"
+    map_path = tmp_path / "map.json"
+    review_path = tmp_path / "review.json"
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=map_path,
+        review_path=review_path,
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNREADABLE
+    assert map_path.stat().st_mode & 0o777 == 0o600
+    assert review_path.stat().st_mode & 0o777 == 0o600
+    manifest = RedactionManifest.load(destination)
+    assert manifest.reviewed is False
+    assert manifest.exit_code == EXIT_UNREADABLE
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review["state_errors"]
+
+
+def test_manifest_can_parse_the_exact_bytes_that_were_hashed(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    output = redacted / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    manifest = _create_manifest(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=False,
+        exit_code=0,
+    )
+    manifest.save(redacted)
+    data = (redacted / "_redaction.json").read_bytes()
+
+    loaded = RedactionManifest.from_bytes(data)
+
+    assert loaded == manifest
+
+
+def test_oversized_private_review_falls_back_before_any_oversized_write(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "My brother Daniel drove me to the hearing.")
+    destination = tmp_path / "out"
+    map_path = tmp_path / "map.json"
+    review_path = tmp_path / "review.json"
+    monkeypatch.setattr("scripts.redaction.pipeline.MAX_PRIVATE_ARTIFACT_BYTES", 500)
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=map_path,
+        review_path=review_path,
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNREADABLE
+    assert review_path.stat().st_size <= 500
+    assert review_path.stat().st_mode & 0o777 == 0o600
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review["error"] == "private review exceeded its byte limit"
+    manifest = RedactionManifest.load(destination)
+    assert manifest.reviewed is False
+    assert manifest.exit_code == EXIT_UNREADABLE
+
+
+def test_candidate_review_item_budget_fails_closed_with_compact_private_state(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "in"
+    _write(
+        source,
+        "paper.md",
+        "My brother Daniel drove me. My sister Rosa called me. "
+        "My cousin Priya warned me.",
+    )
+    monkeypatch.setattr(
+        "scripts.redaction.pipeline.MAX_REVIEW_NAME_ITEMS", 2, raising=False
+    )
+    destination = tmp_path / "out"
+    review_path = tmp_path / "review.json"
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        review_path=review_path,
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNREADABLE
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review["error"] == "candidate review item limit exceeded"
+    assert "candidates" not in review
+    manifest = RedactionManifest.load(destination)
+    assert manifest.reviewed is False
+    assert manifest.exit_code == EXIT_UNREADABLE
+
+
+def test_final_redacted_utf8_size_is_checked_before_output_write(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "in"
+    _write(source, "paper.md", "a@b.co c@d.co")
+    monkeypatch.setattr("scripts.redaction.pipeline.MAX_FILE_BYTES", 16)
+    destination = tmp_path / "out"
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        review_path=tmp_path / "review.json",
+        roster=[],
+        batch="essay-1",
+    )
+
+    assert result.exit_code == EXIT_UNREADABLE
+    assert [path for path in destination.iterdir() if not path.name.startswith("_")] == []
+    manifest = RedactionManifest.load(destination)
+    assert manifest.reviewed is False
+    assert manifest.exit_code == EXIT_UNREADABLE
+
+
+def test_schema_two_manifest_loads_as_unreviewed_and_ineligible(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    output = redacted / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    payload = {
+        "schema": "redaction-batch/2",
+        "batch": "essay-2",
+        "run_id": "run-identifier-1234",
+        "reviewed": True,
+        "exit_code": 0,
+        "outputs": [
+            {
+                "path": output.name,
+                "sha256": __import__("hashlib").sha256(output.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+    (redacted / "_redaction.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = RedactionManifest.load(redacted)
+
+    assert loaded.reviewed is False
+    assert loaded.map_sha256 == ""
+    assert loaded.review_sha256 == ""
+
+
+def test_schema_three_manifest_requires_map_and_review_digests(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    output = redacted / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    map_digest = "62d325824da560ffec8bc44d147e265e4ae1b77656cfde632b72c7a633f711e7"
+    review_digest = "31f937c105ebe8e03a0dcd1396a5b3cd3675fdc257cdd5bc5fd8598ab130de7b"
+
+    manifest = _create_manifest(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+        map_sha256=map_digest,
+        review_sha256=review_digest,
+    )
+    manifest.save(redacted)
+    loaded = RedactionManifest.load(redacted)
+
+    assert loaded.map_sha256 == map_digest
+    assert loaded.review_sha256 == review_digest
+    payload = json.loads((redacted / "_redaction.json").read_text(encoding="utf-8"))
+    assert payload["schema"] == "redaction-batch/3"
+
+
+@pytest.mark.parametrize("field", ["map_sha256", "review_sha256"])
+@pytest.mark.parametrize("digest", ["", "A" * 64, "g" * 64, "0" * 63])
+def test_schema_three_manifest_rejects_noncanonical_private_digests(
+    tmp_path, field, digest
+):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    output = redacted / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    kwargs = {
+        "map_sha256": TEST_MAP_SHA256,
+        "review_sha256": TEST_REVIEW_SHA256,
+    }
+    kwargs[field] = digest
+
+    with pytest.raises(ValueError, match="lowercase"):
+        RedactionManifest.create(
+            "essay-2",
+            "run-identifier-1234",
+            [output],
+            reviewed=False,
+            exit_code=0,
+            **kwargs,
+        )

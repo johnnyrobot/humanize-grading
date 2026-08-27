@@ -1,6 +1,9 @@
 """Layer 4 must flag people, not cited scholars or platforms."""
 
-from scripts.redaction.candidates import find_candidates
+import time
+import tracemalloc
+
+from scripts.redaction.candidates import find_candidates, review_candidates
 
 
 def test_relational_name_is_flagged():
@@ -133,3 +136,56 @@ def test_a_cited_scholar_does_not_suppress_a_strong_signal():
         "My cousin Brady told me about the eviction."
     )
     assert [c.name for c in found] == ["Brady"]
+
+
+def test_protected_overlap_collection_is_linear_and_keeps_longest_form():
+    text = "\n".join("Marcus Vance reviewed it." for _ in range(5000))
+
+    started = time.perf_counter()
+    review = review_candidates(text, protected=("Marcus Vance", "Vance"))
+    elapsed = time.perf_counter() - started
+
+    assert len(review.excluded) == 5000
+    assert {item.name for item in review.excluded} == {"Marcus Vance"}
+    assert review.excluded[0].line == 1
+    assert review.excluded[-1].line == 5000
+    assert "reviewed it" in review.excluded[0].context
+    assert elapsed < 1.0
+
+
+def test_newline_dense_review_does_not_store_every_newline_offset():
+    text = "\n" * 300_000 + "My brother Daniel drove me."
+
+    tracemalloc.start()
+    try:
+        review = review_candidates(text)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert [item.name for item in review.candidates] == ["Daniel"]
+    assert review.candidates[0].line == 300_001
+    assert peak < 6 * 1024 * 1024
+
+
+def test_mixed_blank_lines_keep_protected_candidate_and_citation_lines():
+    text = (
+        "\n\n"
+        "Dr. Marcus Vance reviewed it.\n"
+        "\n\n"
+        "My brother Daniel drove me.\n"
+        "\n"
+        "Gillespie (2014) frames algorithms.\n"
+        "I find Gillespie's framing useful."
+    )
+
+    review = review_candidates(text, protected=("Marcus Vance",))
+
+    assert [(item.name, item.line) for item in review.candidates] == [("Daniel", 6)]
+    assert {(item.name, item.reason, item.line) for item in review.excluded} == {
+        ("Marcus Vance", "protected", 3),
+        ("Gillespie", "citation", 9),
+    }
+    assert "reviewed it" in next(
+        item.context for item in review.excluded if item.name == "Marcus Vance"
+    )

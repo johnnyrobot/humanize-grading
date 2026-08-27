@@ -48,6 +48,28 @@ MIN_SAMPLES = 3
 MAX_SAMPLES = 8
 
 
+def _identity_key(value: str) -> str:
+    """Normalize harmless name formatting for roster identity checks."""
+    return " ".join(value.split()).casefold()
+
+
+def _require_roster_identity(sample, roster, label: str) -> None:
+    """Require one Student header that names one roster entry."""
+    identities = [
+        value
+        for name, value in sample.header.items()
+        if name.casefold() == "student"
+    ]
+    if len(identities) != 1 or not _identity_key(identities[0]):
+        raise SampleError(f"{label} must have exactly one Student header.")
+    identity = _identity_key(identities[0])
+    matches = sum(_identity_key(entry.name) == identity for entry in roster)
+    if matches != 1:
+        raise SampleError(
+            f"{label}'s Student header must match exactly one roster entry."
+        )
+
+
 def _inputs(args: argparse.Namespace) -> int:
     rubric = load_rubric(args.rubric)
     roster = load_roster(args.roster) if args.roster else []
@@ -81,8 +103,15 @@ def _inputs(args: argparse.Namespace) -> int:
         )
         calibration = calibration[:MAX_SAMPLES]
 
-    def packet(index: int, path: Path) -> dict:
+    loaded_calibration = []
+    for index, path in enumerate(calibration, start=1):
         sample = load_sample(path)
+        _require_roster_identity(sample, roster, f"Calibration sample {index}")
+        loaded_calibration.append(sample)
+    holdout_sample = load_sample(holdout_path)
+    _require_roster_identity(holdout_sample, roster, "The holdout sample")
+
+    def packet(index: int, sample) -> dict:
         comments, found = scrub_private_data(sample.comments_only(), roster)
         annotations, _ = scrub_private_data(
             "\n".join(a.text for a in sample.annotations), roster
@@ -137,7 +166,8 @@ def _inputs(args: argparse.Namespace) -> int:
             },
         },
         "samples": [
-            packet(index, path) for index, path in enumerate(calibration, start=1)
+            packet(index, sample)
+            for index, sample in enumerate(loaded_calibration, start=1)
         ],
         "holdout": {"label": "holdout"},
         "note": (

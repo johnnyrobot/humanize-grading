@@ -14,6 +14,12 @@ from pathlib import Path
 
 from scripts.grading._conformance_model import (
     ConformanceError,
+    MAX_PACKAGE_BYTES,
+    MAX_PACKAGE_FILE_BYTES,
+    MAX_PACKAGE_FILES,
+    MAX_WORKSPACE_BYTES,
+    MAX_WORKSPACE_DEPTH,
+    MAX_WORKSPACE_ENTRIES,
     TRIAL_BATCH,
     TRIAL_BRIEF,
     TRIAL_COURSE,
@@ -50,6 +56,10 @@ A utility might answer that disclosure reveals commercially sensitive plans, but
 
 The stronger policy combines a public queue with an appeal process, published service standards, and penalties when unexplained delay exceeds those standards.
 """
+
+
+def _is_python_bytecode_path(path: Path) -> bool:
+    return "__pycache__" in path.parts or path.suffix == ".pyc"
 
 
 def private_write(path: Path, data: bytes, *, exclusive: bool = False) -> None:
@@ -186,7 +196,11 @@ def _package_paths(repo_root: Path) -> tuple[Path, ...]:
             or relative.as_posix() != raw
         ):
             raise ConformanceError("PACKAGE_FILES.txt contains an unsafe path.")
+        if _is_python_bytecode_path(relative):
+            raise ConformanceError("PACKAGE_FILES.txt must not include bytecode.")
         paths.append(relative)
+        if len(paths) > MAX_PACKAGE_FILES:
+            raise ConformanceError("The reviewed package exceeds the file limit.")
     return tuple(paths)
 
 
@@ -204,6 +218,8 @@ def _copy_package_file(
     try:
         source_fd = _open_regular_at(source_parent, relative.name)
         before = os.fstat(source_fd)
+        if before.st_size > MAX_PACKAGE_FILE_BYTES:
+            raise ConformanceError("A reviewed package file exceeds the byte limit.")
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         destination_fd = os.open(
@@ -283,6 +299,17 @@ def _package_document(
     }
 
 
+def _lock_package_directories(destination: Path, paths: tuple[Path, ...]) -> None:
+    directories = {
+        parent
+        for relative in paths
+        for parent in relative.parents
+        if parent != Path(".")
+    }
+    for relative in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        (destination / relative).chmod(0o555)
+
+
 def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
     """Copy the reviewed package and create one synthetic grading input."""
     source_root = repo_root.expanduser().resolve()
@@ -304,13 +331,24 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
         source_root_fd = os.open(source_root, _directory_flags())
         destination_root_fd = os.open(destination, _directory_flags())
         try:
-            package_files = tuple(
-                _copy_package_file(source_root_fd, destination_root_fd, relative)
-                for relative in _package_paths(source_root)
-            )
+            copied: list[dict[str, object]] = []
+            package_bytes = 0
+            reviewed_paths = _package_paths(source_root)
+            for relative in reviewed_paths:
+                item = _copy_package_file(
+                    source_root_fd, destination_root_fd, relative
+                )
+                package_bytes += int(item["bytes"])
+                if package_bytes > MAX_PACKAGE_BYTES:
+                    raise ConformanceError(
+                        "The reviewed package exceeds the aggregate byte limit."
+                    )
+                copied.append(item)
+            package_files = tuple(copied)
         finally:
             os.close(destination_root_fd)
             os.close(source_root_fd)
+        _lock_package_directories(destination, reviewed_paths)
 
         profile_source = destination / "tests/fixtures/phil210/profile_phil210.md"
         private_write(
@@ -342,6 +380,7 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
                 + "\n"
             ).encode("utf-8"),
         )
+        validate_workspace_budget(destination)
     except OSError as error:
         shutil.rmtree(destination, ignore_errors=True)
         raise ConformanceError("Cannot copy the reviewed package safely.") from error
@@ -389,12 +428,23 @@ def read_trial_marker(workspace: Path) -> dict[str, object]:
     return payload
 
 
-def _current_package_file(root_fd: int, relative: Path) -> dict[str, object]:
+def _current_package_file(
+    root_fd: int, relative: Path, *, expected_bytes: int | None = None
+) -> dict[str, object]:
     parent = _open_directory_chain(root_fd, relative.parts[:-1], create=False)
     descriptor = -1
     try:
         descriptor = _open_regular_at(parent, relative.name)
         state = os.fstat(descriptor)
+        if expected_bytes is not None and state.st_size != expected_bytes:
+            return {
+                "path": relative.as_posix(),
+                "bytes": state.st_size,
+                "sha256": "",
+                "mode": f"{stat.S_IMODE(state.st_mode):04o}",
+            }
+        if state.st_size > MAX_PACKAGE_FILE_BYTES:
+            raise ConformanceError("A reviewed package file exceeds the byte limit.")
         digest = hashlib.sha256()
         total = 0
         while True:
@@ -430,14 +480,14 @@ def _unexpected_package_paths(
             continue
         for current, directories, files in os.walk(root, followlinks=False):
             base = Path(current)
-            directories[:] = [name for name in directories if name != "__pycache__"]
             for name in directories + files:
                 path = base / name
-                if "__pycache__" in path.parts or path.suffix == ".pyc":
-                    continue
                 relative = path.relative_to(workspace).as_posix()
                 if relative not in expected_paths and (
-                    path.is_symlink() or path.is_file()
+                    path.is_symlink()
+                    or path.is_file()
+                    or name == "__pycache__"
+                    or path.suffix == ".pyc"
                 ):
                     unexpected.add(relative)
     return tuple(sorted(unexpected))
@@ -449,18 +499,26 @@ def attest_package(
     """Revalidate every reviewed package byte without trusting package code."""
     if expected is None:
         expected = dict(read_trial_marker(workspace)["package"])
+    validate_workspace_budget(workspace)
     raw_files = expected.get("files")
-    if not isinstance(raw_files, (list, tuple)):
+    if (
+        not isinstance(raw_files, (list, tuple))
+        or len(raw_files) > MAX_PACKAGE_FILES
+    ):
         raise ConformanceError("The conformance package attestation is malformed.")
     files: list[dict[str, object]] = []
     expected_paths: set[str] = set()
+    expected_bytes = 0
     for item in raw_files:
         if (
             not isinstance(item, dict)
             or not isinstance(item.get("path"), str)
             or Path(item["path"]).is_absolute()
             or ".." in Path(item["path"]).parts
+            or _is_python_bytecode_path(Path(item["path"]))
             or not isinstance(item.get("bytes"), int)
+            or isinstance(item.get("bytes"), bool)
+            or not 0 <= item["bytes"] <= MAX_PACKAGE_FILE_BYTES
             or not isinstance(item.get("sha256"), str)
             or len(item["sha256"]) != 64
             or not isinstance(item.get("mode"), str)
@@ -472,6 +530,9 @@ def attest_package(
             )
         expected_paths.add(item["path"])
         files.append(dict(item))
+        expected_bytes += item["bytes"]
+        if expected_bytes > MAX_PACKAGE_BYTES:
+            raise ConformanceError("The conformance package exceeds the byte limit.")
     files.sort(key=lambda item: item["path"])
     canonical = json.dumps(tuple(files), sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -490,7 +551,9 @@ def attest_package(
         for item in files:
             relative = Path(item["path"])
             try:
-                actual = _current_package_file(root_fd, relative)
+                actual = _current_package_file(
+                    root_fd, relative, expected_bytes=int(item["bytes"])
+                )
             except (OSError, ConformanceError):
                 findings.add(f"package-missing:{relative.as_posix()}")
                 continue
@@ -528,10 +591,17 @@ def trusted_package_attestation(package_root: Path) -> dict[str, object]:
         raise ConformanceError("The trusted package root must be one directory.")
     root_fd = os.open(root, _directory_flags())
     try:
-        files = tuple(
-            _current_package_file(root_fd, relative)
-            for relative in _package_paths(root)
-        )
+        collected: list[dict[str, object]] = []
+        package_bytes = 0
+        for relative in _package_paths(root):
+            item = _current_package_file(root_fd, relative)
+            package_bytes += int(item["bytes"])
+            if package_bytes > MAX_PACKAGE_BYTES:
+                raise ConformanceError(
+                    "The reviewed package exceeds the aggregate byte limit."
+                )
+            collected.append(item)
+        files = tuple(collected)
     except (OSError, ConformanceError) as error:
         raise ConformanceError("Cannot attest the trusted package root.") from error
     finally:
@@ -601,6 +671,42 @@ def validate_synthetic_inputs(workspace: Path) -> None:
         source, "The synthetic submission", 1024 * 1024
     ) != _TRIAL_SUBMISSION_TEXT.encode("utf-8"):
         raise ConformanceError("The synthetic conformance inputs changed.")
+
+
+def validate_workspace_budget(workspace: Path) -> None:
+    """Reject a trial tree before an audit performs repeated deep scans."""
+    entries = 0
+    total_bytes = 0
+    pending = [(workspace, 0)]
+    try:
+        while pending:
+            current, depth = pending.pop()
+            if depth > MAX_WORKSPACE_DEPTH:
+                raise ConformanceError("The workspace exceeds the depth limit.")
+            with os.scandir(current) as members:
+                for member in members:
+                    entries += 1
+                    if entries > MAX_WORKSPACE_ENTRIES:
+                        raise ConformanceError(
+                            "The workspace exceeds the entry limit."
+                        )
+                    state = member.stat(follow_symlinks=False)
+                    if stat.S_ISREG(state.st_mode):
+                        total_bytes += state.st_size
+                        if total_bytes > MAX_WORKSPACE_BYTES:
+                            raise ConformanceError(
+                                "The workspace exceeds the byte limit."
+                            )
+                    elif stat.S_ISDIR(state.st_mode):
+                        pending.append((Path(member.path), depth + 1))
+                    elif not stat.S_ISLNK(state.st_mode):
+                        raise ConformanceError(
+                            "The workspace contains a special file."
+                        )
+    except ConformanceError:
+        raise
+    except OSError as error:
+        raise ConformanceError("Cannot inspect the workspace limits.") from error
 
 
 def private_directory(workspace: Path, relative: Path) -> Path:

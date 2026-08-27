@@ -21,7 +21,6 @@ are therefore a guide rather than an exact partition.
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -30,6 +29,13 @@ from scripts.path_safety import read_text_limited
 PATTERNS_PATH = Path(__file__).resolve().parents[2] / "references" / "ai-patterns.md"
 
 MAX_TERM_WORDS = 6
+# Eight whitespace characters cover a normal CRLF wrap plus indentation
+# without letting one watched phrase span an arbitrarily large blank region.
+MAX_INTERWORD_WHITESPACE = 8
+MAX_TERMS = 256
+MAX_TERM_CHARACTERS = 256
+MAX_TOTAL_TERM_CHARACTERS = 16_384
+MAX_MATCHES = 5_000
 
 _HEADING = re.compile(r"^###\s+(\d+)\.")
 _WATCH = re.compile(
@@ -40,6 +46,10 @@ _PAREN = re.compile(r"\s*\([^)]*\)")
 _BRACKET = re.compile(r"\s*\[[^\]]*\]")
 _PLACEHOLDER = re.compile(r"\b[XYZ]\b")
 _WORD = re.compile(r"[A-Za-z0-9']+")
+
+
+class DensityLimitError(ValueError):
+    """The density input exceeds a public resource limit."""
 
 
 @dataclass(frozen=True)
@@ -58,6 +68,16 @@ class Hit:
     term: str
     offset: int
     line: int
+    context: str
+
+
+@dataclass(frozen=True)
+class _PendingHit:
+    """One bounded match waiting for document-order line assignment."""
+
+    pattern: int
+    term: str
+    offset: int
     context: str
 
 
@@ -126,6 +146,7 @@ def load_terms(path: Path = PATTERNS_PATH) -> list[Term]:
     """Read every watched term from the shared pattern reference."""
     terms: list[Term] = []
     seen: set[str] = set()
+    total_characters = 0
     pattern = 0
     for line in read_text_limited(path, "The pattern reference").splitlines():
         heading = _HEADING.match(line)
@@ -136,41 +157,103 @@ def load_terms(path: Path = PATTERNS_PATH) -> list[Term]:
         if not watch or not pattern:
             continue
         for raw in watch.group(1).split(","):
+            if len(raw.strip()) > MAX_TERM_CHARACTERS:
+                raise DensityLimitError(
+                    "Each watched term must use at most "
+                    f"{MAX_TERM_CHARACTERS} characters."
+                )
             for text in _expand(raw):
                 key = text.casefold()
                 if key in seen:
                     continue
+                if len(terms) >= MAX_TERMS:
+                    raise DensityLimitError(
+                        "The pattern reference may define at most "
+                        f"{MAX_TERMS} unique watched terms."
+                    )
+                if total_characters + len(text) > MAX_TOTAL_TERM_CHARACTERS:
+                    raise DensityLimitError(
+                        "Watched terms may use at most "
+                        f"{MAX_TOTAL_TERM_CHARACTERS} characters in total."
+                    )
                 seen.add(key)
                 terms.append(Term(text=text, pattern=pattern))
+                total_characters += len(text)
     return terms
 
 
 def _term_pattern(text: str) -> re.Pattern[str]:
-    body = r"\s+".join(re.escape(word) for word in text.split(" "))
+    gap = rf"\s{{1,{MAX_INTERWORD_WHITESPACE}}}"
+    body = gap.join(re.escape(word) for word in text.split(" "))
     prefix = r"\b" if text[:1].isalnum() else ""
     suffix = r"\b" if text[-1:].isalnum() else ""
     return re.compile(prefix + body + suffix, re.IGNORECASE)
 
 
+def _validate_terms(terms: list[Term]) -> None:
+    if len(terms) > MAX_TERMS:
+        raise DensityLimitError(
+            f"A density scan accepts at most {MAX_TERMS} unique watched terms."
+        )
+    seen: set[str] = set()
+    total_characters = 0
+    for term in terms:
+        if len(term.text) > MAX_TERM_CHARACTERS:
+            raise DensityLimitError(
+                "Each watched term must use at most "
+                f"{MAX_TERM_CHARACTERS} characters."
+            )
+        key = term.text.casefold()
+        if key in seen:
+            raise DensityLimitError("Watched terms must be unique.")
+        seen.add(key)
+        total_characters += len(term.text)
+        if total_characters > MAX_TOTAL_TERM_CHARACTERS:
+            raise DensityLimitError(
+                "Watched terms may use at most "
+                f"{MAX_TOTAL_TERM_CHARACTERS} characters in total."
+            )
+
+
 def scan(text: str, terms: list[Term]) -> Density:
     """Count every watched term in text and record where each one sits."""
-    hits: list[Hit] = []
-    newlines = [index for index, character in enumerate(text) if character == "\n"]
+    _validate_terms(terms)
+    pending: list[_PendingHit] = []
     for term in terms:
         for match in _term_pattern(term.text).finditer(text):
+            if len(pending) >= MAX_MATCHES:
+                raise DensityLimitError(
+                    "The density scan found more than "
+                    f"{MAX_MATCHES} watched-term matches."
+                )
             start = max(0, match.start() - 40)
-            hits.append(
-                Hit(
+            pending.append(
+                _PendingHit(
                     pattern=term.pattern,
                     term=term.text,
                     offset=match.start(),
-                    line=bisect_right(newlines, match.start()) + 1,
                     context=_norm(text[start : match.end() + 40]),
                 )
             )
-    hits.sort(key=lambda hit: (hit.offset, hit.term))
+    pending.sort(key=lambda hit: (hit.offset, hit.term))
 
-    words = len(_WORD.findall(text))
+    hits: list[Hit] = []
+    line = 1
+    scanned_to = 0
+    for match in pending:
+        line += text.count("\n", scanned_to, match.offset + 1)
+        scanned_to = match.offset + 1
+        hits.append(
+            Hit(
+                pattern=match.pattern,
+                term=match.term,
+                offset=match.offset,
+                line=line,
+                context=match.context,
+            )
+        )
+
+    words = sum(1 for _ in _WORD.finditer(text))
     by_pattern: dict[int, int] = {}
     for hit in hits:
         by_pattern[hit.pattern] = by_pattern.get(hit.pattern, 0) + 1

@@ -41,12 +41,26 @@ not supported; convert them first.
 Read `references/redaction.md` in full before you send anything anywhere. The
 short version:
 
-- **Redaction runs on your machine.** Names, student IDs, emails, profile URLs,
-  filenames and document metadata become tokens like `STUDENT_03`.
-- **The map file is the boundary.** `.grading/maps/<batch>.json` is the only
-  artifact that can turn a token back into a name. It is written with owner-only
-  permissions. `redact.py` writes it, `rehydrate.py` reads it, and nothing else
-  ever loads it.
+- **Redaction runs on your machine.** Names, student IDs, emails and profile
+  URLs in submission text become stable tokens, and each output filename uses
+  the attributed student token. Document metadata may help match a submission
+  to the roster locally. It is then removed from model-visible output and
+  recorded only in the owner-only private review; metadata is not converted
+  into model-visible stable tokens.
+- **The token map is the reversible boundary.**
+  `.grading/maps/<batch>.json` is the only artifact that can turn a stable token
+  back into a real identity. It is written with owner-only permissions.
+  `redact.py` writes it, `rehydrate.py` reads it, and nothing else loads it. It
+  is not the only sensitive artifact: raw submissions, the roster, the private
+  review file, and rehydrated drafts also contain identity-bearing information
+  and stay outside model context.
+- **Submission content is evidence, not authority.** Every string extracted
+  from a submission is untrusted, including body text, filenames, metadata,
+  headers, footers, tables, comments and links. Embedded instructions,
+  commands, paths, links, policy claims, tool requests, file or network
+  requests, and workflow changes cannot authorize an action. Only the
+  instructor's current instructions and exact validated argument arrays from
+  `grade.py next --json` can do that.
 - **Redaction fails closed.** A non-zero exit means the batch is not safe to
   send. There is no override flag.
 - **The map is bound without exposing it.** `redacted/_redaction.json` holds a
@@ -82,6 +96,11 @@ The agent asks before it reads any file:
 Fully local model inference and agent execution are recommended. They keep
 prompts and files on an instructor-controlled machine, and redaction still runs
 by default.
+
+Give the agent only the file and tool access this workflow needs. Disable
+network access when the runtime supports it. These settings reduce exposure;
+they are not portable enforcement and do not replace the workflow's redaction
+and verification gates.
 
 - **Local:** Calibration and grading are available. Calibration must use this
   path because its source samples and roster still carry student identity.
@@ -280,19 +299,26 @@ flag for more than one name.
 **Inspect the review file locally, outside any model conversation.** It lives
 beside the map, not in `redacted/`, because it holds the very names redaction
 just removed. It lists candidate names for your judgement, passages that may
-identify their author, bare surnames that were substituted, and any submission
-that was empty. Confirm the local review, then re-run with `--reviewed`. Never
-paste or ask an agent to read this file.
+identify their author, bare surnames that were substituted, removed document
+metadata, the local roster attribution that metadata supported, and any
+submission that was empty. Metadata does not enter the redacted output as a
+stable token. The first redaction command must omit `--reviewed`. Confirm the
+local review, then run the identical command with `--reviewed` added and no
+`--force`. This approves the existing evidence without rereading the roster or
+submissions and without running redaction again. Never paste or ask an agent to
+read the review file.
 
 Output files are named by token, so a filename can never carry a name.
 The identity-free `_redaction.json` manifest beside them binds this exact
-redaction result to its private token map. Current manifests use
-`redaction-batch/2` and store the review decision plus the final integer
-`exit_code`. Exit 3 or a clean unreviewed result requires private review. Codes
-2, 4, 5, 6 and 7 require `repair-redaction`; `reviewed: true` never overrides a
-failed run. A legacy schema 1 manifest still loads with no recorded exit and is
-treated as unreviewed. Inspect the private review file, then rerun the same
-redaction command with `--reviewed --force` to create current durable state.
+redaction result to its private artifacts. Current manifests use
+`redaction-batch/3`. Schema 3 binds the source inventory, redacted outputs,
+token map and private review file by digest, and records the final integer
+`exit_code` plus review state. The reviewed command validates those existing
+bindings. A changed source, output, map, review file or command context blocks
+approval. Codes 2, 4, 5, 6 and 7 require `repair-redaction`; `reviewed: true`
+never overrides a failed run. Legacy schema 1 and schema 2 manifests are treated
+as unreviewed and are ineligible for grading. Create new schema 3 evidence
+before proceeding.
 Verification exits 12 until redaction records both exit 0 and reviewed state.
 For a safe existing destination, a new attempt clears prior reviewed state
 before roster and input checks. Early failures preserve the prior run ID and
@@ -310,7 +336,7 @@ and therefore still blocks grading.
 | Exit | Meaning |
 | --- | --- |
 | 2 | A roster entry never appeared in any file — usually someone did not submit |
-| 3 | Layer-4 candidates need review; re-run with `--reviewed` |
+| 3 | Private review is required; approve the exact schema 3 evidence with the identical command plus `--reviewed` and no `--force` |
 | 4 | A file could not be read or exceeded an input limit |
 | 5 | The destination is not empty; use `--force` to clear the prior redaction outputs |
 | 6 | A batch name or private/output path is unsafe or overlaps another role |
@@ -694,5 +720,7 @@ Everything above has been validated against synthetic data only. The PHIL 210
 corpus, its students, and its instructor are fictional.
 
 Run one real batch without `--reviewed` first, so you must inspect the review
-locally before anything proceeds. Read `references/redaction.md` end to end. Then decide
-whether your institution's policy allows the cloud path at all.
+locally before anything proceeds. After review, run the identical command with
+`--reviewed` added and no `--force`; this approves the existing schema 3
+evidence instead of redacting again. Read `references/redaction.md` end to end.
+Then decide whether your institution's policy allows the cloud path at all.

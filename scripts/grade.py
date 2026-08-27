@@ -32,7 +32,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.grading.density import PATTERNS_PATH, load_terms  # noqa: E402
+from scripts.grading.density import (  # noqa: E402
+    PATTERNS_PATH,
+    DensityLimitError,
+    load_terms,
+)
 from scripts.grading.batch import (  # noqa: E402
     BatchPaths,
     GradingBatch,
@@ -278,14 +282,17 @@ def _cmd_density(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_MALFORMED
-    terms = load_terms(args.patterns)
     try:
+        terms = load_terms(args.patterns)
         result = scan(
             read_text_limited(
                 args.path, "The redacted submission", 25 * 1024 * 1024
             ),
             terms,
         )
+    except DensityLimitError as error:
+        print(f"Density stopped safely: {error}", file=sys.stderr)
+        return EXIT_MALFORMED
     except (OSError, UnicodeError, ValueError) as error:
         print(f"Cannot read redacted submission: {error}", file=sys.stderr)
         return EXIT_MALFORMED

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -18,7 +19,9 @@ from scripts.grading._conformance_model import (
     ConformanceReport,
     MAX_ARGV_ITEMS,
     MAX_ARG_CHARS,
+    MAX_TRACE_BYTES,
     MAX_TRACE_EVENTS,
+    MAX_TRACE_FILES,
     MAX_TRACE_LINE_BYTES,
     RUNTIME_PATTERN,
     TRACE_SCHEMA,
@@ -47,6 +50,7 @@ from scripts.grading._conformance_trial import (
     identity_scan,
     identity_values,
     observed_artifacts,
+    open_workspace_directory,
     private_artifacts,
     private_directory,
     private_write,
@@ -54,6 +58,7 @@ from scripts.grading._conformance_trial import (
     refuse_workspace_links,
     trusted_package_attestation,
     validate_synthetic_inputs,
+    validate_workspace_budget,
 )
 from scripts.grading.batch import (
     BatchPaths,
@@ -138,6 +143,48 @@ def _is_successful_next(argv: list[str], exit_code: int) -> bool:
     return _is_next_command(argv) and "--json" in argv and exit_code == 0
 
 
+def _open_trace_descriptor(
+    workspace: Path, path: Path
+) -> tuple[int, os.stat_result | None, str]:
+    root = Path(os.path.abspath(workspace))
+    candidate = path if path.is_absolute() else root / path
+    try:
+        relative = Path(os.path.abspath(candidate)).relative_to(root)
+    except ValueError:
+        return -1, None, "trace-outside-workspace"
+    if not relative.parts:
+        return -1, None, "trace-not-regular"
+
+    parent_fd = -1
+    descriptor = -1
+    try:
+        parent_fd = open_workspace_directory(root, relative.parent)
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(relative.name, flags, dir_fd=parent_fd)
+        state = os.fstat(descriptor)
+        if not stat.S_ISREG(state.st_mode):
+            os.close(descriptor)
+            return -1, None, "trace-not-regular"
+        return descriptor, state, ""
+    except FileNotFoundError:
+        if descriptor >= 0:
+            os.close(descriptor)
+        return -1, None, "trace-missing"
+    except OSError as error:
+        if descriptor >= 0:
+            os.close(descriptor)
+        code = (
+            "trace-not-regular"
+            if error.errno in {errno.ELOOP, errno.ENOTDIR, errno.ENXIO}
+            else "trace-unreadable"
+        )
+        return -1, None, code
+    finally:
+        if parent_fd >= 0:
+            os.close(parent_fd)
+
+
 def audit_trace(
     workspace: Path,
     trace_paths: tuple[Path, ...],
@@ -148,10 +195,11 @@ def audit_trace(
     candidates = tuple(
         path if path.is_absolute() else workspace / path for path in trace_paths
     )
-    existing = tuple(path for path in candidates if path.exists() or path.is_symlink())
-    if not existing:
+    if len(candidates) > MAX_TRACE_FILES:
+        return TraceResult(status="failed", findings=("too-many-trace-files",))
+    if not candidates:
         return TraceResult(status="unverified")
-    evidence_complete = len(existing) == len(candidates)
+    evidence_complete = True
     identities = identity_values(workspace)
     events = 0
     reads = 0
@@ -165,31 +213,43 @@ def audit_trace(
     }
     incomplete_next_phases: set[str] = set()
     stop_all = False
-    for file_index, absolute in enumerate(existing):
+    declared_bytes = 0
+    read_bytes = 0
+    for file_index, absolute in enumerate(candidates):
         if events >= MAX_TRACE_EVENTS:
-            for remaining in existing[file_index:]:
-                try:
-                    state = remaining.lstat()
-                except OSError:
-                    findings.add("trace-unreadable")
+            for remaining in candidates[file_index:]:
+                descriptor, state, open_status = _open_trace_descriptor(
+                    workspace, remaining
+                )
+                if open_status == "trace-missing":
+                    evidence_complete = False
                     continue
-                if stat.S_ISREG(state.st_mode) and state.st_size:
+                if open_status:
+                    findings.add(open_status)
+                    continue
+                assert state is not None
+                os.close(descriptor)
+                if state.st_size:
                     findings.add("too-many-trace-events")
                     break
-                if not stat.S_ISREG(state.st_mode):
-                    findings.add("trace-not-regular")
             break
         reads_before_file = reads
-        try:
-            absolute.resolve().relative_to(workspace)
-        except (OSError, ValueError):
-            findings.add("trace-outside-workspace")
+        descriptor, state, open_status = _open_trace_descriptor(workspace, absolute)
+        if open_status == "trace-missing":
+            evidence_complete = False
             continue
-        if absolute.is_symlink() or not absolute.is_file():
-            findings.add("trace-not-regular")
+        if open_status:
+            findings.add(open_status)
             continue
+        assert state is not None
+        declared_bytes += state.st_size
+        if declared_bytes > MAX_TRACE_BYTES:
+            os.close(descriptor)
+            findings.add("trace-bytes-limit")
+            break
         try:
-            with absolute.open("rb") as handle:
+            with os.fdopen(descriptor, "rb") as handle:
+                descriptor = -1
                 while True:
                     if events >= MAX_TRACE_EVENTS:
                         if handle.tell() < os.fstat(handle.fileno()).st_size:
@@ -198,6 +258,11 @@ def audit_trace(
                         break
                     raw_line = handle.readline(MAX_TRACE_LINE_BYTES + 1)
                     if not raw_line:
+                        break
+                    read_bytes += len(raw_line)
+                    if read_bytes > MAX_TRACE_BYTES:
+                        findings.add("trace-bytes-limit")
+                        stop_all = True
                         break
                     if len(raw_line) > MAX_TRACE_LINE_BYTES:
                         findings.add("trace-line-too-large")
@@ -257,6 +322,9 @@ def audit_trace(
                         findings.add("unknown-trace-event")
         except OSError:
             findings.add("trace-unreadable")
+        finally:
+            if descriptor >= 0:
+                os.close(descriptor)
         if reads == reads_before_file:
             evidence_complete = False
         if stop_all:
@@ -290,7 +358,7 @@ def audit_trace(
             evidence_complete = False
     blocking_findings = findings - {"missing-command-evidence"}
     failed = bool(prohibited or blocking_findings)
-    status = "failed" if failed else ("passed" if evidence_complete else "unverified")
+    status = "failed" if failed else "unverified"
     return TraceResult(
         status=status,
         events=min(events, MAX_TRACE_EVENTS),
@@ -595,6 +663,7 @@ def audit_workspace(
     root = candidate.resolve()
     if not root.is_dir():
         raise ConformanceError("The trial workspace must be one directory.")
+    validate_workspace_budget(root)
     marker = read_trial_marker(root)
     if expected_package is not None:
         package_baseline = expected_package

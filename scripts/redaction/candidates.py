@@ -18,7 +18,6 @@ one, the heuristics below still produce flags. A flag must never be dropped.
 from __future__ import annotations
 
 import re
-from bisect import bisect_right
 from dataclasses import dataclass
 
 CONTEXT_WIDTH = 60
@@ -124,6 +123,28 @@ class Candidate:
     context: str
 
 
+@dataclass(frozen=True)
+class ExcludedName:
+    """A visible name excluded from blocking detection, for private review."""
+
+    name: str
+    line: int
+    context: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class CandidateReview:
+    """Blocking candidates plus names intentionally excluded from them."""
+
+    candidates: tuple[Candidate, ...]
+    excluded: tuple[ExcludedName, ...]
+
+
+class CandidateReviewLimitError(ValueError):
+    """The private name-review item budget was exhausted."""
+
+
 def _cited_names(sentence: str) -> set[str]:
     """Return names cited with a year in this sentence, e.g. "Brady (2017)"."""
     return {match.group(1) for match in CITATION.finditer(sentence)}
@@ -140,7 +161,12 @@ def _context_at(sentence: str, start: int, end: int) -> str:
     return sentence[lo:hi].strip()
 
 
-def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidate]:
+def review_candidates(
+    text: str,
+    protected: tuple[str, ...] = (),
+    *,
+    max_items: int | None = None,
+) -> CandidateReview:
     """Return names appearing in personal contexts, skipping citations.
 
     Citations and possessive scope are judged sentence by sentence, so a
@@ -169,14 +195,46 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
     no longer maps directly back into the original text.
     """
     scholars = _cited_names(text)
-    masked = _mask(text, protected)
-    newlines = [index for index, character in enumerate(masked) if character == "\n"]
+    excluded: list[ExcludedName] = []
     found: list[Candidate] = []
+
+    def append_item(target: list, item: Candidate | ExcludedName) -> None:
+        if max_items is not None and len(found) + len(excluded) >= max_items:
+            raise CandidateReviewLimitError(
+                "The candidate review item limit was exceeded."
+            )
+        target.append(item)
+
+    protected_bytes = bytearray(len(text))
+    for name in _protected_forms(protected):
+        protected_line = 1
+        scanned_until = 0
+        for match in re.finditer(rf"\b{re.escape(name)}\b", text):
+            start, end = match.span()
+            protected_line += text.count("\n", scanned_until, start)
+            scanned_until = start
+            if any(protected_bytes[start:end]):
+                continue
+            protected_bytes[start:end] = b"\x01" * (end - start)
+            append_item(
+                excluded,
+                ExcludedName(
+                    name=name,
+                    line=protected_line,
+                    context=_context_at(text, start, end),
+                    reason="protected",
+                ),
+            )
+    masked = _mask(text, protected)
+    sentence_line = 1
+    scanned_until = 0
 
     for sentence_match in SENTENCE.finditer(masked):
         if not sentence_match.group(0).strip():
             continue
-        line = bisect_right(newlines, sentence_match.start()) + 1
+        sentence_line += masked.count("\n", scanned_until, sentence_match.start())
+        scanned_until = sentence_match.start()
+        line = sentence_line
         sentence = sentence_match.group(0).replace(_DOT, ".")
         cited = _cited_names(sentence)
 
@@ -189,14 +247,34 @@ def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidat
             matches.extend((m, True) for m in POSSESSIVE_PATTERN.finditer(sentence))
 
         seen_in_sentence: set[str] = set()
+        excluded_in_sentence: set[str] = set()
         for match, weak in sorted(matches, key=lambda pair: pair[0].start()):
             name = match.group(1)
-            if name in cited or name in seen_in_sentence:
+            if name in seen_in_sentence:
                 continue
-            if weak and name in scholars:
+            if name in cited or (weak and name in scholars):
+                if name not in excluded_in_sentence:
+                    append_item(
+                        excluded,
+                        ExcludedName(
+                            name=name,
+                            line=line,
+                            context=_context_at(sentence, match.start(), match.end()),
+                            reason="citation",
+                        ),
+                    )
+                    excluded_in_sentence.add(name)
                 continue
             seen_in_sentence.add(name)
             context = _context_at(sentence, match.start(), match.end())
-            found.append(Candidate(name, line, context))
+            append_item(found, Candidate(name, line, context))
 
-    return sorted(found, key=lambda c: (c.line, c.name))
+    return CandidateReview(
+        candidates=tuple(sorted(found, key=lambda c: (c.line, c.name))),
+        excluded=tuple(sorted(excluded, key=lambda c: (c.line, c.name, c.reason))),
+    )
+
+
+def find_candidates(text: str, protected: tuple[str, ...] = ()) -> list[Candidate]:
+    """Return only names that must block the model path."""
+    return list(review_candidates(text, protected).candidates)

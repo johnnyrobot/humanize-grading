@@ -36,15 +36,18 @@ from scripts.redaction.tokens import TokenMap  # noqa: E402
 class TokenMapRenderer:
     """Write rehydrated drafts while keeping identities outside grading modules."""
 
-    def __init__(self, token_map: TokenMap) -> None:
+    def __init__(self, token_map: TokenMap, map_sha256: str) -> None:
         self.batch = token_map.batch
         self.run_id = token_map.run_id
+        self.map_sha256 = map_sha256
         self._token_map = token_map
 
     @classmethod
     def load(cls, map_path: Path) -> "TokenMapRenderer":
         """Load the identity map inside the local renderer adapter."""
-        return cls(TokenMap.load(map_path))
+        map_bytes = read_bytes_limited(map_path, "The token map", 5 * 1024 * 1024)
+        token_map = TokenMap.from_bytes(map_bytes)
+        return cls(token_map, hashlib.sha256(map_bytes).hexdigest())
 
     def render(
         self, source: Path, destination: Path, expected_sha256: str

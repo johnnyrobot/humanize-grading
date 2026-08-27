@@ -40,6 +40,7 @@ from scripts.grading._conformance_trial import (
     private_directory,
     read_trial_marker,
     refuse_workspace_links,
+    validate_workspace_budget,
     workspace_directory_matches,
 )
 
@@ -399,6 +400,7 @@ def run_trial(
         stderr_log.close()
         if stdout_substituted or stderr_substituted:
             error = "log-substituted"
+        validate_workspace_budget(trial)
         refuse_workspace_links(
             trial,
             allow_identity_artifacts=True,

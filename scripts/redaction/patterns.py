@@ -39,6 +39,9 @@ PROFILE_URL = re.compile(
     r"|(?:x|twitter|facebook|instagram)\.com/(?!" + RESERVED_PATH + r"\b)[\w.-]+"
     r")"
 )
+KNOWN_ID_CANDIDATE = re.compile(
+    r"(?<!\w)[A-Za-z0-9](?:[A-Za-z0-9-]{0,126}[A-Za-z0-9])?(?!\w)"
+)
 
 _ORDER = (
     ("EMAIL", EMAIL),
@@ -70,13 +73,28 @@ def _sweep_known_ids(text: str, tmap: TokenMap) -> tuple[str, int]:
     so it needs no cue of its own. Values never cued are never swept, which is
     why "Docket ID 12345678" stays untouched.
     """
-    total = 0
+    replacements: dict[str, str] = {}
     for token, entity in list(tmap.tokens().items()):
-        if entity.kind != "ID":
+        if entity.kind == "ID" and entity.value:
+            replacements.setdefault(entity.value, token)
+    if not replacements:
+        return text, 0
+
+    pieces: list[str] = []
+    copied_until = 0
+    count = 0
+    for match in KNOWN_ID_CANDIDATE.finditer(text):
+        value = match.group(0)
+        token = replacements.get(value)
+        if token is None:
             continue
-        text, count = re.subn(rf"\b{re.escape(entity.value)}\b", token, text)
-        total += count
-    return text, total
+        pieces.extend((text[copied_until : match.start()], token))
+        copied_until = match.end()
+        count += 1
+    if not count:
+        return text, 0
+    pieces.append(text[copied_until:])
+    return "".join(pieces), count
 
 
 def redact_structured(

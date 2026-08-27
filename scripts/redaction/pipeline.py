@@ -16,6 +16,7 @@ outputs first -- never anything else someone put there on purpose.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -26,6 +27,7 @@ try:
         has_symlink_component,
         is_within,
         paths_overlap,
+        read_bytes_limited,
         require_component,
     )
 except ModuleNotFoundError:  # direct scripts/redact.py execution
@@ -33,17 +35,24 @@ except ModuleNotFoundError:  # direct scripts/redact.py execution
         has_symlink_component,
         is_within,
         paths_overlap,
+        read_bytes_limited,
         require_component,
     )
 
-from .candidates import Candidate, find_candidates
-from .documents import extract, output_name
+from .candidates import (
+    Candidate,
+    CandidateReviewLimitError,
+    ExcludedName,
+    review_candidates,
+)
+from .documents import MAX_FILE_BYTES, extract, output_name, read_submission_snapshot
 from .patterns import redact_structured
 from .private_files import write_private_text
+from .manifest import SCHEMA as MANIFEST_SCHEMA
 from .manifest import RedactionInvalidationError, RedactionManifest
 from .roster import BareHit, RosterEntry, full_name_variants, redact_roster
 from .selfid import SelfIdWarning, find_self_identifying
-from .tokens import TokenMap
+from .tokens import TokenMap, TokenMapLimitError
 
 EXIT_OK = 0
 EXIT_ROSTER = 2
@@ -63,6 +72,13 @@ UNKNOWN_PREFIX = "UNKNOWN"
 _TOKEN_OUTPUT_PATTERN = re.compile(rf"^(?:STUDENT|{UNKNOWN_PREFIX})_\d+\..+$")
 MAX_BATCH_FILES = 500
 MAX_BATCH_BYTES = 500 * 1024 * 1024
+MAX_PRIVATE_ARTIFACT_BYTES = 100 * 1024 * 1024
+REVIEW_SCHEMA = "redaction-review/1"
+MAX_REVIEW_NAME_ITEMS = 10_000
+
+
+class PrivateReviewLimitError(ValueError):
+    """The private review exceeded its public serialized byte limit."""
 
 
 def invalidate_existing_redaction(
@@ -128,6 +144,9 @@ class FileResult:
     token: str = ""
     output: Path | None = None
     candidates: list[Candidate] = field(default_factory=list)
+    excluded_names: list[ExcludedName] = field(default_factory=list)
+    metadata: list[str] = field(default_factory=list)
+    source_sha256: str = ""
     warnings: list[SelfIdWarning] = field(default_factory=list)
     bare_hits: list[BareHit] = field(default_factory=list)
     error: str = ""
@@ -143,6 +162,149 @@ class BatchResult:
     unmatched_roster: list[RosterEntry] = field(default_factory=list)
     exit_code: int = EXIT_OK
     message: str = ""
+    state_errors: list[str] = field(default_factory=list)
+    compact_review: bool = False
+
+
+def _sha256(path: Path, label: str, max_bytes: int) -> str:
+    """Hash one bounded regular artifact without exposing its contents."""
+    return hashlib.sha256(read_bytes_limited(path, label, max_bytes)).hexdigest()
+
+
+def _source_binding(source: Path, source_paths: list[Path]) -> list[dict[str, str | None]]:
+    """Read current processed source snapshots for approval comparison."""
+    records: list[dict[str, str | None]] = []
+    for path in source_paths:
+        if path.name.startswith("_"):
+            continue
+        relative = path.relative_to(source).as_posix()
+        digest: str | None = None
+        if not path.is_symlink():
+            try:
+                _, digest = read_submission_snapshot(path)
+            except (OSError, ValueError):
+                digest = None
+        records.append({"path": relative, "sha256": digest})
+    return records
+
+
+def _result_source_binding(
+    source: Path, files: list[FileResult]
+) -> list[dict[str, str | None]]:
+    """Bind the exact byte snapshots already used by extraction."""
+    return [
+        {
+            "path": entry.source.relative_to(source).as_posix(),
+            "sha256": entry.source_sha256 or None,
+        }
+        for entry in files
+    ]
+
+
+def _output_binding(outputs: list[Path]) -> list[dict[str, str]]:
+    """Describe the exact model-visible output membership and bytes."""
+    return [
+        {
+            "path": path.name,
+            "sha256": _sha256(path, "The redacted submission", MAX_FILE_BYTES),
+        }
+        for path in sorted(outputs, key=lambda item: item.name)
+    ]
+
+
+def _approval_path_error(
+    source: Path, destination: Path, map_path: Path, review_path: Path
+) -> str | None:
+    """Return why an approval role path is unsafe, or None when roles are separate."""
+    if has_symlink_component(source) or has_symlink_component(destination):
+        return "Submission and redacted-output roots must not be symlinks."
+    if paths_overlap(source, destination):
+        return "Submission and redacted-output directories must be separate."
+    if map_path == review_path or map_path.resolve() == review_path.resolve():
+        return "The token map and review file must use separate paths."
+    for label, private_path in (("token map", map_path), ("review file", review_path)):
+        if has_symlink_component(private_path) or any(
+            is_within(private_path, root, follow_symlinks=follow)
+            for root in (source, destination)
+            for follow in (False, True)
+        ):
+            return (
+                f"The {label} must be a regular local file outside the "
+                "submission and redacted-output directories."
+            )
+    return None
+
+
+def _approve_existing_review(
+    *,
+    source: Path,
+    destination: Path,
+    map_path: Path,
+    review_path: Path,
+    batch: str,
+) -> BatchResult:
+    """Approve only the exact existing run and private report the instructor read."""
+    try:
+        path_error = _approval_path_error(source, destination, map_path, review_path)
+        if path_error:
+            return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=path_error)
+        manifest = RedactionManifest.load(destination)
+        if manifest.schema != MANIFEST_SCHEMA:
+            raise ValueError("A fresh current-schema redaction is required before review.")
+        if manifest.batch != batch:
+            raise ValueError("The redaction manifest belongs to another grading batch.")
+        if manifest.reviewed or manifest.exit_code not in {EXIT_OK, EXIT_CANDIDATES}:
+            raise ValueError("No eligible unreviewed redaction is waiting for approval.")
+        manifest.validate(destination)
+
+        map_bytes = read_bytes_limited(map_path, "The token map", 5 * 1024 * 1024)
+        map_digest = hashlib.sha256(map_bytes).hexdigest()
+        review_bytes = read_bytes_limited(
+            review_path, "The private redaction review", MAX_PRIVATE_ARTIFACT_BYTES
+        )
+        review_digest = hashlib.sha256(review_bytes).hexdigest()
+        if map_digest != manifest.map_sha256 or review_digest != manifest.review_sha256:
+            raise ValueError("The private redaction evidence changed after it was written.")
+
+        token_map = TokenMap.from_bytes(map_bytes)
+        if token_map.batch != batch or token_map.run_id != manifest.run_id:
+            raise ValueError("The token map does not belong to this redaction run.")
+
+        review = json.loads(review_bytes.decode("utf-8"))
+        binding = review.get("binding") if isinstance(review, dict) else None
+        source_paths = sorted(
+            path
+            for path in source.rglob("*")
+            if path.is_file() or path.is_symlink()
+        )
+        expected_outputs = [
+            {"path": path, "sha256": digest} for path, digest in manifest.outputs
+        ]
+        if not isinstance(binding, dict) or binding != {
+            "schema": REVIEW_SCHEMA,
+            "batch": batch,
+            "run_id": manifest.run_id,
+            "sources": _source_binding(source, source_paths),
+            "outputs": expected_outputs,
+            "map_sha256": map_digest,
+        }:
+            raise ValueError("The private review does not match the current redaction run.")
+
+        RedactionManifest(
+            batch=manifest.batch,
+            run_id=manifest.run_id,
+            reviewed=True,
+            exit_code=EXIT_OK,
+            map_sha256=manifest.map_sha256,
+            review_sha256=manifest.review_sha256,
+            outputs=manifest.outputs,
+        ).save(destination)
+        return BatchResult(exit_code=EXIT_OK, message="Approved the existing redaction review.")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        return BatchResult(
+            exit_code=EXIT_CANDIDATES,
+            message=f"Could not approve the private redaction review: {error}",
+        )
 
 
 def run(
@@ -192,6 +354,10 @@ def run(
     ``ambiguous_authorship`` in the review file, listing every student
     named and the token that was chosen -- position is a good heuristic,
     not a guarantee, and it never changes the exit code.
+
+    ``reviewed=True`` is an approval operation. It does not run redaction
+    again. It verifies the existing source, outputs, map, review, and run
+    bindings, then marks only that exact manifest reviewed.
     """
     if review_path is None:
         review_path = map_path.parent / "reviews" / f"{batch}.json"
@@ -200,6 +366,15 @@ def run(
         require_component(batch, "The grading batch")
     except ValueError as error:
         return BatchResult(exit_code=EXIT_UNSAFE_PATH, message=str(error))
+
+    if reviewed:
+        return _approve_existing_review(
+            source=source,
+            destination=destination,
+            map_path=map_path,
+            review_path=review_path,
+            batch=batch,
+        )
 
     try:
         invalidate_existing_redaction(
@@ -295,6 +470,7 @@ def run(
     matched_names: set[str] = set()
     unknown_count = 0
     claimed_tokens: dict[str, Path] = {}
+    review_name_items = 0
 
     for path in source_paths:
         if path.name.startswith("_"):
@@ -309,6 +485,7 @@ def run(
             result.files.append(entry)
             continue
         extracted = extract(path)
+        entry.source_sha256 = extracted.source_sha256
         if extracted.error:
             entry.error = extracted.error
             result.files.append(entry)
@@ -319,29 +496,68 @@ def run(
             result.files.append(entry)
             continue
 
-        # Metadata (docx author, last-editor, title, headers, footers, ...)
-        # carries identity outside the visible body. Prepending each string
-        # makes it tokenizable by the same passes that scan the body, so
-        # none of it is silently dropped.
+        # Metadata may identify the author, but it is not submission body and
+        # must never enter the model-visible output. Scan it separately for
+        # roster attribution and keep the original values only in the private
+        # review report.
         text = extracted.text
-        for value in extracted.metadata:
-            text = f"{value}\n{text}"
+        entry.metadata = list(extracted.metadata)
+        metadata_text = "\n".join(extracted.metadata)
+        attribution_text = "\n".join(
+            value for value in (metadata_text, text) if value
+        )
 
         # Attribution must be decided against the RAW text, before any name
         # becomes a token and before roster order can influence anything --
         # see _named_students.
-        named = _named_students(text, roster)
+        named = _named_students(attribution_text, roster)
         entry.named_students = [e.name for _, e in named]
 
-        roster_result = redact_roster(
-            text, roster, tmap, path.name, protected=protected, bare_names=bare_names
-        )
-        matched_names |= roster_result.matched
-        entry.bare_hits = roster_result.bare_hits
+        try:
+            if metadata_text:
+                metadata_roster = redact_roster(
+                    metadata_text,
+                    roster,
+                    tmap,
+                    path.name,
+                    protected=protected,
+                    bare_names=False,
+                )
+                matched_names |= metadata_roster.matched
 
-        text, _ = redact_structured(roster_result.text, tmap, path.name)
+            roster_result = redact_roster(
+                text,
+                roster,
+                tmap,
+                path.name,
+                protected=protected,
+                bare_names=bare_names,
+            )
+            matched_names |= roster_result.matched
+            entry.bare_hits = roster_result.bare_hits
 
-        entry.candidates = find_candidates(text, protected=protected)
+            text, _ = redact_structured(roster_result.text, tmap, path.name)
+        except TokenMapLimitError as error:
+            entry.error = f"Could not redact {path.name}: {error}"
+            result.state_errors.append(str(error))
+            result.files.append(entry)
+            continue
+
+        try:
+            candidate_review = review_candidates(
+                text,
+                protected=protected,
+                max_items=MAX_REVIEW_NAME_ITEMS - review_name_items,
+            )
+        except CandidateReviewLimitError as error:
+            entry.error = f"Could not review {path.name}: {error}"
+            result.state_errors.append(str(error))
+            result.compact_review = True
+            result.files.append(entry)
+            break
+        entry.candidates = list(candidate_review.candidates)
+        entry.excluded_names = list(candidate_review.excluded)
+        review_name_items += len(entry.candidates) + len(entry.excluded_names)
         entry.warnings = find_self_identifying(text)
 
         file_student_tokens = {
@@ -377,8 +593,17 @@ def run(
             )
             result.files.append(entry)
             continue
+        output_bytes = text.encode("utf-8")
+        if len(output_bytes) > MAX_FILE_BYTES:
+            entry.error = (
+                f"Could not write {path.name}: the redacted UTF-8 output exceeds "
+                f"{MAX_FILE_BYTES} bytes."
+            )
+            result.state_errors.append(entry.error)
+            result.files.append(entry)
+            continue
         claimed_tokens[entry.token] = path
-        output.write_text(text, encoding="utf-8")
+        write_private_text(output, text)
         entry.output = output
         result.files.append(entry)
 
@@ -391,30 +616,59 @@ def run(
         result.exit_code = EXIT_UNREADABLE
     elif result.unmatched_roster:
         result.exit_code = EXIT_ROSTER
-    elif any(f.candidates for f in result.files) and not reviewed:
+    elif any(f.candidates for f in result.files):
         result.exit_code = EXIT_CANDIDATES
 
+    outputs = [file.output for file in result.files if file.output is not None]
+    try:
+        map_bytes = tmap.to_bytes()
+    except TokenMapLimitError as error:
+        result.exit_code = EXIT_UNREADABLE
+        result.message = str(error)
+        result.state_errors.append(str(error))
+        tmap = TokenMap(batch, run_id=tmap.run_id)
+        map_bytes = tmap.to_bytes()
+    write_private_text(map_path, map_bytes.decode("utf-8"))
+    map_sha256 = hashlib.sha256(map_bytes).hexdigest()
+    binding = {
+        "schema": REVIEW_SCHEMA,
+        "batch": batch,
+        "run_id": tmap.run_id,
+        "sources": _result_source_binding(source, result.files),
+        "outputs": _output_binding(outputs),
+        "map_sha256": map_sha256,
+    }
+    review_bytes = _write_review(review_path, result, binding=binding)
+    review_sha256 = hashlib.sha256(review_bytes).hexdigest()
     RedactionManifest.create(
         batch,
         tmap.run_id,
-        [file.output for file in result.files if file.output is not None],
-        reviewed=reviewed,
+        outputs,
+        reviewed=False,
         exit_code=result.exit_code,
+        map_sha256=map_sha256,
+        review_sha256=review_sha256,
     ).save(destination)
-    tmap.save(map_path)
-    _write_review(review_path, result)
 
     return result
 
 
-def _write_review(review_path: Path, result: BatchResult) -> None:
+def _write_review(
+    review_path: Path, result: BatchResult, *, binding: dict[str, object]
+) -> bytes:
     """Write everything a human must look at before the cloud path, owner-only.
 
     This file is the one place unredacted candidate names are written to
     disk on purpose, so it is written owner-only, like the map, and it must
     never live inside the redacted output directory.
     """
+    if result.compact_review:
+        data = b'{"error":"candidate review item limit exceeded"}'
+        write_private_text(review_path, data.decode("utf-8"))
+        return data
     payload = {
+        "binding": binding,
+        "state_errors": result.state_errors,
         "errors": [
             {"file": f.source.name, "error": f.error}
             for f in result.files
@@ -425,6 +679,33 @@ def _write_review(review_path: Path, result: BatchResult) -> None:
              "line": c.line, "context": c.context}
             for f in result.files
             for c in f.candidates
+        ],
+        "excluded_names": [
+            {
+                "file": f.output.name if f.output else f.source.name,
+                "name": item.name,
+                "line": item.line,
+                "context": item.context,
+                "reason": item.reason,
+            }
+            for f in result.files
+            for item in f.excluded_names
+        ],
+        "document_metadata": [
+            {
+                "file": f.output.name if f.output else f.source.name,
+                "value": value,
+            }
+            for f in result.files
+            for value in f.metadata
+        ],
+        "unmatched_roster": [
+            {
+                "name": entry.name,
+                "student_id": entry.student_id,
+                "email": entry.email,
+            }
+            for entry in result.unmatched_roster
         ],
         "self_identifying": [
             {"file": f.output.name if f.output else f.source.name, "line": w.line,
@@ -453,4 +734,29 @@ def _write_review(review_path: Path, result: BatchResult) -> None:
             if len(f.named_students) > 1
         ],
     }
-    write_private_text(review_path, json.dumps(payload, indent=2))
+    try:
+        data = _bounded_json_bytes(payload, MAX_PRIVATE_ARTIFACT_BYTES)
+    except PrivateReviewLimitError:
+        message = "The private redaction review exceeded its byte limit."
+        result.exit_code = EXIT_UNREADABLE
+        result.message = message
+        result.state_errors.append(message)
+        data = b'{"error":"private review exceeded its byte limit"}'
+        if len(data) > MAX_PRIVATE_ARTIFACT_BYTES:
+            raise PrivateReviewLimitError(message)
+    write_private_text(review_path, data.decode("utf-8"))
+    return data
+
+
+def _bounded_json_bytes(payload: object, max_bytes: int) -> bytes:
+    """Encode JSON while retaining no more than max_bytes in memory."""
+    encoded = bytearray()
+    encoder = json.JSONEncoder(indent=2, sort_keys=True)
+    for piece in encoder.iterencode(payload):
+        chunk = piece.encode("utf-8")
+        if len(encoded) + len(chunk) > max_bytes:
+            raise PrivateReviewLimitError(
+                "The private redaction review exceeded its byte limit."
+            )
+        encoded.extend(chunk)
+    return bytes(encoded)

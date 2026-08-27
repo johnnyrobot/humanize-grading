@@ -58,6 +58,9 @@ Your central claim holds. You named the mechanism instead of gesturing at it.
 — Dr. Vance
 """
 
+TEST_MAP_SHA256 = hashlib.sha256(b"test-token-map").hexdigest()
+TEST_REVIEW_SHA256 = hashlib.sha256(b"test-review").hexdigest()
+
 
 @pytest.fixture(scope="module")
 def terms():
@@ -382,12 +385,16 @@ def _refresh_redaction_manifest(
     try:
         manifest = RedactionManifest.load(redacted)
         run_id = manifest.run_id
+        map_sha256 = manifest.map_sha256
+        review_sha256 = manifest.review_sha256
         if reviewed is None:
             reviewed = manifest.reviewed
         if exit_code is None:
             exit_code = manifest.exit_code
     except (OSError, ValueError, json.JSONDecodeError):
         run_id = "test-redaction-run"
+        map_sha256 = TEST_MAP_SHA256
+        review_sha256 = TEST_REVIEW_SHA256
         if reviewed is None:
             reviewed = True
         if exit_code is None:
@@ -398,6 +405,8 @@ def _refresh_redaction_manifest(
         [path for path in redacted.iterdir() if not path.name.startswith("_")],
         reviewed=reviewed,
         exit_code=exit_code,
+        map_sha256=map_sha256,
+        review_sha256=review_sha256,
     ).save(redacted)
 
 

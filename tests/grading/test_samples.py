@@ -33,6 +33,46 @@ def test_it_reads_the_header_block(phil210):
     assert sample.header["Course"] == "PHIL/POLISCI 210"
 
 
+def test_more_than_one_student_header_is_refused_without_echoing_names(tmp_path):
+    path = tmp_path / "ambiguous-student.md"
+    path.write_text(
+        "**Student**: Maya Lin\n"
+        "**student**: Samantha Chen\n\n"
+        "### Student Submission\n\nEssay.\n\n"
+        "### Instructor Feedback & Grading\n\n"
+        "**Grade**: 90/100 (A-)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SampleError) as raised:
+        load_sample(path)
+
+    message = str(raised.value)
+    assert "exactly one Student header" in message
+    assert "Maya" not in message
+    assert "Samantha" not in message
+
+
+def test_a_malformed_second_student_header_is_refused(tmp_path):
+    path = tmp_path / "malformed-student.md"
+    path.write_text(
+        "**Student**: Maya Lin\n"
+        "**Student** Samantha Chen\n\n"
+        "### Student Submission\n\nEssay.\n\n"
+        "### Instructor Feedback & Grading\n\n"
+        "**Grade**: 90/100 (A-)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SampleError) as raised:
+        load_sample(path)
+
+    message = str(raised.value)
+    assert "exactly one Student header" in message
+    assert "Maya" not in message
+    assert "Samantha" not in message
+
+
 def test_it_separates_the_essay_from_the_feedback(phil210):
     sample = load_sample(phil210 / PAPER_1)
     assert "Jürgen Habermas envisioned an idealized forum" in sample.essay

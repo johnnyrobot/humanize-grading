@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-bare-names", action="store_true",
                         help="Skip bare first and last names")
     parser.add_argument("--reviewed", action="store_true",
-                        help="Confirm you read the review file")
+                        help="Approve the existing exact private review without rerunning")
     parser.add_argument(
         "--force",
         action="store_true",
@@ -76,24 +76,28 @@ def main(argv: list[str] | None = None) -> int:
     map_path = args.map or Path(".grading/maps") / f"{args.batch}.json"
     review_path = args.review or map_path.parent / "reviews" / f"{args.batch}.json"
 
-    try:
-        invalidate_existing_redaction(
-            source=args.source,
-            destination=args.out,
-            map_path=map_path,
-            review_path=review_path,
-            batch=args.batch,
-            exit_code=EXIT_UNREADABLE,
-        )
-    except RedactionInvalidationError as error:
-        print(str(error), file=sys.stderr)
-        return EXIT_UNSAFE_PATH
-
-    try:
-        roster = load_roster(args.roster)
-    except (OSError, UnicodeError, ValueError, KeyError) as error:
-        print(f"Could not read the roster safely: {error}", file=sys.stderr)
-        return 4
+    if args.reviewed:
+        # Approval verifies the already-written source, output, map, review,
+        # and run bindings. It must not reread or depend on a new roster.
+        roster = []
+    else:
+        try:
+            invalidate_existing_redaction(
+                source=args.source,
+                destination=args.out,
+                map_path=map_path,
+                review_path=review_path,
+                batch=args.batch,
+                exit_code=EXIT_UNREADABLE,
+            )
+        except RedactionInvalidationError as error:
+            print(str(error), file=sys.stderr)
+            return EXIT_UNSAFE_PATH
+        try:
+            roster = load_roster(args.roster)
+        except (OSError, UnicodeError, ValueError, KeyError) as error:
+            print(f"Could not read the roster safely: {error}", file=sys.stderr)
+            return 4
 
     result = run(
         source=args.source,
@@ -108,6 +112,17 @@ def main(argv: list[str] | None = None) -> int:
         force=args.force,
     )
 
+    if args.reviewed:
+        stream = sys.stdout if result.exit_code == EXIT_OK else sys.stderr
+        print(result.message or "The private redaction review was not approved.", file=stream)
+        if result.exit_code != EXIT_OK:
+            print(
+                "\nRedaction did not complete cleanly. Do not send this to a "
+                "cloud model.",
+                file=sys.stderr,
+            )
+        return result.exit_code
+
     if result.exit_code in {EXIT_DESTINATION_NOT_EMPTY, EXIT_UNSAFE_PATH}:
         print(result.message, file=sys.stderr)
         print("\nRedaction did not complete cleanly. Do not send this to a "
@@ -121,8 +136,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  ERROR {label}: could not be redacted safely. See {review_path}.")
         elif entry.skipped_empty:
             print(f"  SKIPPED (empty submission) {label}")
-    for entry in result.unmatched_roster:
-        print(f"  UNMATCHED roster entry never found: {entry.name}")
+    unmatched = len(result.unmatched_roster)
+    if unmatched:
+        noun = "entry" if unmatched == 1 else "entries"
+        print(f"  {unmatched} unmatched roster {noun}. See {review_path}.")
     flagged = sum(len(f.candidates) for f in result.files)
     warned = sum(len(f.warnings) for f in result.files)
     bare = sum(len(f.bare_hits) for f in result.files)

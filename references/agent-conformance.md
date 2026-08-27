@@ -100,11 +100,13 @@ Each line is one `grading-agent-trace/1` event:
 ```
 
 `phase` is `briefing`, `redaction`, or `grading`; omitted read phases default
-to `grading`. The trace is limited to 10,000 events and 1 MiB per line. Command
-events use the same argument count and item limits as adapters.
+to `grading`. The trace is limited to 16 files, 16 MiB in total, 10,000 events,
+and 1 MiB per line. Command events use the same argument count and item limits
+as adapters.
 
-A passing phase trace needs successful `grade.py next --json` command events
-before and after at least one successful non-next command. The grade script
+A structurally complete phase trace needs successful `grade.py next --json`
+command events before and after at least one successful non-next command. The
+grade script
 argument must be immediately followed by `next`, and the argv must contain
 `--json`. The first command must be the opening `next`; the last command must
 be the closing `next`. Reads do not count as phase work. Read-only, partial,
@@ -121,15 +123,23 @@ trial. The trusted local checker may read the synthetic roster to scan for
 identity leaks. It records only existence and mode for the token map and review
 file; it never embeds their content.
 
-No trace, an empty trace, or a trace with commands but no read event is
-`UNVERIFIED`. Artifact success is never treated as proof of safe reads.
+Runtime-supplied traces are self-reported. A clean trace remains `UNVERIFIED`;
+it can support review but cannot prove safe reads. A prohibited read or
+malformed trace still fails the trial. No trace, an empty trace, or a trace
+with commands but no read event is also `UNVERIFIED`. Artifact success is never
+treated as proof of safe reads.
 
 ## Evidence and report limits
 
 The harness copies only files named by `PACKAGE_FILES.txt`. It refuses package
-links, paths outside the repository, and observed workspace links. Agent
-stdout and stderr are each limited to 2 MiB. Stored logs, traces created during
-`run`, and JSON and Markdown reports use owner-only permissions.
+links, paths outside the repository, Python bytecode caches, and observed
+workspace links. A package may contain at most 1,024 files, 25 MiB per file,
+and 128 MiB in total. Copied package directories are read-only so ordinary
+manual Python commands do not create unreviewed bytecode caches. A trial
+workspace may contain at most 10,000 entries, 512 MiB of regular files, and 32
+directory levels. Agent stdout and stderr are each limited to 2 MiB. Stored
+logs, traces created during `run`, and JSON and Markdown reports use owner-only
+permissions.
 
 Package copying and later checks bind each reviewed file to its descriptor,
 path, exact bytes, mode, and SHA-256. The report records the complete package
@@ -158,9 +168,10 @@ values and private map or review contents are not report fields.
 
 Interpret the summary as follows:
 
-- `PASS`: deterministic checks passed and the supplied read trace passed.
-- `UNVERIFIED`: deterministic checks passed, but no read trace proved the
-  agent's reads.
+- `PASS`: reserved for trusted read evidence; runtime-supplied traces cannot
+  produce this result.
+- `UNVERIFIED`: deterministic checks passed, but no trusted evidence proved the
+  agent's reads. A clean self-reported trace remains in this state.
 - `FAIL`: a process, artifact, lifecycle, privacy, or supplied trace check
   failed.
 

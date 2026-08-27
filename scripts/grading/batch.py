@@ -199,6 +199,8 @@ class PublicationInspector(Protocol):
 class RehydrationRenderer(PublicationInspector, Protocol):
     """Write identity-bearing output without returning its text."""
 
+    map_sha256: str
+
     def render(
         self, source: Path, destination: Path, expected_sha256: str
     ) -> RenderResult: ...
@@ -221,6 +223,7 @@ class VerifiedBatch:
         "_paths",
         "_receipt_digest",
         "_redaction_run_id",
+        "_map_sha256",
         "_draft_digests",
     )
 
@@ -230,6 +233,7 @@ class VerifiedBatch:
         receipt_digest: str,
         key: object,
         redaction_run_id: str = "",
+        map_sha256: str = "",
         draft_digests: dict[str, str] | None = None,
     ) -> None:
         if key is not _VERIFIED_BATCH_KEY:
@@ -240,13 +244,39 @@ class VerifiedBatch:
         self._paths = paths
         self._receipt_digest = receipt_digest
         self._redaction_run_id = redaction_run_id
+        self._map_sha256 = map_sha256
         self._draft_digests = dict(draft_digests or {})
 
     @classmethod
-    def _create(cls, paths: BatchPaths, receipt: Path) -> "VerifiedBatch":
-        digest = _receipt_digest(receipt)
-        manifest = RedactionManifest.load(paths.redacted)
-        decoded = _decode_receipt(receipt)
+    def _create(
+        cls,
+        paths: BatchPaths,
+        receipt: Path,
+        *,
+        receipt_bytes: bytes | None = None,
+    ) -> "VerifiedBatch":
+        if receipt_bytes is None:
+            receipt_bytes = read_bytes_limited(
+                receipt, "The verification receipt", 10 * 1024 * 1024
+            )
+        digest = hashlib.sha256(receipt_bytes).hexdigest()
+        decoded = _decode_receipt_bytes(receipt_bytes)
+        artifacts = _validated_receipt_artifacts(decoded, paths)
+        manifest_artifact = next(
+            item for item in artifacts if item["role"] == "redaction-manifest"
+        )
+        locator = Path(manifest_artifact["path"])
+        manifest_path = (
+            locator if locator.is_absolute() else receipt.parent / locator
+        )
+        manifest_bytes = read_bytes_limited(
+            manifest_path, "The redaction manifest", 1_048_576
+        )
+        if hashlib.sha256(manifest_bytes).hexdigest() != manifest_artifact["sha256"]:
+            raise ValueError(
+                "The redaction manifest changed while the verified batch was created."
+            )
+        manifest = RedactionManifest.from_bytes(manifest_bytes)
         draft_digests = {
             Path(item["path"]).name: item["sha256"]
             for item in decoded.artifacts
@@ -260,6 +290,7 @@ class VerifiedBatch:
             digest,
             _VERIFIED_BATCH_KEY,
             redaction_run_id=manifest.run_id,
+            map_sha256=manifest.map_sha256,
             draft_digests=draft_digests,
         )
 
@@ -283,13 +314,69 @@ class VerifiedBatch:
                     for finding in status.blocking_findings
                 ),
             )
-        context_findings = _receipt_context_findings(receipt, paths, inputs)
+        try:
+            receipt_bytes = read_bytes_limited(
+                receipt, "The verification receipt", 10 * 1024 * 1024
+            )
+            decoded_receipt = _decode_receipt_bytes(receipt_bytes)
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+            return VerifiedBatchResume(
+                verified_batch=None,
+                findings=(
+                    BlockingFinding(
+                        code="stale-verification-receipt",
+                        message=(
+                            "The verification receipt changed during publication "
+                            f"revalidation: {error}"
+                        ),
+                        token="",
+                    ),
+                ),
+            )
+        context_findings = _receipt_context_findings(
+            receipt,
+            paths,
+            inputs,
+            decoded=decoded_receipt,
+        )
         if context_findings:
             return VerifiedBatchResume(
                 verified_batch=None,
                 findings=context_findings,
             )
         semantic = GradingBatch.open(paths).verify(inputs, persist=False)
+        try:
+            current_receipt_bytes = read_bytes_limited(
+                receipt, "The verification receipt", 10 * 1024 * 1024
+            )
+        except (OSError, ValueError) as error:
+            return VerifiedBatchResume(
+                verified_batch=None,
+                findings=(
+                    BlockingFinding(
+                        code="stale-verification-receipt",
+                        message=(
+                            "The verification receipt changed during publication "
+                            f"revalidation: {error}"
+                        ),
+                        token="",
+                    ),
+                ),
+            )
+        if current_receipt_bytes != receipt_bytes:
+            return VerifiedBatchResume(
+                verified_batch=None,
+                findings=(
+                    BlockingFinding(
+                        code="stale-verification-receipt",
+                        message=(
+                            "The verification receipt changed during publication "
+                            "revalidation. Run verification again before publication."
+                        ),
+                        token="",
+                    ),
+                ),
+            )
         if semantic.blocking_findings:
             return VerifiedBatchResume(
                 verified_batch=None,
@@ -301,8 +388,28 @@ class VerifiedBatch:
                     for finding in semantic.blocking_findings
                 ),
             )
+        try:
+            verified_batch = cls._create(
+                paths,
+                receipt,
+                receipt_bytes=receipt_bytes,
+            )
+        except (OSError, UnicodeError, ValueError, TypeError, KeyError) as error:
+            return VerifiedBatchResume(
+                verified_batch=None,
+                findings=(
+                    BlockingFinding(
+                        code="stale-verification-receipt",
+                        message=(
+                            "Receipt-bound evidence changed during publication "
+                            f"revalidation: {error}"
+                        ),
+                        token="",
+                    ),
+                ),
+            )
         return VerifiedBatchResume(
-            verified_batch=cls._create(paths, receipt),
+            verified_batch=verified_batch,
             findings=(),
         )
 
@@ -360,6 +467,17 @@ class VerifiedBatch:
                     message=(
                         "The token map belongs to a different redaction result. "
                         "Use the map created with this grading batch."
+                    ),
+                    token="",
+                )
+            )
+        if renderer.map_sha256 != self._map_sha256:
+            findings.append(
+                BlockingFinding(
+                    code="renderer-map-mismatch",
+                    message=(
+                        "The token map changed after redaction. Use the exact map "
+                        "bound by this grading batch."
                     ),
                     token="",
                 )
@@ -475,19 +593,27 @@ class VerifiedBatch:
                             token=entry.token,
                         )
                     )
-                if not result.error and (
-                    not destination.is_file() or len(result.sha256) != 64
-                ):
-                    findings.append(
-                        BlockingFinding(
-                            code="render-failed",
-                            message="The renderer did not write a verifiable draft.",
-                            token=entry.token,
+                rendered_digest = ""
+                if not result.error:
+                    try:
+                        rendered_digest = hashlib.sha256(
+                            read_bytes_limited(
+                                destination,
+                                "The rehydrated feedback",
+                                2 * 1024 * 1024,
+                            )
+                        ).hexdigest()
+                    except (OSError, ValueError) as error:
+                        findings.append(
+                            BlockingFinding(
+                                code="render-failed",
+                                message=str(error),
+                                token=entry.token,
+                            )
                         )
-                    )
-                elif not result.error:
+                if rendered_digest:
                     outputs.append(
-                        {"path": destination.name, "sha256": result.sha256}
+                        {"path": destination.name, "sha256": rendered_digest}
                     )
             if findings:
                 return PublicationReport(
@@ -510,6 +636,13 @@ class VerifiedBatch:
                 + "\n",
                 encoding="utf-8",
             )
+            staged_findings = _validate_staged_outputs(staging, outputs)
+            if staged_findings:
+                return PublicationReport(
+                    destination=target,
+                    progress=Progress.VERIFIED,
+                    findings=staged_findings,
+                )
             if target_has_content:
                 backup = _publication_backup(target)
                 try:
@@ -553,6 +686,33 @@ class VerifiedBatch:
                             ),
                         ),
                         )
+                installed_findings = _validate_installed_outputs(
+                    target,
+                    outputs,
+                    self._paths.batch,
+                    current_digest,
+                )
+                if installed_findings:
+                    try:
+                        target.replace(staging)
+                        backup.replace(target)
+                    except OSError as error:
+                        return PublicationReport(
+                            destination=target,
+                            progress=Progress.VERIFIED,
+                            findings=(
+                                _publication_finding(
+                                    "publication-recovery-required",
+                                    "The installed publication changed and the prior "
+                                    f"publication could not be restored: {error}",
+                                ),
+                            ),
+                        )
+                    return PublicationReport(
+                        destination=target,
+                        progress=Progress.VERIFIED,
+                        findings=installed_findings,
+                    )
                 try:
                     (target / TRANSACTION_NAME).unlink()
                 except OSError:
@@ -565,6 +725,32 @@ class VerifiedBatch:
                 if target.is_dir():
                     target.rmdir()
                 staging.replace(target)
+                installed_findings = _validate_installed_outputs(
+                    target,
+                    outputs,
+                    self._paths.batch,
+                    current_digest,
+                )
+                if installed_findings:
+                    try:
+                        target.replace(staging)
+                    except OSError as error:
+                        return PublicationReport(
+                            destination=target,
+                            progress=Progress.VERIFIED,
+                            findings=(
+                                _publication_finding(
+                                    "publication-recovery-required",
+                                    "The installed publication changed and could not "
+                                    f"be removed safely: {error}",
+                                ),
+                            ),
+                        )
+                    return PublicationReport(
+                        destination=target,
+                        progress=Progress.VERIFIED,
+                        findings=installed_findings,
+                    )
                 try:
                     (target / TRANSACTION_NAME).unlink()
                 except OSError:
@@ -636,6 +822,12 @@ class _DecodedReceipt:
     batch: str
     course: str
     artifacts: tuple[object, ...]
+
+
+@dataclass(frozen=True)
+class _WrittenReceipt:
+    path: Path
+    data: bytes
 
 
 @dataclass(frozen=True)
@@ -1105,13 +1297,14 @@ class GradingBatch:
                     )
 
         receipt = None
-        if persist and not blocking:
+        receipt_bytes = None
+        if not blocking:
             try:
                 current = self._status(check_receipt=False)
                 current_digests = _verification_digests(
                     self.paths, inputs, current
                 )
-            except OSError as error:
+            except (OSError, UnicodeError, ValueError) as error:
                 blocking.append(
                     BlockingFinding(
                         code="batch-changed",
@@ -1119,18 +1312,19 @@ class GradingBatch:
                         token="",
                     )
                 )
-                current_digests = {}
-            if not blocking and current_digests != initial_digests:
-                blocking.append(
-                    BlockingFinding(
-                        code="batch-changed",
-                        message=(
-                            "The grading batch changed during verification. Run "
-                            "verification again on the current files."
-                        ),
-                        token="",
+            else:
+                if current_digests != initial_digests:
+                    blocking.append(
+                        BlockingFinding(
+                            code="batch-changed",
+                            message=(
+                                "The grading batch changed during verification. Run "
+                                "verification again on the current files."
+                            ),
+                            token="",
+                        )
                     )
-                )
+        if persist and not blocking:
             staged: list[tuple[Path, Path, Path]] = []
             preserved_backups: set[Path] = set()
             try:
@@ -1167,9 +1361,11 @@ class GradingBatch:
                         for path, temporary, backup in staged:
                             temporary.replace(path)
                             installed.append((path, backup))
-                        receipt = _write_verification_receipt(
+                        written_receipt = _write_verification_receipt(
                             self.paths, inputs, status, receipt_digests
                         )
+                        receipt = written_receipt.path
+                        receipt_bytes = written_receipt.data
                     except OSError as error:
                         restore_errors: list[str] = []
                         for path, backup in reversed(installed):
@@ -1192,6 +1388,7 @@ class GradingBatch:
                             )
                         )
                         receipt = None
+                        receipt_bytes = None
             except OSError as error:
                 blocking.append(
                     BlockingFinding(
@@ -1201,6 +1398,7 @@ class GradingBatch:
                     )
                 )
                 receipt = None
+                receipt_bytes = None
             finally:
                 for _, temporary, backup in staged:
                     for transient in (temporary, backup):
@@ -1222,8 +1420,12 @@ class GradingBatch:
             failure=failure,
             receipt=receipt,
             verified_batch=(
-                VerifiedBatch._create(self.paths, receipt)
-                if receipt is not None
+                VerifiedBatch._create(
+                    self.paths,
+                    receipt,
+                    receipt_bytes=receipt_bytes,
+                )
+                if receipt is not None and receipt_bytes is not None
                 else None
             ),
         )
@@ -1325,7 +1527,7 @@ def _write_verification_receipt(
     inputs: VerificationInputs,
     status: StatusReport,
     digests: dict[Path, str],
-) -> Path:
+) -> _WrittenReceipt:
     receipt = paths.drafts / RECEIPT_NAME
     base = receipt.parent.resolve()
     artifacts: list[dict[str, str]] = []
@@ -1355,20 +1557,23 @@ def _write_verification_receipt(
         "hash": "sha256",
         "artifacts": artifacts,
     }
+    receipt_bytes = (
+        json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    ).encode("utf-8")
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=f".{receipt.name}.", suffix=".tmp", dir=receipt.parent
     )
     temporary = Path(temporary_name)
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(receipt_bytes)
             handle.flush()
             os.fsync(handle.fileno())
         temporary.replace(receipt)
     finally:
         if temporary.exists():
             temporary.unlink()
-    return receipt
+    return _WrittenReceipt(path=receipt, data=receipt_bytes)
 
 
 def _stage_record(record: GradeRecord, directory: Path) -> Path:
@@ -1431,10 +1636,15 @@ def _receipt_digest(receipt: Path) -> str:
 
 
 def _receipt_context_findings(
-    receipt: Path, paths: BatchPaths, inputs: VerificationInputs
+    receipt: Path,
+    paths: BatchPaths,
+    inputs: VerificationInputs,
+    *,
+    decoded: _DecodedReceipt | None = None,
 ) -> tuple[BlockingFinding, ...]:
     """Require explicit publication paths to name the receipt-bound files."""
-    decoded = _decode_receipt(receipt)
+    if decoded is None:
+        decoded = _decode_receipt(receipt)
     artifacts = _validated_receipt_artifacts(decoded, paths)
     expected = {
         "assignment-brief": inputs.brief,
@@ -1502,9 +1712,15 @@ def _context_from_receipt(
 
 
 def _decode_receipt(receipt: Path) -> _DecodedReceipt:
-    payload = json.loads(
-        read_text_limited(receipt, "The verification receipt", 10 * 1024 * 1024)
+    return _decode_receipt_bytes(
+        read_bytes_limited(
+            receipt, "The verification receipt", 10 * 1024 * 1024
+        )
     )
+
+
+def _decode_receipt_bytes(data: bytes) -> _DecodedReceipt:
+    payload = json.loads(data.decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("The verification receipt must be a JSON object.")
     if payload.get("schema") == "grading-batch-verification/1":
@@ -1791,6 +2007,91 @@ def _transaction_matches(
 
 def _publication_finding(code: str, message: str) -> BlockingFinding:
     return BlockingFinding(code=code, message=message, token="")
+
+
+def _validate_staged_outputs(
+    staging: Path, outputs: list[dict[str, str]]
+) -> tuple[BlockingFinding, ...]:
+    expected_names = {
+        item["path"] for item in outputs
+    } | {PUBLICATION_NAME, TRANSACTION_NAME}
+    try:
+        actual_names = {path.name for path in staging.iterdir()}
+        if actual_names != expected_names:
+            return (
+                _publication_finding(
+                    "staged-output-changed",
+                    "The staged publication membership changed before installation.",
+                ),
+            )
+        for item in outputs:
+            digest = hashlib.sha256(
+                read_bytes_limited(
+                    staging / item["path"],
+                    "The staged rehydrated feedback",
+                    2 * 1024 * 1024,
+                )
+            ).hexdigest()
+            if digest != item["sha256"]:
+                return (
+                    BlockingFinding(
+                        code="staged-output-changed",
+                        message=(
+                            "The staged rehydrated feedback changed before "
+                            "installation."
+                        ),
+                        token=Path(item["path"]).stem,
+                    ),
+                )
+    except (OSError, ValueError) as error:
+        return (
+            _publication_finding("staged-output-changed", str(error)),
+        )
+    return ()
+
+
+def _validate_installed_outputs(
+    target: Path,
+    outputs: list[dict[str, str]],
+    batch: str,
+    receipt_digest: str,
+) -> tuple[BlockingFinding, ...]:
+    try:
+        marker = json.loads(
+            read_text_limited(
+                target / PUBLICATION_NAME,
+                "The installed publication marker",
+                1_048_576,
+            )
+        )
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError) as error:
+        return (
+            _publication_finding("installed-output-changed", str(error)),
+        )
+    expected_marker = {
+        "schema": PUBLICATION_SCHEMA,
+        "batch": batch,
+        "receipt_sha256": receipt_digest,
+        "outputs": outputs,
+    }
+    if marker != expected_marker:
+        return (
+            _publication_finding(
+                "installed-output-changed",
+                "The installed publication marker changed before confirmation.",
+            ),
+        )
+    return tuple(
+        replace(
+            finding,
+            code="installed-output-changed",
+            message=(
+                "The installed publication changed before it could be confirmed: "
+                + finding.message
+            ),
+        )
+        for finding in _validate_staged_outputs(target, outputs)
+    )
 
 
 def _with_verification_instruction(message: str) -> str:

@@ -1,8 +1,24 @@
 """Density is evidence for criterion 4. It is never evidence of authorship."""
 
+import tracemalloc
+
 import pytest
 
-from scripts.grading.density import PATTERNS_PATH, load_terms, scan
+from scripts.grading.density import (
+    PATTERNS_PATH,
+    DensityLimitError,
+    Term,
+    load_terms,
+    scan,
+)
+
+
+def _write_pattern_reference(path, watched_terms):
+    path.write_text(
+        "### 7. Watched prose\n"
+        "**Words to watch:** " + ", ".join(watched_terms) + "\n",
+        encoding="utf-8",
+    )
 
 
 @pytest.fixture(scope="module")
@@ -87,9 +103,16 @@ def test_it_matches_case_insensitively_on_whole_words(terms):
     assert not [hit for hit in scan("Delved deeper.", terms).hits if hit.term == "delve"]
 
 
-def test_a_multi_word_term_matches_across_a_line_break(terms):
-    result = scan("This stands\nas proof.", terms)
+@pytest.mark.parametrize("gap", [" ", "\t", "\n", "\n    "])
+def test_a_multi_word_term_matches_across_ordinary_whitespace(gap, terms):
+    result = scan(f"This stands{gap}as proof.", terms)
     assert any(hit.term.lower() == "stands as" for hit in result.hits)
+
+
+def test_a_multi_word_term_does_not_span_unbounded_line_breaks(terms):
+    result = scan("This stands" + "\n" * 1_000 + "as proof.", terms)
+
+    assert not any(hit.term.lower() == "stands as" for hit in result.hits)
 
 
 def test_it_counts_words_and_reports_a_rate(terms):
@@ -115,3 +138,101 @@ def test_as_dict_round_trips_through_json(terms):
 
     payload = scan("We delve.", terms).as_dict()
     assert json.loads(json.dumps(payload))["per_thousand"] >= 0
+
+
+def test_load_terms_rejects_more_than_256_unique_terms(tmp_path):
+    patterns = tmp_path / "patterns.md"
+    _write_pattern_reference(
+        patterns,
+        [f"watched{i:03d}" for i in range(257)],
+    )
+
+    with pytest.raises(DensityLimitError, match="at most 256 unique watched terms"):
+        load_terms(patterns)
+
+
+def test_load_terms_rejects_a_term_longer_than_256_characters(tmp_path):
+    patterns = tmp_path / "patterns.md"
+    _write_pattern_reference(patterns, ["x" * 257])
+
+    with pytest.raises(DensityLimitError, match="at most 256 characters"):
+        load_terms(patterns)
+
+
+def test_load_terms_rejects_more_than_16384_aggregate_characters(tmp_path):
+    patterns = tmp_path / "patterns.md"
+    _write_pattern_reference(
+        patterns,
+        [f"{index:03d}" + "x" * 253 for index in range(65)],
+    )
+
+    with pytest.raises(
+        DensityLimitError, match="at most 16384 characters in total"
+    ):
+        load_terms(patterns)
+
+
+def test_scan_rejects_more_than_256_term_entries():
+    terms = [Term(f"watched{index:03d}", 7) for index in range(257)]
+
+    with pytest.raises(DensityLimitError, match="at most 256 unique watched terms"):
+        scan("", terms)
+
+
+def test_scan_rejects_duplicate_custom_terms_instead_of_double_counting():
+    terms = [Term("delve", 7), Term("DELVE", 8)]
+
+    with pytest.raises(DensityLimitError, match="must be unique"):
+        scan("We delve.", terms)
+
+
+def test_scan_rejects_a_custom_term_longer_than_256_characters():
+    terms = [Term("x" * 257, 7)]
+
+    with pytest.raises(DensityLimitError, match="at most 256 characters"):
+        scan("", terms)
+
+
+def test_scan_rejects_more_than_16384_custom_term_characters():
+    terms = [
+        Term(f"{index:03d}" + "x" * 253, 7)
+        for index in range(65)
+    ]
+
+    with pytest.raises(
+        DensityLimitError, match="at most 16384 characters in total"
+    ):
+        scan("", terms)
+
+
+def test_scan_rejects_more_than_5000_matches_instead_of_truncating():
+    with pytest.raises(
+        DensityLimitError, match="more than 5000 watched-term matches"
+    ):
+        scan("delve " * 5001, [Term("delve", 7)])
+
+
+def _scan_with_peak_memory(text):
+    tracemalloc.start()
+    try:
+        result = scan(text, [])
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    return result, peak
+
+
+def test_newline_dense_text_does_not_allocate_one_offset_per_line_break():
+    result, peak = _scan_with_peak_memory("\n" * 100_000)
+
+    assert result.words == 0
+    assert result.hits == ()
+    assert peak < 1_000_000
+
+
+def test_word_dense_text_counts_with_bounded_auxiliary_memory():
+    result, peak = _scan_with_peak_memory("word " * 100_000)
+
+    assert result.words == 100_000
+    assert result.hits == ()
+    assert peak < 1_000_000

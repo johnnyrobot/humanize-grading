@@ -1,8 +1,12 @@
 """Layer 3 must read text, surface doc metadata, and never leak a filename."""
 
+import hashlib
+import os
+from zipfile import ZipFile as RealZipFile
+
 import pytest
 
-from scripts.redaction.documents import extract, output_name
+from scripts.redaction.documents import extract, output_name, read_submission_snapshot
 
 
 def test_markdown_is_read(tmp_path):
@@ -265,3 +269,139 @@ def test_metadata_is_deduplicated_and_drops_library_defaults(tmp_path):
     result = extract(path)
 
     assert result.metadata == ("Maya Lin",)
+
+
+def test_docx_body_and_metadata_share_one_character_budget(tmp_path, monkeypatch):
+    """Metadata must not bypass the public extracted-text limit."""
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.add_paragraph("1234567890")
+    document.core_properties.author = "Maya Lin"
+    document.save(str(path))
+    monkeypatch.setattr("scripts.redaction.documents.MAX_EXTRACTED_CHARACTERS", 12)
+
+    result = extract(path)
+
+    assert "too much extracted text" in result.error
+
+
+def test_docx_character_budget_includes_metadata_separators(tmp_path, monkeypatch):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    document = docx.Document()
+    document.add_paragraph("1234567890")
+    document.core_properties.author = "Maya Lin"
+    document.save(str(path))
+    monkeypatch.setattr("scripts.redaction.documents.MAX_EXTRACTED_CHARACTERS", 18)
+
+    result = extract(path)
+
+    assert "too much extracted text" in result.error
+
+
+def test_docx_preflight_and_parser_use_the_same_byte_snapshot(tmp_path, monkeypatch):
+    docx = pytest.importorskip("docx")
+    path = tmp_path / "paper.docx"
+    original_document = docx.Document()
+    original_document.add_paragraph("ORIGINAL BODY")
+    original_document.save(str(path))
+    original_bytes = path.read_bytes()
+    replacement = tmp_path / "replacement.docx"
+    replacement_document = docx.Document()
+    replacement_document.add_paragraph("REPLACEMENT BODY")
+    replacement_document.save(str(replacement))
+    replacement_bytes = replacement.read_bytes()
+
+    class SwapAfterPreflight:
+        def __init__(self, value):
+            self.archive = RealZipFile(value)
+
+        def __enter__(self):
+            return self.archive
+
+        def __exit__(self, exc_type, exc, traceback):
+            self.archive.close()
+            path.write_bytes(replacement_bytes)
+
+    monkeypatch.setattr(
+        "scripts.redaction.documents.ZipFile", lambda value: SwapAfterPreflight(value)
+    )
+
+    result = extract(path)
+
+    assert result.text == "ORIGINAL BODY"
+    assert result.source_sha256 == hashlib.sha256(original_bytes).hexdigest()
+
+
+def test_text_extraction_exposes_the_exact_snapshot_digest(tmp_path):
+    path = tmp_path / "paper.md"
+    data = b"Platforms curate public attention."
+    path.write_bytes(data)
+
+    result = extract(path)
+
+    assert result.text == data.decode("utf-8")
+    assert result.source_sha256 == hashlib.sha256(data).hexdigest()
+
+
+def test_submission_snapshot_rejects_an_existing_hard_link(tmp_path):
+    path = tmp_path / "paper.md"
+    path.write_text("Body text.", encoding="utf-8")
+    os.link(path, tmp_path / "second-name.md")
+
+    with pytest.raises(ValueError, match="single link"):
+        read_submission_snapshot(path)
+
+
+def test_submission_snapshot_rejects_a_hard_link_added_during_read(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "paper.md"
+    path.write_bytes(b"x" * (128 * 1024))
+    original_read = os.read
+    linked = False
+
+    def link_during_read(descriptor, size):
+        nonlocal linked
+        chunk = original_read(descriptor, size)
+        if chunk and not linked:
+            linked = True
+            os.link(path, tmp_path / "late-link.md")
+        return chunk
+
+    monkeypatch.setattr("scripts.redaction.documents.os.read", link_during_read)
+
+    with pytest.raises(ValueError, match="changed during reading"):
+        read_submission_snapshot(path)
+
+
+def test_submission_snapshot_rejects_modify_and_unlink_between_read_chunks(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "paper.md"
+    path.write_bytes(b"x" * (128 * 1024))
+    original_read = os.read
+    changed = False
+
+    def change_inode_during_read(descriptor, size):
+        nonlocal changed
+        chunk = original_read(descriptor, size)
+        if chunk and not changed:
+            changed = True
+            link = tmp_path / "temporary-link.md"
+            os.link(path, link)
+            with path.open("r+b") as handle:
+                handle.seek(96 * 1024)
+                handle.write(b"y")
+                handle.flush()
+                os.fsync(handle.fileno())
+            link.unlink()
+        return chunk
+
+    monkeypatch.setattr(
+        "scripts.redaction.documents.os.read", change_inode_during_read
+    )
+
+    with pytest.raises(ValueError, match="changed during reading"):
+        read_submission_snapshot(path)

@@ -66,16 +66,20 @@ def _seeded_source(phil210, tmp_path):
     return source
 
 
+def _run_and_approve(**kwargs):
+    run(**kwargs)
+    return run(**kwargs, reviewed=True)
+
+
 def _redact(source, phil210, tmp_path, name, instructor):
     destination = tmp_path / name
-    result = run(
+    result = _run_and_approve(
         source=source,
         destination=destination,
         map_path=tmp_path / f"{name}-state" / "map.json",
         roster=load_roster(phil210 / "roster.csv"),
         batch=name,
         protected=(instructor,),
-        reviewed=True,
     )
     return result, destination
 
@@ -136,14 +140,13 @@ def test_subject_matter_survives(phil210, tmp_path, instructor):
 def test_the_instructor_survives(phil210, tmp_path, instructor):
     """Dr. Marcus Vance grades the work; he is not a student."""
     destination = tmp_path / "graded"
-    run(
+    _run_and_approve(
         source=phil210 / "graded",
         destination=destination,
         map_path=tmp_path / "graded-state" / "map.json",
         roster=load_roster(phil210 / "roster.csv"),
         batch="graded",
         protected=(instructor,),
-        reviewed=True,
     )
     assert "Vance" in _corpus_text(destination)
 
@@ -159,7 +162,6 @@ def test_a_non_empty_destination_is_refused(phil210, tmp_path, instructor):
         "roster": load_roster(phil210 / "roster.csv"),
         "batch": "reused",
         "protected": (instructor,),
-        "reviewed": True,
     }
     run(**common)
     before = sorted(p.name for p in destination.iterdir())
@@ -184,13 +186,12 @@ def test_a_students_feedback_is_not_misattributed(tmp_path):
     )
     destination = tmp_path / "chens-out"
     map_path = tmp_path / "chens-state" / "map.json"
-    run(
+    _run_and_approve(
         source=source,
         destination=destination,
         map_path=map_path,
         roster=[RosterEntry("Anna Chen"), RosterEntry("Samantha Chen")],
         batch="chens",
-        reviewed=True,
     )
 
     redacted = _corpus_text(destination)
@@ -217,13 +218,12 @@ def test_a_cited_platform_page_survives(tmp_path):
         encoding="utf-8",
     )
     destination = tmp_path / "cites-out"
-    run(
+    _run_and_approve(
         source=source,
         destination=destination,
         map_path=tmp_path / "cites-state" / "map.json",
         roster=[],
         batch="cites",
-        reviewed=True,
     )
 
     corpus = _corpus_text(destination)
@@ -239,13 +239,12 @@ def test_a_patent_number_survives(tmp_path):
         "Patent US9876543 covers the diagnostic lockout.", encoding="utf-8"
     )
     destination = tmp_path / "patent-out"
-    run(
+    _run_and_approve(
         source=source,
         destination=destination,
         map_path=tmp_path / "patent-state" / "map.json",
         roster=[],
         batch="patent",
-        reviewed=True,
     )
 
     assert "US9876543" in _corpus_text(destination)
@@ -255,14 +254,13 @@ def test_the_round_trip_is_lossless_on_the_real_corpus(phil210, tmp_path, instru
     """Redacting then rehydrating must return the submission unchanged."""
     destination = tmp_path / "trip"
     map_path = tmp_path / "trip-state" / "map.json"
-    run(
+    _run_and_approve(
         source=phil210 / "ungraded",
         destination=destination,
         map_path=map_path,
         roster=load_roster(phil210 / "roster.csv"),
         batch="trip",
         protected=(instructor,),
-        reviewed=True,
     )
 
     tmap = TokenMap.load(map_path)

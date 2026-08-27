@@ -5,6 +5,7 @@ import sys
 
 from scripts.grading.batch import BatchPaths, GradingBatch, Progress
 from scripts.redaction.manifest import RedactionManifest
+from tests.grading.test_verify import TEST_MAP_SHA256, TEST_REVIEW_SHA256
 
 
 def _batch(tmp_path):
@@ -217,6 +218,8 @@ def _record_prepare_context(tmp_path, phil210, approved_brief, *, reviewed=True)
         [source],
         reviewed=reviewed,
         exit_code=0,
+        map_sha256=TEST_MAP_SHA256,
+        review_sha256=TEST_REVIEW_SHA256,
     ).save(redacted)
     return root, redacted, source
 
@@ -538,6 +541,24 @@ def test_density_reports_oversized_redacted_input_without_a_traceback(tmp_path):
 
     assert result.returncode == 13
     assert "too large" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_density_reports_its_match_limit_as_a_density_error(tmp_path):
+    redacted = tmp_path / "redacted"
+    redacted.mkdir()
+    source = redacted / "STUDENT_01.md"
+    source.write_text("delve " * 5001, encoding="utf-8")
+
+    result = _run(
+        "density", str(source), "--redacted", str(redacted), "--json"
+    )
+
+    assert result.returncode == 13
+    assert result.stdout == ""
+    assert "Density stopped safely" in result.stderr
+    assert "more than 5000 watched-term matches" in result.stderr
+    assert "Cannot read redacted submission" not in result.stderr
     assert "Traceback" not in result.stderr
 
 

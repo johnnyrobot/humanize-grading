@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
+import scripts.grading._conformance_audit as conformance_audit
 import scripts.grading._conformance_run as conformance_run
+import scripts.grading._conformance_trial as conformance_trial
 from scripts.grading._conformance_model import TRIAL_PUBLICATION, TraceResult
 from scripts.grading.brief import ANSWER_REQUIRED, approve_brief, prepare_brief
 from scripts.grading.conformance import (
@@ -122,14 +124,19 @@ def _approve_trial_brief(workspace: Path) -> None:
 
 
 def _redact_trial(workspace: Path) -> Path:
+    arguments = {
+        "source": workspace / "synthetic/submissions",
+        "destination": workspace / "redacted",
+        "map_path": workspace / ".grading/maps/essay-2.json",
+        "review_path": workspace / ".grading/maps/reviews/essay-2.json",
+        "roster": load_roster(workspace / "synthetic/roster.csv"),
+        "batch": "essay-2",
+        "protected": (),
+    }
+    result = redact(**arguments)
+    assert result.exit_code == EXIT_OK, result.message
     result = redact(
-        source=workspace / "synthetic/submissions",
-        destination=workspace / "redacted",
-        map_path=workspace / ".grading/maps/essay-2.json",
-        review_path=workspace / ".grading/maps/reviews/essay-2.json",
-        roster=load_roster(workspace / "synthetic/roster.csv"),
-        batch="essay-2",
-        protected=(),
+        **arguments,
         reviewed=True,
     )
     assert result.exit_code == EXIT_OK, result.message
@@ -195,6 +202,8 @@ def _complete_trial(workspace: Path) -> None:
     _approve_trial_brief(workspace)
     source = _redact_trial(workspace)
     _write_valid_pair(workspace, source)
+    environment = os.environ.copy()
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
     verified = subprocess.run(
         [
             sys.executable,
@@ -216,6 +225,7 @@ def _complete_trial(workspace: Path) -> None:
             ".grading",
         ],
         cwd=workspace,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -244,6 +254,7 @@ def _complete_trial(workspace: Path) -> None:
             "final/agent-e2e",
         ],
         cwd=workspace,
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
@@ -436,12 +447,23 @@ def test_audit_fails_closed_on_fifo_without_opening_it(tmp_path):
     os.mkfifo(artifact)
 
     started = time.monotonic()
-    report = audit_workspace(workspace, runtime="manual")
+    with pytest.raises(ConformanceError, match="workspace.*special"):
+        audit_workspace(workspace, runtime="manual")
 
     assert time.monotonic() - started < 2
-    assert {(item["path"], item["code"]) for item in report.artifact_findings} == {
-        ("redacted/STUDENT_01.md", "artifact-nonregular")
-    }
+
+
+def test_audit_rejects_an_unobserved_workspace_fifo_before_deeper_reads(tmp_path):
+    workspace = _trial(tmp_path)
+    artifact = workspace / ".grading/conformance/unobserved.fifo"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    os.mkfifo(artifact)
+
+    started = time.monotonic()
+    with pytest.raises(ConformanceError, match="workspace.*special"):
+        audit_workspace(workspace, runtime="manual")
+
+    assert time.monotonic() - started < 2
 
 
 def test_audit_fails_closed_on_directory_named_as_draft_artifact(tmp_path):
@@ -524,7 +546,7 @@ def test_audit_does_not_echo_identity_bearing_private_trace_path(tmp_path):
     assert synthetic_name not in repr(report)
 
 
-def test_audit_passes_phase_allowed_reads(tmp_path):
+def test_audit_keeps_self_reported_phase_allowed_reads_unverified(tmp_path):
     workspace = _trial(tmp_path)
     _complete_trial(workspace)
     trace = _write_trace(
@@ -536,7 +558,7 @@ def test_audit_passes_phase_allowed_reads(tmp_path):
     report = audit_workspace(workspace, runtime="manual", trace_paths=(trace,))
 
     assert report.passed is True
-    assert report.trace.status == "passed"
+    assert report.trace.status == "unverified"
 
 
 def test_audit_keeps_a_read_only_trace_unverified(tmp_path):
@@ -742,7 +764,9 @@ def test_trace_malformed_or_failed_next_never_counts_as_phase_work(
     assert result.status == "unverified"
 
 
-def test_trace_matches_absolute_grade_path_followed_immediately_by_next(tmp_path):
+def test_self_reported_trace_matches_absolute_grade_path_but_stays_unverified(
+    tmp_path,
+):
     workspace = _trial(tmp_path)
     absolute_grade = str(workspace / "scripts/grade.py")
     next_event = _trace_event(
@@ -773,10 +797,10 @@ def test_trace_matches_absolute_grade_path_followed_immediately_by_next(tmp_path
         required_phases=("grading",),
     )
 
-    assert result.status == "passed"
+    assert result.status == "unverified"
 
 
-def test_trace_passes_with_exact_next_and_successful_work_command(tmp_path):
+def test_self_reported_exact_next_trace_stays_unverified(tmp_path):
     workspace = _trial(tmp_path)
     trace = _write_trace(
         workspace,
@@ -790,7 +814,65 @@ def test_trace_passes_with_exact_next_and_successful_work_command(tmp_path):
         required_phases=("grading",),
     )
 
-    assert result.status == "passed"
+    assert result.status == "unverified"
+
+
+def test_trace_total_byte_limit_is_global(tmp_path, monkeypatch):
+    workspace = _trial(tmp_path)
+    first = _write_trace(
+        workspace,
+        "first-byte-budget",
+        [_trace_event("grading", "read", path="SKILL.md")],
+    )
+    second = _write_trace(
+        workspace,
+        "second-byte-budget",
+        [_trace_event("grading", "read", path="references/ai-patterns.md")],
+    )
+    monkeypatch.setattr(
+        conformance_audit,
+        "MAX_TRACE_BYTES",
+        first.stat().st_size + second.stat().st_size - 1,
+        raising=False,
+    )
+
+    result = audit_trace(workspace, (first, second))
+
+    assert result.status == "failed"
+    assert result.findings == ("trace-bytes-limit",)
+
+
+def test_trace_descriptor_open_rejects_a_path_substitution(tmp_path, monkeypatch):
+    workspace = _trial(tmp_path)
+    trace = _write_trace(
+        workspace,
+        "substituted",
+        [_trace_event("grading", "read", path="SKILL.md")],
+    )
+    outside = tmp_path / "outside.jsonl"
+    outside.write_text(
+        json.dumps(_trace_event("grading", "read", path="SKILL.md")) + "\n",
+        encoding="utf-8",
+    )
+    original_open = os.open
+    substituted = False
+
+    def substituting_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal substituted
+        if path == trace.name and dir_fd is not None and not substituted:
+            trace.unlink()
+            trace.symlink_to(outside)
+            substituted = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", substituting_open)
+
+    result = audit_trace(workspace, (trace,), required_phases=("grading",))
+
+    assert substituted is True
+    assert result.status == "failed"
+    assert result.events == 0
+    assert result.findings == ("trace-not-regular",)
 
 
 def test_trace_requires_next_after_every_successful_work_command(tmp_path):
@@ -975,6 +1057,122 @@ def test_audit_records_exact_package_attestation(tmp_path):
         item["path"] == "scripts/grade.py" and len(item["sha256"]) == 64
         for item in report.package["files"]
     )
+
+
+@pytest.mark.parametrize(
+    "relative",
+    (
+        "scripts/__pycache__/grade.cpython-test.pyc",
+        "scripts/grading/unreviewed.pyc",
+    ),
+)
+def test_audit_rejects_unexpected_python_bytecode(tmp_path, relative):
+    workspace = _trial(tmp_path)
+    bytecode = workspace / relative
+    writable_parent = bytecode.parent
+    while not writable_parent.exists():
+        writable_parent = writable_parent.parent
+    writable_parent.chmod(0o755)
+    bytecode.parent.mkdir(parents=True, exist_ok=True)
+    bytecode.write_bytes(b"unreviewed bytecode")
+
+    report = audit_workspace(workspace, runtime="manual")
+
+    assert report.package["status"] == "failed"
+    assert f"package-unexpected:{relative}" in report.package["findings"]
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ("scripts/__pycache__/reviewed.pyc", "scripts/reviewed.pyc"),
+)
+def test_package_inventory_rejects_python_bytecode_paths(tmp_path, relative):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "PACKAGE_FILES.txt").write_text(
+        f"PACKAGE_FILES.txt\n{relative}\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConformanceError, match="bytecode"):
+        conformance_trial._package_paths(source)
+
+
+def test_manual_trial_python_import_does_not_create_bytecode_cache(tmp_path):
+    workspace = _trial(tmp_path)
+    environment = os.environ.copy()
+    environment.pop("PYTHONDONTWRITEBYTECODE", None)
+    environment.pop("PYTHONPYCACHEPREFIX", None)
+
+    imported = subprocess.run(
+        [sys.executable, "-c", "import scripts.grading.batch"],
+        cwd=workspace,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert imported.returncode == 0, imported.stderr
+    assert not tuple((workspace / "scripts").rglob("*.pyc"))
+    assert not tuple((workspace / "scripts").rglob("__pycache__"))
+
+
+def test_package_size_mismatch_fails_before_hashing_changed_file(
+    tmp_path, monkeypatch
+):
+    workspace = _trial(tmp_path)
+    expected = dict(conformance_trial.read_trial_marker(workspace)["package"])
+    target = workspace / "scripts/grade.py"
+    target.write_bytes(target.read_bytes() + b"\n# changed size\n")
+    target_identity = target.stat()
+    original_read = os.read
+    target_bytes_read = 0
+
+    def tracking_read(descriptor, size):
+        nonlocal target_bytes_read
+        state = os.fstat(descriptor)
+        if (state.st_dev, state.st_ino) == (
+            target_identity.st_dev,
+            target_identity.st_ino,
+        ):
+            target_bytes_read += size
+        return original_read(descriptor, size)
+
+    monkeypatch.setattr(os, "read", tracking_read)
+
+    result = conformance_trial.attest_package(workspace, expected)
+
+    assert result["status"] == "failed"
+    assert "package-changed:scripts/grade.py" in result["findings"]
+    assert target_bytes_read == 0
+
+
+@pytest.mark.parametrize(
+    ("limit_name", "limit"),
+    (("MAX_WORKSPACE_ENTRIES", 1), ("MAX_WORKSPACE_BYTES", 1)),
+)
+def test_audit_rejects_workspace_over_aggregate_budget(
+    tmp_path, monkeypatch, limit_name, limit
+):
+    workspace = _trial(tmp_path)
+    monkeypatch.setattr(conformance_trial, limit_name, limit, raising=False)
+
+    with pytest.raises(ConformanceError, match="workspace.*limit"):
+        audit_workspace(workspace, runtime="manual")
+
+
+def test_trial_copy_rejects_package_over_aggregate_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(conformance_trial, "MAX_PACKAGE_BYTES", 1, raising=False)
+
+    with pytest.raises(ConformanceError, match="package.*limit"):
+        create_trial(REPO_ROOT, tmp_path / "package-budget-trial")
+
+
+def test_trial_creation_rejects_workspace_over_depth_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(conformance_trial, "MAX_WORKSPACE_DEPTH", 0)
+
+    with pytest.raises(ConformanceError, match="workspace.*limit"):
+        create_trial(REPO_ROOT, tmp_path / "workspace-budget-trial")
 
 
 def _rewrite_workspace_marker_for_package_mutation(workspace: Path, relative: str):

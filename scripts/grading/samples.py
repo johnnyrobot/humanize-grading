@@ -32,6 +32,7 @@ from scripts.path_safety import read_text_limited
 PLACEHOLDER = "[STUDENT]"
 
 _HEADER_FIELD = re.compile(r"^\*\*(.+?)\*\*\s*:\s*(.+?)\s*$")
+_STUDENT_HEADER = re.compile(r"^\*\*\s*student\s*\*\*", re.IGNORECASE)
 _SUBMISSION_HEADING = re.compile(r"^###\s+Student Submission", re.IGNORECASE)
 _FEEDBACK_HEADING = re.compile(r"^###\s+Instructor Feedback", re.IGNORECASE)
 _GRADE = re.compile(r"^\*\*Grade\*\*\s*:\s*(\d+)\s*/\s*(\d+)\s*\(([^)]+)\)")
@@ -118,10 +119,23 @@ def _split_sections(text: str) -> tuple[str, str, str]:
 
 def _parse_header(block: str) -> dict[str, str]:
     header: dict[str, str] = {}
+    student_fields = 0
     for line in block.splitlines():
-        match = _HEADER_FIELD.match(line.strip())
+        stripped = line.strip()
+        match = _HEADER_FIELD.match(stripped)
+        if _STUDENT_HEADER.match(stripped) and (
+            not match or match.group(1).strip().casefold() != "student"
+        ):
+            raise SampleError("The sample must have exactly one Student header.")
         if match:
-            header[match.group(1).strip()] = match.group(2).strip()
+            name = match.group(1).strip()
+            if name.casefold() == "student":
+                student_fields += 1
+                if student_fields > 1:
+                    raise SampleError(
+                        "The sample must have exactly one Student header."
+                    )
+            header[name] = match.group(2).strip()
     return header
 
 

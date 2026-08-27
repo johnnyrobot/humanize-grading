@@ -29,6 +29,7 @@ from scripts.grading.profile import ProfileError, load_profile, profile_path
 from scripts.grading.rubric import load_rubric
 from scripts.redaction.manifest import RedactionManifest
 from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
+from scripts.redaction.manifest import SCHEMA as REDACTION_MANIFEST_SCHEMA
 from scripts.path_safety import read_bytes_limited, read_text_limited
 
 NEXT_SCHEMA = "grading-next-action/1"
@@ -88,7 +89,7 @@ def _action(context: WorkflowContext, **values) -> NextAction:
 
 
 def _redaction_commands(
-    context: WorkflowContext, *, reviewed: bool
+    context: WorkflowContext, *, reviewed: bool, force: bool = False
 ) -> tuple[tuple[str, ...], ...]:
     if context.submissions is None or context.roster is None:
         return ()
@@ -110,7 +111,9 @@ def _redaction_commands(
     for instructor in context.instructor:
         command.extend(("--instructor", instructor))
     if reviewed:
-        command.extend(("--reviewed", "--force"))
+        command.append("--reviewed")
+    if force:
+        command.append("--force")
     return (tuple(command),)
 
 
@@ -153,7 +156,7 @@ def _publication_is_current(
     outputs = payload.get("outputs")
     if not isinstance(outputs, list):
         raise WorkflowError("The publication marker has no output list.")
-    names: set[str] = set()
+    marker_outputs: dict[str, str] = {}
     for item in outputs:
         if not isinstance(item, dict):
             raise WorkflowError("The publication marker has a malformed output.")
@@ -162,19 +165,30 @@ def _publication_is_current(
         if (
             not isinstance(name, str)
             or Path(name).name != name
-            or name in names
+            or name in marker_outputs
             or not isinstance(digest, str)
             or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
         ):
             raise WorkflowError("The publication marker has a malformed output.")
-        names.add(name)
-    if names != expected:
+        marker_outputs[name] = digest
+    if set(marker_outputs) != expected:
         raise WorkflowError("The publication marker does not name every draft.")
     if any(
         path.is_symlink() or not path.is_file()
         for path in (context.publication / name for name in expected)
     ):
         raise WorkflowError("Every published draft must be one regular file.")
+    for name, expected_digest in marker_outputs.items():
+        actual_digest = hashlib.sha256(
+            read_bytes_limited(
+                context.publication / name,
+                "The published feedback",
+                2 * 1024 * 1024,
+            )
+        ).hexdigest()
+        if actual_digest != expected_digest:
+            raise WorkflowError(f"The published feedback changed: {name}")
     return True
 
 
@@ -331,6 +345,20 @@ def next_action(context: WorkflowContext) -> NextAction:
             stage="redaction",
             action="repair-batch",
             message="Repair the redaction result before grading.",
+            findings=(finding,),
+        )
+    if manifest.schema != REDACTION_MANIFEST_SCHEMA:
+        finding = BlockingFinding(
+            "legacy-redaction-manifest",
+            "The redaction manifest uses an older schema and must be replaced.",
+            "",
+        )
+        return _action(
+            context,
+            stage="redaction",
+            action="repair-redaction",
+            message="Run a fresh unreviewed redaction for the current schema.",
+            commands=_redaction_commands(context, reviewed=False, force=True),
             findings=(finding,),
         )
     if manifest.exit_code == 3 or (

@@ -1,5 +1,6 @@
 """One durable action resumes grading from identity-free state."""
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -23,7 +24,11 @@ from scripts.redaction.pipeline import (
     run as redact_batch,
 )
 from scripts.redaction.roster import RosterEntry
-from tests.grading.test_verify import _write_batch
+from tests.grading.test_verify import (
+    TEST_MAP_SHA256,
+    TEST_REVIEW_SHA256,
+    _write_batch,
+)
 from tests.grading.test_publication import FakeRenderer
 
 
@@ -192,16 +197,18 @@ def _install_clean_reviewed_redaction(
     (source / "paper.md").write_text(
         "Maya Lin argues that platforms curate.", encoding="utf-8"
     )
-    result = redact_batch(
+    common = dict(
         source=source,
         destination=context.redacted,
         map_path=context.root / "maps" / f"{context.batch}.json",
         review_path=context.root / "maps" / "reviews" / f"{context.batch}.json",
         roster=[RosterEntry("Maya Lin")],
         batch=context.batch,
-        reviewed=True,
-        force=True,
     )
+    prepared = redact_batch(**common, reviewed=False, force=True)
+    assert prepared.exit_code == REDACTION_OK
+    assert RedactionManifest.load(context.redacted).reviewed is False
+    result = redact_batch(**common, reviewed=True)
     assert result.exit_code == REDACTION_OK
     return RedactionManifest.load(context.redacted)
 
@@ -283,7 +290,13 @@ def ready_batch(tmp_path, phil210, approved_brief) -> ReadyBatch:
     source = redacted / "STUDENT_01.md"
     source.write_text("A redacted submission ready to grade.", encoding="utf-8")
     RedactionManifest.create(
-        "essay-2", "test-redaction-run", [source], reviewed=True, exit_code=0
+        "essay-2",
+        "test-redaction-run",
+        [source],
+        reviewed=True,
+        exit_code=0,
+        map_sha256=TEST_MAP_SHA256,
+        review_sha256=TEST_REVIEW_SHA256,
     ).save(redacted)
     drafts = tmp_path / "drafts"
     drafts.mkdir()
@@ -466,11 +479,10 @@ def test_roster_load_failure_invalidates_prior_clean_redaction(
             str(context.redacted),
             "--map",
             str(context.root / "maps" / f"{context.batch}.json"),
-            "--review",
-            str(context.root / "maps" / "reviews" / f"{context.batch}.json"),
-            "--reviewed",
-            "--force",
-        ],
+                "--review",
+                str(context.root / "maps" / "reviews" / f"{context.batch}.json"),
+                "--force",
+            ],
         capture_output=True,
         text=True,
     )
@@ -497,7 +509,7 @@ def test_oversized_file_count_invalidates_prior_clean_redaction(
         map_path=context.root / "maps" / f"{context.batch}.json",
         roster=[],
         batch=context.batch,
-        reviewed=True,
+        reviewed=False,
         force=True,
     )
 
@@ -523,7 +535,7 @@ def test_unsafe_source_invalidates_safe_prior_redaction(
         map_path=context.root / "maps" / f"{context.batch}.json",
         roster=[],
         batch=context.batch,
-        reviewed=True,
+        reviewed=False,
         force=True,
     )
 
@@ -547,7 +559,7 @@ def test_first_failure_without_manifest_cannot_advance_to_drafting(
         map_path=context.root / "maps" / f"{context.batch}.json",
         roster=[],
         batch=context.batch,
-        reviewed=True,
+        reviewed=False,
         force=True,
     )
 
@@ -576,6 +588,11 @@ def test_unreviewed_manifest_returns_review_redaction(
     tmp_path, ready_batch, exit_code
 ):
     context = ready_batch.context(tmp_path)
+    context = replace(
+        context,
+        submissions=tmp_path / "submissions",
+        roster=tmp_path / "roster.csv",
+    )
     source = context.redacted / "STUDENT_01.md"
     RedactionManifest.create(
         context.batch,
@@ -583,14 +600,62 @@ def test_unreviewed_manifest_returns_review_redaction(
         [source],
         reviewed=False,
         exit_code=exit_code,
+        map_sha256=TEST_MAP_SHA256,
+        review_sha256=TEST_REVIEW_SHA256,
     ).save(context.redacted)
 
     action = next_action(context)
-    result = _next_run(context, "--json")
+    result = _next_run(
+        context,
+        "--json",
+        "--submissions",
+        str(context.submissions),
+        "--roster",
+        str(context.roster),
+    )
 
     assert action.action == "review-redaction"
+    assert "--reviewed" in action.commands[0]
+    assert "--force" not in action.commands[0]
     assert result.returncode == 0
     assert json.loads(result.stdout) == action.as_dict()
+
+
+@pytest.mark.parametrize("schema", ["redaction-batch/1", "redaction-batch/2"])
+def test_legacy_manifest_requires_a_fresh_unreviewed_redaction(
+    tmp_path, ready_batch, schema
+):
+    context = replace(
+        ready_batch.context(tmp_path),
+        submissions=tmp_path / "submissions",
+        roster=tmp_path / "roster.csv",
+    )
+    output = context.redacted / "STUDENT_01.md"
+    payload = {
+        "schema": schema,
+        "batch": context.batch,
+        "run_id": "test-redaction-run",
+        "outputs": [
+            {
+                "path": output.name,
+                "sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
+            }
+        ],
+    }
+    if schema == "redaction-batch/2":
+        payload.update({"reviewed": True, "exit_code": 0})
+    (context.redacted / "_redaction.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
+
+    action = next_action(context)
+
+    assert action.action == "repair-redaction"
+    assert [finding.code for finding in action.findings] == [
+        "legacy-redaction-manifest"
+    ]
+    assert "--reviewed" not in action.commands[0]
+    assert "--force" in action.commands[0]
 
 
 @pytest.mark.parametrize("exit_code", [2, 4, 5, 6, 7])
@@ -605,6 +670,8 @@ def test_incomplete_redaction_returns_exact_repair_action_and_cli_exit(
         [source],
         reviewed=True,
         exit_code=exit_code,
+        map_sha256=TEST_MAP_SHA256,
+        review_sha256=TEST_REVIEW_SHA256,
     ).save(context.redacted)
 
     action = next_action(context)
@@ -633,6 +700,8 @@ def test_reviewed_rerun_with_roster_failure_precedes_inventory_and_does_not_adva
         [source],
         reviewed=True,
         exit_code=2,
+        map_sha256=TEST_MAP_SHA256,
+        review_sha256=TEST_REVIEW_SHA256,
     ).save(context.redacted)
     (context.drafts / "STUDENT_99.json").write_text("{}", encoding="utf-8")
 
@@ -650,6 +719,8 @@ def test_record_prepare_cli_blocks_a_reviewed_incomplete_redaction(
         [source],
         reviewed=True,
         exit_code=2,
+        map_sha256=TEST_MAP_SHA256,
+        review_sha256=TEST_REVIEW_SHA256,
     ).save(context.redacted)
 
     result = subprocess.run(
@@ -884,6 +955,31 @@ def test_publication_returns_terminal_review_publication(
 
     assert action.action == "review-publication"
     assert action.commands == ()
+
+
+def test_modified_published_feedback_is_not_terminal(
+    tmp_path, phil210, approved_brief
+):
+    context = _published_context(tmp_path, phil210, approved_brief)
+    (context.publication / "STUDENT_01.md").write_text(
+        "modified identity-bearing feedback", encoding="utf-8"
+    )
+
+    with pytest.raises(WorkflowError, match="published feedback changed"):
+        next_action(context)
+
+
+def test_publication_output_digest_must_be_lowercase_hex(
+    tmp_path, phil210, approved_brief
+):
+    context = _published_context(tmp_path, phil210, approved_brief)
+    marker_path = context.publication / "_publication.json"
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["outputs"][0]["sha256"] = "A" * 64
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(WorkflowError, match="malformed output"):
+        next_action(context)
 
 
 def test_publication_with_stale_extra_file_is_not_terminal(

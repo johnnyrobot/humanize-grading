@@ -124,15 +124,18 @@ def graded_batch(tmp_path, phil210, instructor):
     assert len(roster) == 5, "the ungraded batch should name five students"
 
     redacted = tmp_path / "redacted"
-    result = run(
+    common = dict(
         source=phil210 / "ungraded",
         destination=redacted,
         map_path=tmp_path / "maps" / "essay-2.json",
+        review_path=tmp_path / "maps" / "reviews" / "essay-2.json",
         roster=roster,
         batch="essay-2",
         protected=(instructor,),
-        reviewed=True,
     )
+    prepared = run(**common, reviewed=False)
+    assert prepared.exit_code == EXIT_OK, prepared.message
+    result = run(**common, reviewed=True)
     assert result.exit_code == EXIT_OK, result.message
     return tmp_path, redacted
 

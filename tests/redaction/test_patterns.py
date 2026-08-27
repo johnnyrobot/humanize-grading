@@ -1,8 +1,10 @@
 """Layer 2 must catch structured PII without touching subject matter."""
 
+import re
 import time
+import tracemalloc
 
-from scripts.redaction.patterns import redact_structured
+from scripts.redaction.patterns import _sweep_known_ids, redact_structured
 from scripts.redaction.tokens import TokenMap
 
 
@@ -231,6 +233,76 @@ def test_the_github_lookahead_does_not_backtrack_quadratically():
     assert count == 1
     assert result.startswith("URL_01/")
     assert elapsed < 0.5
+
+
+def test_known_ids_from_prior_files_are_swept_together_without_changing_semantics():
+    tmap = TokenMap("essay-1")
+    first = tmap.allocate("ID", "S1000001", "first.md")
+    second = tmap.allocate("ID", "S1000002", "second.md")
+
+    text, count = redact_structured(
+        "Prior IDs S1000001 and S1000002 remain private; s1000001 is unchanged.",
+        tmap,
+        "third.md",
+    )
+
+    assert text == (
+        f"Prior IDs {first} and {second} remain private; s1000001 is unchanged."
+    )
+    assert count == 2
+
+
+def test_known_id_sweep_does_not_rescan_the_text_once_per_id(monkeypatch):
+    tmap = TokenMap("essay-1")
+    for index in range(20):
+        tmap.allocate("ID", f"S{index:07d}", "prior.md")
+    original_subn = re.subn
+    calls = 0
+
+    def count_subn(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_subn(*args, **kwargs)
+
+    monkeypatch.setattr("scripts.redaction.patterns.re.subn", count_subn)
+
+    text, count = redact_structured("S0000001 and S0000019", tmap, "current.md")
+
+    assert text == "ID_02 and ID_20"
+    assert count == 2
+    assert calls <= 1
+
+
+def test_known_id_sweep_does_not_compile_attacker_sized_alternation(monkeypatch):
+    tmap = TokenMap("essay-1")
+    short = tmap.allocate("ID", "AB", "prior.md")
+    longest = tmap.allocate("ID", "AB-123456", "prior.md")
+
+    def reject_compile(*args, **kwargs):
+        raise AssertionError("known-ID sweep compiled an attacker-sized regex")
+
+    monkeypatch.setattr("scripts.redaction.patterns.re.compile", reject_compile)
+
+    text, count = redact_structured("AB-123456 and AB", tmap, "current.md")
+
+    assert text == f"{longest} and {short}"
+    assert count == 2
+
+
+def test_known_id_sweep_does_not_build_one_node_per_identity_character():
+    tmap = TokenMap("essay-1")
+    for index in range(1000):
+        value = f"{index:04d}-" + (f"A{index:04d}" * 18)
+        tmap.allocate("ID", value, "prior.md")
+
+    tracemalloc.start()
+    try:
+        _sweep_known_ids("No known identifier appears here.", tmap)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+
+    assert peak < 5 * 1024 * 1024
 
 
 def test_a_possessive_student_cue_is_caught():
