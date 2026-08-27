@@ -19,9 +19,11 @@ artifact's existence do not prove that redaction completed or review happened.
 Before roster or input processing, a new safe attempt invalidates any regular
 same-batch clean manifest while preserving its identity-free bindings. Unsafe,
 linked or overlapping destinations are left untouched.
-Invalidation prefers atomic replacement and falls back to a descriptor-bound
-in-place rewrite after device, inode, file type and link-count checks. If neither
-method can complete, the caller stops with a dedicated unsafe failure.
+Invalidation stages an atomic replacement, then checks the path against the
+opened file's type, device, inode and single-link count immediately before
+replacement. A mismatch stops without replacement or fallback. An atomic I/O
+failure with unchanged identity can use the descriptor-bound in-place rewrite.
+If neither method completes, the caller stops with a dedicated unsafe failure.
 
 Conformance adapters are JSON argument arrays. The harness replaces only its
 documented placeholders and launches the result without shell interpolation.

@@ -28,14 +28,16 @@ recording an incomplete result. Roster-load, input-limit, or unsafe-source
 failure therefore cannot leave an earlier clean attempt eligible for grading.
 Linked manifests, linked destinations and overlapping roots are never rewritten.
 
-Invalidation uses atomic private replacement first. If directory permissions
-prevent creating or renaming a temporary file, it verifies the already-opened
-manifest's device, inode, regular-file type and single-link count, then writes
-the full reviewed-false payload through that descriptor and syncs it at mode
-0600. A partial write is malformed and blocks grading. If both methods fail,
-redaction reports a dedicated unsafe failure and stops before roster or input
-processing. `False` is safe to ignore only when no eligible same-batch regular
-manifest exists.
+Invalidation stages an owner-only atomic replacement first. Immediately before
+replacement, it requires the path to still identify the already-opened regular
+manifest by file type, device, inode and single-link count. A late replacement
+or hard link stops invalidation without overwriting that path. If atomic I/O
+fails while the identity is unchanged, it writes the full reviewed-false
+payload through the bound descriptor, syncs it and sets mode 0600. A partial
+write is malformed and blocks grading. If neither method completes, redaction
+reports a dedicated unsafe failure and stops before roster or input processing.
+`False` is safe to ignore only when no eligible same-batch regular manifest
+exists.
 
 ## What it misses
 

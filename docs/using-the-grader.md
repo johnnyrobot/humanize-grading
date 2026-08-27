@@ -290,11 +290,13 @@ Verification exits 12 until redaction records both exit 0 and reviewed state.
 For a safe existing destination, a new attempt clears prior reviewed state
 before roster and input checks. Early failures preserve the prior run ID and
 output digests but make `next` return `repair-redaction` instead of drafting.
-Atomic manifest replacement is preferred. When the directory cannot create or
-rename a temporary file, the tool rewrites the already-opened regular manifest
-through its bound file descriptor. If neither write can complete, redaction
-returns exit 6 before loading the roster; a partial write is malformed and
-therefore still blocks grading.
+Atomic manifest replacement is preferred. Immediately before replacing, the
+tool requires the path to still identify the already-opened regular single-link
+file; a late replacement or hard link returns exit 6 without overwriting it.
+When atomic I/O fails and that identity is unchanged, the tool rewrites the
+manifest through its bound file descriptor. If neither write can complete,
+redaction returns exit 6 before loading the roster; a partial write is malformed
+and therefore still blocks grading.
 
 **A non-zero exit stops redaction.** The codes:
 

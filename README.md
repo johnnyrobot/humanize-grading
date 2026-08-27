@@ -271,8 +271,10 @@ unreviewed. The instructor must inspect the private review file, then rerun the
 same redaction with `--reviewed --force` before verification can pass.
 Starting a new safe attempt first invalidates any regular same-batch clean
 manifest, so roster or input failures cannot leave earlier success eligible for
-grading. If that invalidation cannot be completed, redaction stops with an
-unsafe-path failure before it loads the roster or processes submissions.
+grading. It rechecks the bound manifest immediately before atomic replacement,
+so a late replacement or hard link is left untouched. If invalidation cannot be
+completed, redaction stops with an unsafe-path failure before it loads the
+roster or processes submissions.
 
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
 calibration, a graded batch end to end, the core command and exit-code
@@ -484,7 +486,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
-- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, and ships a synthetic agent-conformance harness. A trial without a read trace remains unverified.
+- **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, persists redaction review and exit status in schema 2 manifests, conditionally invalidates the bound manifest without overwriting late replacements or hard links, and ships a synthetic agent-conformance harness. A trial without a read trace remains unverified.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.
 - **3.1.0** — Grader is implemented: calibration with holdout validation, a scoring engine whose every quote is checked against its source, batch resume, a consistency pass, and the optional `block-raw-reads` hook.

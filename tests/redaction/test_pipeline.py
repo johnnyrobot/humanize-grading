@@ -2,12 +2,11 @@
 
 import json
 import os
+import tempfile
 
 import pytest
 
 import scripts.redact as redact_cli
-import scripts.redaction.manifest as manifest_module
-import redaction.manifest as cli_manifest_module
 from scripts.redaction.pipeline import (
     EXIT_CANDIDATES,
     EXIT_COLLISION,
@@ -205,14 +204,15 @@ def test_invalidation_refuses_a_manifest_replaced_after_open(
     ).save(destination)
     manifest = destination / "_redaction.json"
     replacement_bytes = b"replacement must stay untouched"
+    replacement = destination / "replacement"
+    replacement.write_bytes(replacement_bytes)
+    original_replace = os.replace
 
-    def replace_then_fail(path, text):
-        replacement = destination / "replacement"
-        replacement.write_bytes(replacement_bytes)
-        os.replace(replacement, path)
+    def replace_then_fail(source, target):
+        original_replace(replacement, target)
         raise OSError("synthetic atomic replacement failure")
 
-    monkeypatch.setattr(manifest_module, "write_private_text", replace_then_fail)
+    monkeypatch.setattr(os, "replace", replace_then_fail)
 
     with pytest.raises(RuntimeError, match="manifest changed during invalidation"):
         RedactionManifest.invalidate_existing(
@@ -222,6 +222,183 @@ def test_invalidation_refuses_a_manifest_replaced_after_open(
         )
 
     assert manifest.read_bytes() == replacement_bytes
+
+
+def test_cli_stops_when_manifest_is_replaced_before_atomic_write(
+    tmp_path, monkeypatch, capsys
+):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    manifest = destination / "_redaction.json"
+    replacement_bytes = b"replacement must stay untouched"
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(replacement_bytes)
+    original_mkstemp = tempfile.mkstemp
+    injected = False
+    roster_loaded = False
+
+    def replace_then_stage(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            os.replace(replacement, manifest)
+        return original_mkstemp(*args, **kwargs)
+
+    def load_roster(path):
+        nonlocal roster_loaded
+        roster_loaded = True
+        return []
+
+    monkeypatch.setattr(tempfile, "mkstemp", replace_then_stage)
+    monkeypatch.setattr(redact_cli, "load_roster", load_roster)
+
+    result = redact_cli.main(
+        [
+            str(tmp_path / "submissions"),
+            "--roster",
+            str(tmp_path / "roster.csv"),
+            "--batch",
+            "essay-2",
+            "--out",
+            str(destination),
+            "--map",
+            str(tmp_path / "map.json"),
+        ]
+    )
+    captured = capsys.readouterr()
+
+    assert result == EXIT_UNSAFE_PATH
+    assert roster_loaded is False
+    assert "manifest changed during invalidation" in captured.err
+    assert manifest.read_bytes() == replacement_bytes
+    assert list(destination.glob("._redaction.json.*.tmp")) == []
+
+
+def test_pipeline_stops_when_manifest_gains_a_hard_link_before_atomic_write(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    manifest = destination / "_redaction.json"
+    before = manifest.read_bytes()
+    hard_link = tmp_path / "hard-linked-manifest.json"
+    original_mkstemp = tempfile.mkstemp
+    injected = False
+
+    def link_then_stage(*args, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            os.link(manifest, hard_link)
+        return original_mkstemp(*args, **kwargs)
+
+    def fail_fallback(*args, **kwargs):
+        raise AssertionError("an identity mismatch must not use the fallback")
+
+    monkeypatch.setattr(tempfile, "mkstemp", link_then_stage)
+    monkeypatch.setattr(RedactionManifest, "_invalidate_in_place", fail_fallback)
+    source = tmp_path / "too-many"
+    source.mkdir()
+    for index in range(501):
+        (source / f"paper-{index:03d}.md").write_text("safe", encoding="utf-8")
+
+    result = run(
+        source=source,
+        destination=destination,
+        map_path=tmp_path / "map.json",
+        roster=[],
+        batch="essay-2",
+        force=True,
+    )
+
+    assert result.exit_code == EXIT_UNSAFE_PATH
+    assert "manifest changed during invalidation" in result.message
+    assert manifest.read_bytes() == before
+    assert hard_link.read_bytes() == before
+    assert list(destination.glob("._redaction.json.*.tmp")) == []
+
+
+def test_invalidation_atomically_replaces_an_unchanged_manifest(tmp_path):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    manifest = destination / "_redaction.json"
+    original_inode = manifest.stat().st_ino
+
+    changed = RedactionManifest.invalidate_existing(
+        destination,
+        batch="essay-2",
+        exit_code=EXIT_UNREADABLE,
+    )
+    current = RedactionManifest.load(destination)
+
+    assert changed is True
+    assert current.reviewed is False
+    assert current.exit_code == EXIT_UNREADABLE
+    assert manifest.stat().st_ino != original_inode
+    assert list(destination.glob("._redaction.json.*.tmp")) == []
+
+
+def test_invalidation_uses_bound_descriptor_after_atomic_replace_fails(
+    tmp_path, monkeypatch
+):
+    destination = tmp_path / "redacted"
+    destination.mkdir()
+    output = destination / "STUDENT_01.md"
+    output.write_text("safe", encoding="utf-8")
+    RedactionManifest.create(
+        "essay-2",
+        "run-identifier-1234",
+        [output],
+        reviewed=True,
+        exit_code=0,
+    ).save(destination)
+    manifest = destination / "_redaction.json"
+    original_inode = manifest.stat().st_ino
+
+    def fail_replace(source, target):
+        raise OSError("synthetic atomic replace failure")
+
+    monkeypatch.setattr(os, "replace", fail_replace)
+
+    changed = RedactionManifest.invalidate_existing(
+        destination,
+        batch="essay-2",
+        exit_code=EXIT_UNREADABLE,
+    )
+    current = RedactionManifest.load(destination)
+
+    assert changed is True
+    assert current.reviewed is False
+    assert current.exit_code == EXIT_UNREADABLE
+    assert manifest.stat().st_ino == original_inode
+    assert list(destination.glob("._redaction.json.*.tmp")) == []
 
 
 def test_cli_stops_before_roster_when_both_invalidation_writes_fail(
@@ -239,7 +416,7 @@ def test_cli_stops_before_roster_when_both_invalidation_writes_fail(
         exit_code=0,
     ).save(destination)
 
-    def fail_atomic(path, text):
+    def fail_atomic(source, target):
         raise OSError("synthetic atomic failure")
 
     def fail_in_place(descriptor, data):
@@ -248,7 +425,7 @@ def test_cli_stops_before_roster_when_both_invalidation_writes_fail(
     def fail_roster(path):
         raise AssertionError("roster loading must not run")
 
-    monkeypatch.setattr(cli_manifest_module, "write_private_text", fail_atomic)
+    monkeypatch.setattr(os, "replace", fail_atomic)
     monkeypatch.setattr(os, "write", fail_in_place)
     monkeypatch.setattr(redact_cli, "load_roster", fail_roster)
 
@@ -294,9 +471,11 @@ def test_pipeline_returns_unsafe_when_both_invalidation_writes_fail(
         (source / f"paper-{index:03d}.md").write_text("safe", encoding="utf-8")
 
     monkeypatch.setattr(
-        manifest_module,
-        "write_private_text",
-        lambda path, text: (_ for _ in ()).throw(OSError("synthetic atomic failure")),
+        os,
+        "replace",
+        lambda source, target: (_ for _ in ()).throw(
+            OSError("synthetic atomic failure")
+        ),
     )
     monkeypatch.setattr(
         os,

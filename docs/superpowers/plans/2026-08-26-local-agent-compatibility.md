@@ -22,9 +22,11 @@
 - A new safe redaction attempt invalidates regular same-batch clean state before
   roster and input processing while preserving identity-free bindings. Links
   and overlapping roots are never rewritten.
-- Eligible invalidation prefers atomic replacement and falls back to a
-  descriptor-bound, type/device/inode/link-checked, mode-0600 in-place write.
-  Both callers stop with exit 6 when neither method completes.
+- Eligible invalidation stages atomic replacement and immediately rechecks the
+  bound type, device, inode and single-link count before replacing. A mismatch
+  stops without replacement or fallback. Unchanged atomic I/O failure can use
+  the descriptor-bound mode-0600 in-place write. Both callers stop with exit 6
+  when invalidation cannot complete.
 - Draft pairs contain feedback Markdown and `grade-record/1` JSON for one token.
 - Feedback skeleton marker is exactly `<!-- replace-with-feedback -->` and always blocks unchanged feedback.
 - Record preparation reads only an approved brief, current profile/rubric, pattern reference, reviewed manifest, batch inventory, and redacted source.

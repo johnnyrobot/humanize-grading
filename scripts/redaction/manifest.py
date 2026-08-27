@@ -6,6 +6,7 @@ import json
 import hashlib
 import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -31,6 +32,77 @@ MAX_MANIFEST_BYTES = 1_048_576
 
 class RedactionInvalidationError(RuntimeError):
     """Eligible prior redaction state could not be made ineligible."""
+
+
+def _manifest_identity(state: os.stat_result) -> tuple[int, int, int, int]:
+    """Return the file facts that bind an opened manifest to its path."""
+    return (
+        stat.S_IFMT(state.st_mode),
+        state.st_dev,
+        state.st_ino,
+        state.st_nlink,
+    )
+
+
+def _require_manifest_identity(
+    path: Path, expected: tuple[int, int, int, int]
+) -> None:
+    """Require path to still name the bound regular single-link manifest."""
+    try:
+        if has_symlink_component(path.parent):
+            raise RedactionInvalidationError(
+                "The redaction manifest changed during invalidation."
+            )
+        current = path.lstat()
+    except RedactionInvalidationError:
+        raise
+    except OSError as error:
+        raise RedactionInvalidationError(
+            "The redaction manifest changed during invalidation."
+        ) from error
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or current.st_nlink != 1
+        or _manifest_identity(current) != expected
+    ):
+        raise RedactionInvalidationError(
+            "The redaction manifest changed during invalidation."
+        )
+
+
+def _write_invalidation_atomically(
+    path: Path,
+    text: str,
+    expected: tuple[int, int, int, int],
+) -> None:
+    """Stage owner-only text and replace only the still-bound manifest."""
+    _require_manifest_identity(path, expected)
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        temporary = Path(temporary_name)
+        os.fchmod(descriptor, 0o600)
+        handle = os.fdopen(descriptor, "w", encoding="utf-8")
+        descriptor = -1
+        with handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _require_manifest_identity(path, expected)
+        os.replace(temporary, path)
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                # Keep the original mismatch or I/O error. A cleanup error must
+                # not turn a refused pathname change into the in-place fallback.
+                pass
 
 
 @dataclass(frozen=True)
@@ -173,8 +245,9 @@ class RedactionManifest:
                 outputs=current.outputs,
             )
             text = invalidated._text()
+            expected = _manifest_identity(opened_state)
             try:
-                write_private_text(path, text)
+                _write_invalidation_atomically(path, text, expected)
                 return True
             except (OSError, ValueError) as atomic_error:
                 cls._invalidate_in_place(
