@@ -67,6 +67,7 @@ scripts/grading/drafts.py
 scripts/grading/holdout.py
 scripts/grading/profile.py
 scripts/grading/records.py
+scripts/grading/review.py
 scripts/grading/rubric.py
 scripts/grading/samples.py
 scripts/grading/verify.py
@@ -117,6 +118,7 @@ tests/grading/test_profile.py
 tests/grading/test_profile_command.py
 tests/grading/test_publication.py
 tests/grading/test_records.py
+tests/grading/test_review.py
 tests/grading/test_rubric.py
 tests/grading/test_samples.py
 tests/grading/test_verify.py

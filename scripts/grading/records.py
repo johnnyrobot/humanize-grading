@@ -15,6 +15,7 @@ source, which is the file the model actually read.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass, field
@@ -291,6 +292,17 @@ class GradeRecord:
             "pattern_density": self.pattern_density,
             "status": self.status,
         }
+
+    def review_digest(self) -> str:
+        """Digest the grading judgement without the offsets verification writes."""
+        payload = self.as_dict()
+        for criterion in payload["criteria"]:
+            for justification in criterion["justifications"]:
+                for key in ("offset", "line", "length"):
+                    justification.pop(key, None)
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        ).hexdigest()
 
     def save(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
