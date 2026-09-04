@@ -974,6 +974,25 @@ def test_stale_receipt_returns_repair_verification(
 
     assert action.action == "repair-verification"
     assert action.findings[0].code == "malformed-verification-receipt"
+    assert action.commands == ()
+
+
+def test_stale_receipt_after_a_draft_edit_returns_the_verify_command(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    GradingBatch.open(
+        BatchPaths(context.batch, context.redacted, context.drafts)
+    ).verify(_inputs_for(context))
+    (context.drafts / "STUDENT_01.md").write_text(FEEDBACK + "\n", encoding="utf-8")
+
+    action = next_action(context)
+
+    assert action.action == "repair-verification"
+    assert [finding.code for finding in action.findings] == [
+        "stale-verification-receipt"
+    ]
+    assert action.commands[0][:3] == ("python3", "scripts/grade.py", "verify")
 
 
 @pytest.mark.parametrize("kind", ["directory", "symlink"])

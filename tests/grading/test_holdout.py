@@ -462,3 +462,15 @@ def test_compare_uses_the_supplied_point_tolerance(phil210):
     tight = compare(_record(87, "B"), "Solid.", sample, point_tolerance=2)
     assert not any("points" in finding for finding in loose.findings)
     assert any("points" in finding for finding in tight.findings)
+
+
+def test_phrases_quoted_from_the_essay_do_not_count_as_carried_voice(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    opening = "You used to buy software in a physical box"
+    assert opening in sample.essay
+    assert opening.lower() in sample.comments_only().lower(), (
+        "the fixture instructor must quote the opening for this test to mean anything"
+    )
+    delta = compare(_record(83, "B"), f"[{opening}: too conversational.]", sample)
+    assert delta.shared_phrases == ()
+    assert any("no phrasing" in finding.lower() for finding in delta.findings)

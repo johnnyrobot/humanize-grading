@@ -138,7 +138,8 @@ locally. For each holdout the report shows:
 
 - The instructor's score against the generated score.
 - The letter band, matched or not.
-- Which of the instructor's own sentences the generated feedback reused.
+- Which of the instructor's own sentences the generated feedback reused. A
+  phrase both sides quoted from the student's essay does not count.
 - The length of the generated feedback against the instructor's.
 
 Then an aggregate: mean and largest score gap, letter match rate, how many

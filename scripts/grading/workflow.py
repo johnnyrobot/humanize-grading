@@ -464,11 +464,20 @@ def next_action(context: WorkflowContext) -> NextAction:
         if all(
             finding.code in receipt_codes for finding in status.blocking_findings
         ):
+            stale_only = all(
+                finding.code == "stale-verification-receipt"
+                for finding in status.blocking_findings
+            )
             return _action(
                 context,
                 stage="verification",
                 action="repair-verification",
-                message="Repair the verification receipt and verify again.",
+                message=(
+                    "A verified artifact changed. Run verification again."
+                    if stale_only
+                    else "Repair the verification receipt and verify again."
+                ),
+                commands=(_verify_command(context),) if stale_only else (),
                 findings=status.blocking_findings,
             )
         return _action(

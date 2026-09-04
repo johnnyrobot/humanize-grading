@@ -74,7 +74,12 @@ def compare(
     """Compare one generated grade and its feedback against a graded sample."""
     generated_words = _words(feedback)
     instructor_words = _words(sample.comments_only())
-    shared = sorted(_phrases(generated_words) & _phrases(instructor_words))
+    # A phrase both sides quoted from the student's essay is the student's
+    # voice, not the instructor's. Only instructor prose counts as carried.
+    essay_phrases = _phrases(_words(sample.essay))
+    shared = sorted(
+        (_phrases(generated_words) & _phrases(instructor_words)) - essay_phrases
+    )
 
     points = record.total - sample.score
     letter_match = record.letter.strip() == sample.letter.strip()
