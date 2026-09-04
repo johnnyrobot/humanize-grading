@@ -454,3 +454,11 @@ def test_calibrate_inputs_refuses_a_holdout_folder_inside_the_samples(phil210, t
     assert result.returncode == 13
     assert "samples folder" in result.stderr
     assert not (phil210 / "graded" / "blind").exists()
+
+
+def test_compare_uses_the_supplied_point_tolerance(phil210):
+    sample = load_sample(phil210 / PAPER_5)
+    loose = compare(_record(87, "B"), "Solid.", sample, point_tolerance=5)
+    tight = compare(_record(87, "B"), "Solid.", sample, point_tolerance=2)
+    assert not any("points" in finding for finding in loose.findings)
+    assert any("points" in finding for finding in tight.findings)

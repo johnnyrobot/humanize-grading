@@ -62,7 +62,14 @@ def _phrases(words: list[str]) -> set[str]:
     }
 
 
-def compare(record: GradeRecord, feedback: str, sample: GradedSample) -> Delta:
+def compare(
+    record: GradeRecord,
+    feedback: str,
+    sample: GradedSample,
+    *,
+    point_tolerance: int = POINT_TOLERANCE,
+    length_tolerance: float = LENGTH_TOLERANCE,
+) -> Delta:
     """Compare one generated grade and its feedback against a graded sample."""
     generated_words = _words(feedback)
     instructor_words = _words(sample.comments_only())
@@ -77,7 +84,7 @@ def compare(record: GradeRecord, feedback: str, sample: GradedSample) -> Delta:
     )
 
     findings: list[str] = []
-    if abs(points) > POINT_TOLERANCE:
+    if abs(points) > point_tolerance:
         direction = "above" if points > 0 else "below"
         findings.append(
             f"The generated total is {abs(points)} points {direction} the "
@@ -93,7 +100,7 @@ def compare(record: GradeRecord, feedback: str, sample: GradedSample) -> Delta:
             "The feedback reuses no phrasing from the instructor's own "
             "comments. Check the comment bank and the voice section."
         )
-    if ratio and (ratio > LENGTH_TOLERANCE or ratio < 1 / LENGTH_TOLERANCE):
+    if ratio and (ratio > length_tolerance or ratio < 1 / length_tolerance):
         findings.append(
             f"The feedback length is {ratio}x the instructor's. Check the "
             "feedback structure section."

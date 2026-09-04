@@ -126,3 +126,19 @@ verification.
 - It is important to note that
 - delve
 - tapestry
+
+## Instructor answers
+
+The calibration interview, in the instructor's words. No student is named.
+
+- **Where does an A begin, and what does one do that a B does not?** An A
+  begins at 93. It uses a named theorist as an analytical tool. A B uses the
+  theorist as decoration.
+- **Which criterion do you forgive, and which do you never forgive?** I
+  forgive prose slips when the argument holds. I never forgive a missing
+  citation.
+- **When work is failing, do you say so plainly or soften it?** Plainly. A D
+  is given, not softened.
+- **Is there anything you would never write to a student?** Nothing that
+  sounds like a chatbot, and never an empty compliment.
+- **How long should feedback be?** 180 to 320 words.

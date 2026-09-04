@@ -34,7 +34,11 @@ REQUIRED_SECTIONS = (
     "Voice",
     "Comment bank",
     "Never-use list",
+    "Instructor answers",
 )
+
+DEFAULT_POINT_TOLERANCE = 5
+DEFAULT_LENGTH_TOLERANCE = 2.0
 
 _META = re.compile(r"^\*\*(.+?)\*\*\s*:\s*(.+?)\s*$")
 _HEADING = re.compile(r"^##\s+(.+?)\s*$")
@@ -68,6 +72,8 @@ class Profile:
     criterion_names: dict[int, str] = field(default_factory=dict)
     never_use: tuple[str, ...] = ()
     sections: dict[str, str] = field(default_factory=dict)
+    point_tolerance: int = DEFAULT_POINT_TOLERANCE
+    length_tolerance: float = DEFAULT_LENGTH_TOLERANCE
 
     def drift(self, rubric: Rubric) -> list[str]:
         """Return the criteria that changed since calibration, by name.
@@ -90,6 +96,34 @@ class Profile:
         if self.rubric_digest != rubric.digest and not drifted:
             drifted.append("whole rubric fingerprint")
         return drifted
+
+
+def _tolerance(
+    meta: dict[str, str],
+    name: str,
+    kind,
+    default,
+    low,
+    high,
+    path: Path,
+):
+    """Read one optional tolerance header, or refuse a value outside its range."""
+    raw = meta.get(name)
+    if raw is None:
+        return default
+    try:
+        value = kind(raw)
+    except ValueError as error:
+        raise ProfileError(
+            f"{path.name} has an unreadable '**{name}**:' value."
+        ) from error
+    exclusive_low = kind is float
+    if value > high or value < low or (exclusive_low and value == low):
+        bound = "above" if exclusive_low else "at least"
+        raise ProfileError(
+            f"{path.name} '**{name}**:' must be {bound} {low} and at most {high}."
+        )
+    return value
 
 
 def load_profile(path: Path) -> Profile:
@@ -155,6 +189,13 @@ def load_profile(path: Path) -> Profile:
             f"{path.name} has no '**Rubric context digest**:' line."
         )
 
+    point_tolerance = _tolerance(
+        meta, "Point tolerance", int, DEFAULT_POINT_TOLERANCE, 0, 100, path
+    )
+    length_tolerance = _tolerance(
+        meta, "Length tolerance", float, DEFAULT_LENGTH_TOLERANCE, 1.0, 10.0, path
+    )
+
     return Profile(
         path=path,
         course=course,
@@ -168,4 +209,6 @@ def load_profile(path: Path) -> Profile:
         criterion_names=names,
         never_use=never_use,
         sections={name: "\n".join(body).strip() for name, body in sections.items()},
+        point_tolerance=point_tolerance,
+        length_tolerance=length_tolerance,
     )

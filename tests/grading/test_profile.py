@@ -140,3 +140,41 @@ def test_the_default_path_is_under_the_grading_directory(tmp_path):
 def test_course_names_cannot_escape_the_profile_directory(tmp_path):
     with pytest.raises(ValueError, match="course"):
         profile_path("../other-course", tmp_path)
+
+
+def test_it_reads_default_tolerances(profile):
+    loaded = load_profile(profile)
+    assert loaded.point_tolerance == 5
+    assert loaded.length_tolerance == 2.0
+
+
+def test_it_reads_explicit_tolerances(profile, tmp_path):
+    text = profile.read_text(encoding="utf-8").replace(
+        "**Samples**: 4",
+        "**Samples**: 4\n**Point tolerance**: 3\n**Length tolerance**: 1.5",
+    )
+    edited = tmp_path / "phil210.md"
+    edited.write_text(text, encoding="utf-8")
+    loaded = load_profile(edited)
+    assert loaded.point_tolerance == 3
+    assert loaded.length_tolerance == 1.5
+
+
+def test_a_bad_tolerance_is_refused(profile, tmp_path):
+    text = profile.read_text(encoding="utf-8").replace(
+        "**Samples**: 4", "**Samples**: 4\n**Length tolerance**: 0.5"
+    )
+    edited = tmp_path / "phil210.md"
+    edited.write_text(text, encoding="utf-8")
+    with pytest.raises(ProfileError, match="Length tolerance"):
+        load_profile(edited)
+
+
+def test_instructor_answers_is_required(profile, tmp_path):
+    text = profile.read_text(encoding="utf-8").replace(
+        "## Instructor answers", "## Notes"
+    )
+    edited = tmp_path / "phil210.md"
+    edited.write_text(text, encoding="utf-8")
+    with pytest.raises(ProfileError, match="Instructor answers"):
+        load_profile(edited)
