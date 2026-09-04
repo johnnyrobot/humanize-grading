@@ -319,6 +319,29 @@ def _complete_trial(workspace: Path) -> None:
     assert published.returncode == 0, published.stderr
 
 
+def test_grading_phase_prompt_names_pilot_and_consistency_phrases(tmp_path):
+    prompt = conformance_run._phase_prompt("grading", tmp_path)
+    assert "Approve pilot drafts for essay-2" in prompt
+    assert "Acknowledge consistency flags for essay-2" in prompt
+    assert "review-pilot" in prompt and "review-consistency" in prompt
+    briefing = conformance_run._phase_prompt("briefing", tmp_path)
+    assert "already approved" in briefing
+
+
+def test_trial_workspace_passes_the_calibration_gate(tmp_path):
+    from scripts.grading.calibration import check_calibration
+
+    workspace = _trial(tmp_path)
+    status = check_calibration(
+        workspace / ".grading",
+        course="phil210",
+        profile=workspace / PROFILE,
+        rubric=workspace / RUBRIC,
+    )
+    assert status.state == "current", status.message
+    assert status.approval is not None and status.approval.synthetic is True
+
+
 def test_conformance_uses_exact_batch_publication_path(tmp_path):
     workspace = _trial(tmp_path)
     prompt = conformance_run._phase_prompt("grading", workspace)

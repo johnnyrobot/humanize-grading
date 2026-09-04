@@ -34,6 +34,11 @@ from scripts.grading._conformance_model import (
     TRIAL_SCHEMA,
     TRIAL_SUBMISSIONS,
 )
+from scripts.grading.calibration import (
+    DEMO_AUTHORIZATION,
+    DEMO_MARKER,
+    approve_synthetic,
+)
 from scripts.grading._conformance_process import (
     popen_group_options,
     terminate_process_group,
@@ -354,6 +359,31 @@ def create_trial(repo_root: Path, workspace: Path | None = None) -> Path:
         private_write(
             destination / TRIAL_PROFILE,
             read_bytes_limited(profile_source, "The synthetic profile", 1024 * 1024),
+        )
+        # The trial is synthetic, so it carries the same synthetic calibration
+        # authorization as the bundled demo. A real course must measure
+        # holdouts and record the instructor's exact approval instead.
+        state_root = destination / TRIAL_PROFILE.parents[1]
+        approve_synthetic(
+            state_root,
+            course=TRIAL_COURSE,
+            profile=destination / TRIAL_PROFILE,
+            rubric=destination / "tests/fixtures/phil210/grading_rubric.md",
+        )
+        private_write(
+            state_root / DEMO_MARKER,
+            (
+                json.dumps(
+                    {
+                        "authorization": DEMO_AUTHORIZATION,
+                        "synthetic": True,
+                        "trial": TRIAL_SCHEMA,
+                    },
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8"),
         )
         private_write(destination / TRIAL_ROSTER, _TRIAL_ROSTER_TEXT.encode("utf-8"))
         private_write(

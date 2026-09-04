@@ -55,8 +55,10 @@ def _phase_prompt(name: str, workspace: Path) -> str:
     )
     tasks = {
         "briefing": (
-            "Prepare the local assignment brief, answer every required item, and "
-            "approve it with the exact approval phrase returned by the workflow."
+            "Calibration for this synthetic course is already approved. Prepare "
+            "the local assignment brief with the default pilot review cadence, "
+            "answer every required item, and approve it with the exact approval "
+            "phrase returned by the workflow."
         ),
         "redaction": (
             "Execute the returned redaction command without opening the raw submission, "
@@ -64,9 +66,14 @@ def _phase_prompt(name: str, workspace: Path) -> str:
             "redaction command and stop when next advances to grading."
         ),
         "grading": (
-            "Follow next through draft-pair preparation, grading, verification, "
-            "consistency, and publication. Edit the prepared pair; replace every "
-            "feedback marker. Never open the token map, review file, or final output."
+            "Follow next through draft-pair preparation, grading, pilot review, "
+            "verification, consistency review, and publication. Edit the prepared "
+            "pair; replace every feedback marker. In this synthetic trial you also "
+            "act as the instructor: when next returns review-pilot, run its returned "
+            "command with the phrase 'Approve pilot drafts for essay-2'; when it "
+            "returns review-consistency, run the consistency command, then run it "
+            "again with --acknowledge 'Acknowledge consistency flags for essay-2'. "
+            "Never open the token map, review file, or final output."
         ),
     }
     return (
