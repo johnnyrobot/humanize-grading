@@ -6,8 +6,8 @@ about which files the agent read.
 
 It does not prove grading quality. It does not accept real student work.
 
-Every invocation below is illustrative until Task 6 records live evidence for
-an exact runtime and model combination. The harness itself is not conformance
+No invocation below is evidence for an exact runtime and model combination
+until a live trial records it. The harness itself is not conformance
 evidence.
 
 ## Current release scope

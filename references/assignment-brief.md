@@ -24,6 +24,10 @@ profile, assignment prompt, or earlier answers do not already supply the answer.
 7. Local or cloud operation and the privacy consequence of that choice. Fully
    local model inference and agent execution are recommended. Cloud use still
    requires redaction and institutional permission.
+8. Review cadence. `pilot` stops after the first drafts, two by default, so
+   the instructor reads them before the batch continues. `every` stops after
+   each draft. Neither can be turned off for a real batch. Record the answer
+   with `--review` and `--pilot-size` when preparing the brief.
 
 ## What the agent may read
 
@@ -41,18 +45,24 @@ Prepare the local draft:
 
 ```bash
 python3 scripts/grade.py brief prepare \
-  --batch <batch> --course <course> --mode <local-or-cloud>
+  --batch <batch> --course <course> --mode <local-or-cloud> \
+  --review pilot --pilot-size 2
 ```
 
-Use the CLI course key for `<course>`. The prepared file is the only valid
-starting shape for an assignment brief. If the command or agent command tool
+Use the CLI course key for `<course>`. Pass `--review every` for per-draft
+review. Pass `--purpose holdout` only for the calibration holdout batch; that
+brief must be local, takes review cadence `none`, and can never publish. The
+prepared file is the only valid starting shape for an assignment brief.
+Approval for a grading brief refuses with exit 14 until the course's
+calibration receipt and profile approval are current. If the command or agent command tool
 fails, keep the brief unprepared, report the exact error, and retry with
 corrected arguments. Do not hand-build a replacement brief.
 
 Replace every `<!-- answer-required -->` marker with the instructor's answers.
-The generated `Host mode:` line already records local or cloud operation. In
-the `Boundaries` answer, record the privacy consequence and prohibited moves;
-do not repeat or replace that generated line. Then show a short summary with
+The generated `Host mode:`, `Purpose:`, `Review cadence:`, and `Pilot size:`
+lines already record those choices and must match the front matter. In the
+`Boundaries` answer, record the privacy consequence and prohibited moves; do
+not repeat or replace those generated lines. Then show a short summary with
 the course, assignment, batch, file paths,
 profile status, grading priorities, required evidence, feedback behavior,
 prohibited assumptions, host mode, and privacy consequence.
@@ -89,13 +99,17 @@ An approved brief survives an interrupted agent session or machine restart.
 Run `brief check` before resuming.
 
 The instructor must approve again when the brief body, course, batch, host
-mode, rubric, or calibration profile changes, or when required metadata or
-sections are removed. Verify the whole grading batch again after reapproval.
+mode, purpose, review cadence, pilot size, rubric, or calibration profile
+changes, or when required metadata or sections are removed. Verify the whole
+grading batch again after reapproval.
 
 ## File format
 
 The default path is `.grading/assignments/<batch>.md`. The file uses schema
-`grading-assignment-brief/1`, strict front matter, and these six body headings:
+`grading-assignment-brief/2`, strict front matter, and these six body headings.
+Schema 1 briefs no longer load; prepare and approve a new brief. Review
+cadence `none` is valid only for the synthetic demo batch, and `next` also
+requires the demo marker for it.
 
 - `## Assignment`
 - `## Grading priorities`

@@ -14,11 +14,16 @@ python3 scripts/demo.py prepare --source <grading_mock_papers/> --json
 
 The command checks the complete file inventory and every file digest before it
 creates state. It then creates a unique owner-only run directory, installs the
-synthetic PHIL 210 profile and batch roster, binds the fixed local assignment
-brief, redacts the five submissions, completes the bound synthetic review, and
-returns the first legal grading action.
+synthetic PHIL 210 profile with a synthetic calibration approval, installs the
+batch roster, binds the fixed local assignment brief with review cadence
+`none`, redacts the five submissions, completes the bound synthetic review, and
+returns the first legal grading action. The synthetic approval and the `none`
+cadence are valid only inside this prepared run. A real course measures
+holdouts, approves the profile, reviews a pilot, and acknowledges consistency
+flags; say so when you narrate.
 
-Continue unattended only when the JSON says all of the following:
+Continue without further approvals only when the JSON says all of the
+following:
 
 - `schema` is `humanizer-grading-demo/1`;
 - `synthetic` is `true`;

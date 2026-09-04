@@ -27,7 +27,7 @@ MAX_DEMO_FILE_BYTES = 10 * 1_048_576
 
 
 class DemoError(ValueError):
-    """The requested folder is not eligible for unattended demo mode."""
+    """The requested folder is not eligible for self-approving demo mode."""
 
 
 @dataclass(frozen=True)

@@ -55,3 +55,35 @@ _Avoid_: Consistency flag, warning
 **Consistency flag**:
 An advisory signal that asks the instructor to compare work across a grading batch. It never blocks the batch.
 _Avoid_: Verification failure, blocking finding
+
+**Calibration packet**:
+The identity-free JSON that `calibrate.py inputs` writes from graded samples: the instructor's scrubbed comments, scores, and the rubric fingerprint. It carries no essay text and no name.
+_Avoid_: Training set, sample dump
+
+**Holdout batch**:
+A grading batch whose brief has purpose `holdout`. It grades blind copies of held-back graded samples so the profile can be measured, and it can never publish.
+_Avoid_: Test batch, calibration run
+
+**Calibration receipt**:
+An identity-free record that holdouts measured one exact profile against one exact rubric: digests, counts, the per-holdout gaps, the aggregate, and whether it passed.
+_Avoid_: Holdout report, score card
+
+**Profile approval**:
+The instructor's exact-phrase approval of a calibration profile, bound to the profile, rubric, and receipt digests. A gap may be accepted with a recorded reason.
+_Avoid_: Calibration sign-off, profile lock
+
+**Review cadence**:
+How drafts reach the instructor before verification: `pilot` stops after the first drafts, `every` stops after each draft, and `none` is reserved for the synthetic demo.
+_Avoid_: Review mode, approval level
+
+**Pilot review**:
+The instructor's exact-phrase approval of the first drafts of a batch, bound to those drafts' digests, before the batch continues.
+_Avoid_: Spot check, sample review
+
+**Draft review record**:
+`_review.json` in the drafts folder. It holds pilot or per-draft approvals bound to feedback and grade digests. Verification refuses a changed or unapproved draft.
+_Avoid_: Approval log, sign-off file
+
+**Consistency acknowledgement**:
+`_consistency.json` in the drafts folder. It records that the instructor saw the consistency flags for the exact verification receipt. Publication refuses without it.
+_Avoid_: Consistency approval, flag dismissal

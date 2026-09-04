@@ -3,21 +3,21 @@
 A walkthrough of the whole system, from a folder of student essays to feedback
 you can paste into your LMS.
 
-Synthetic runs covered `calibrate.py inputs` and `holdout`; `grade.py profile`,
-`brief`, `next`, `record prepare`, `status`, `verify` and `consistency`; plus
-`redact.py` and `rehydrate.py`. The lifecycle output shown comes from that work
-against `tests/fixtures/phil210/`. The conformance `run` and `audit` commands
-near the end are illustrative until Task 6 records live agent evidence. You can
-follow the deterministic sections with the synthetic corpus before using your
-own files.
+Synthetic runs covered `calibrate.py inputs`, `holdout`, `approve` and
+`check`; `grade.py profile`, `brief`, `next`, `record prepare`, `review`,
+`status`, `verify` and `consistency`; plus `redact.py` and `rehydrate.py`. The
+lifecycle output shown comes from that work against `tests/fixtures/phil210/`.
+The conformance `run` and `audit` commands near the end have been exercised
+only against the synthetic trial fixture. You can follow the deterministic
+sections with the synthetic corpus before using your own files.
 
 ## What you are working with
 
 | Piece | What it does | Where it runs |
 | --- | --- | --- |
 | `scripts/redact.py` | Replaces student identity with stable tokens | Your machine only |
-| `scripts/calibrate.py` | Builds calibration inputs, reports the holdout delta | Your machine only |
-| `scripts/grade.py` | Owns assignment briefs, grading-batch status, verification receipts, pattern counts and consistency flags | Your machine only |
+| `scripts/calibrate.py` | Builds calibration inputs, measures the holdouts, records the profile approval | Your machine only |
+| `scripts/grade.py` | Owns assignment briefs, draft review, grading-batch status, verification receipts, pattern counts, consistency flags and their acknowledgement | Your machine only |
 | `scripts/rehydrate.py` | Requires a current receipt, then stages and publishes rehydrated draft feedback | Your machine only |
 | `SKILL.md` | The grader. Reads the rubric and the profile, scores the work, drafts the feedback | Local or cloud model |
 | `skills/humanizer/SKILL.md` | The finishing pass that keeps feedback from reading like a chatbot | Local or cloud model |
@@ -115,7 +115,8 @@ agent for calibration before returning to the cloud grading path.
 ## Part 1 — Calibrate, once per course
 
 Calibration learns two things your rubric cannot record: where you actually land
-against your own scale, and how you write.
+against your own scale, and how you write. It ends with a measurement and your
+approval. Grading refuses until both are current.
 
 **It is local-only.** Continue only after the instructor chose the local path
 above. Calibration reads work the instructor already graded, which still
@@ -126,11 +127,12 @@ carries names. Refuse to calibrate after a cloud answer.
 - Your rubric, as Markdown. See `references/rubric-format.md` for what the
   parser needs — numbered criteria, a point value each, and a grading scale that
   covers 0 to 100.
-- Three to eight pieces of work you have already graded, each with the work,
-  your comments, and your score.
+- Four to ten pieces of work you have already graded, each with the work, your
+  comments, and your score. Three to eight become calibration samples; one or
+  two are held back to measure the profile.
 - Your class roster as CSV with `name,student_id,email` columns.
 
-### 1.2 Build the calibration packet
+### 1.2 Build the calibration packet and the blind holdout copies
 
 ```bash
 python3 scripts/calibrate.py inputs \
@@ -138,6 +140,7 @@ python3 scripts/calibrate.py inputs \
   --samples tests/fixtures/phil210/graded \
   --roster tests/fixtures/phil210/roster.csv \
   --holdout paper_5_graded_subscription_software_paradox.md \
+  --holdout-out .grading/holdout-submissions/phil210 \
   --out .grading/calibration-inputs.json
 ```
 
@@ -145,6 +148,7 @@ python3 scripts/calibrate.py inputs \
 Wrote .grading/calibration-inputs.json. 4 calibration samples, 1 held back.
 Scrubbed 4 name forms from the comments.
 Read references/calibration.md before building the profile.
+Wrote 1 blind holdout submissions to .grading/holdout-submissions/phil210. Grade them as a holdout batch.
 ```
 
 **This is the safety step.** It throws away every student essay and keeps only
@@ -153,13 +157,21 @@ It carries no filenames — samples are labelled `sample_1`, `sample_2` and so o
 in sorted order, because gradebook exports routinely name files
 `Lastname_Firstname_...`.
 
+The five-paper synthetic corpus needs one holdout. Six or more graded papers
+need two, named with a second `--holdout`. The blind copies hold each
+holdout's header and essay only. Every bracketed span is removed, because your
+inline comments live in brackets and cannot be told from a student's by
+syntax.
+
 Build the profile from this packet, never from the sample files directly.
 
 ### 1.3 Write the profile
 
 Ask the grader skill to build `.grading/profiles/<course>.md` from the packet.
-`references/calibration.md` holds the interview protocol and the eight sections
-a profile needs.
+`references/calibration.md` holds the interview protocol and the nine sections
+a profile needs. The agent always asks where an A begins and which criterion
+you never forgive, and records every answer under `## Instructor answers` in
+your words.
 
 Two rules the profile must obey, because a cloud run reads it:
 
@@ -168,30 +180,89 @@ Two rules the profile must obey, because a cloud run reads it:
   leaking out of a profile would be reattached at rehydration to whichever
   student holds it in the current batch.
 
+The header may set `**Point tolerance**` and `**Length tolerance**`, the
+limits the holdouts are measured against. The defaults are 5 points and a
+length ratio of 2. `**Samples**` must equal the packet's sample count.
+
 `tests/fixtures/phil210/profile_phil210.md` is a complete worked example.
 
-### 1.4 Check the profile against the holdout
+### 1.4 Grade the holdouts blind
 
-This is calibration's real deliverable. Grade the held-back sample blind, then:
+Prepare a holdout brief, then run the ordinary grading loop from Part 2 on the
+blind copies:
+
+```bash
+python3 scripts/grade.py brief prepare \
+  --batch holdout-phil210 --course phil210 --mode local --purpose holdout
+```
+
+A holdout brief must be local. Its batch skips the profile-approval gate, has
+no pilot stop, ends at `report-holdout` after verification, and can never
+publish. Redaction review still applies, because the blind copies carry past
+students' names until redaction runs.
+
+### 1.5 Measure the profile against the holdouts
+
+One `--record`, `--draft`, and `--sample` per holdout. Read the token map
+locally to pair each token with its graded sample.
 
 ```bash
 python3 scripts/calibrate.py holdout \
-  --record .grading/drafts/holdout/STUDENT_01.json \
-  --draft  .grading/drafts/holdout/STUDENT_01.md \
+  --course phil210 \
+  --rubric tests/fixtures/phil210/grading_rubric.md \
+  --packet .grading/calibration-inputs.json \
+  --record .grading/drafts/holdout-phil210/STUDENT_01.json \
+  --draft  .grading/drafts/holdout-phil210/STUDENT_01.md \
   --sample tests/fixtures/phil210/graded/paper_5_graded_subscription_software_paradox.md
 ```
 
-You get a report comparing your score against the generated one, the letter
-band, which of your own sentences carried through, and the length ratio.
+For each holdout you get your score against the generated one, the letter
+band, which of your own sentences carried through, and the length ratio. Then
+an aggregate: mean and largest score gap, letter match rate, how many holdouts
+carried your phrasing, and the length ratio range.
 
-**Read it before you grade anything else.** A bad profile should surface in the
-first minute, not on the fortieth essay. If the gap is wide or none of your
-phrasing came through, edit the profile and run it again. Profiles are plain
-Markdown, dated, and yours to hand-edit.
+The command writes `.grading/calibration/phil210.receipt.json`. It holds
+digests, counts, and numbers, never a name, an essay sentence, or one of your
+sentences. Exit 0 means every holdout stayed inside the tolerances. Exit 15
+means a gap; the receipt records it.
+
+**Read the report before you grade anything else.** A bad profile should
+surface in the first minute, not on the fortieth essay. If the gap is wide or
+none of your phrasing came through, edit the profile and run the holdouts
+again. Profiles are plain Markdown, dated, and yours to hand-edit. Any edit
+makes the receipt stale.
+
+### 1.6 Approve the profile
+
+Send the exact message:
+
+```text
+Approve calibration profile for phil210
+```
+
+The agent then records it:
+
+```bash
+python3 scripts/calibrate.py approve \
+  --course phil210 \
+  --rubric tests/fixtures/phil210/grading_rubric.md \
+  --approval "Approve calibration profile for phil210"
+python3 scripts/calibrate.py check \
+  --course phil210 --rubric tests/fixtures/phil210/grading_rubric.md
+```
+
+If the holdouts showed a gap you still want to accept, the agent adds
+`--accept-gap --reason "<your words>"`, and the reason is recorded. The
+approval binds the profile, rubric, and receipt by digest. Change any of them
+and `check` exits 14 until you run the holdouts and approve again.
+
+### 1.7 Keep it current
 
 The profile is reusable course guidance. It records your standards and voice.
 Before each grading batch, an assignment brief confirms how that profile
 applies to the current assignment. It does not replace calibration.
+`grade.py profile` warns when a profile is more than 120 days old or has five
+or more approved briefs behind it. Add graded work and calibrate again.
 
 ## Part 2 — Grade a batch
 
@@ -212,20 +283,22 @@ python3 scripts/grade.py profile --course phil210 --rubric grading_rubric.md
 ```
 
 ```
-Profile for phil210 is current, calibrated 2026-08-24 from 4 samples.
+Profile for phil210 is current, calibrated 2026-08-24 from 4 samples. Calibration approved 2026-09-03T18:05:00Z.
 ```
 
 If you have edited the rubric since calibrating, this names the drifted criteria
 and exits 11, because grading against a changed criterion applies standards
-calibrated for different words. Recalibrate before preparing the assignment
-brief.
+calibrated for different words. If no holdout measured the profile, the
+receipt is stale, or you have not approved it, it exits 14 and says which.
+Return to Part 1 before preparing the assignment brief.
 
 ### 2.3 Prepare and approve the assignment brief
 
 Read `references/assignment-brief.md` before starting. For this batch, the agent
 asks about the assignment and paths, profile fit, learning goals and rubric
 priorities, required evidence and common mistakes, feedback behavior, things to
-avoid, and the local or cloud privacy consequence.
+avoid, the local or cloud privacy consequence, and the review cadence: a pilot
+of the first drafts, two by default, or every draft.
 
 Record both the human-readable course name (`PHIL 210`) and its path-safe CLI
 key (`phil210`). Every `--course` argument and profile path uses the key.
@@ -240,7 +313,9 @@ Prepare the owner-only local draft:
 python3 scripts/grade.py brief prepare \
   --batch essay-2 \
   --course phil210 \
-  --mode cloud
+  --mode cloud \
+  --review pilot \
+  --pilot-size 2
 ```
 
 The default path is `.grading/assignments/essay-2.md`. The agent fills every
@@ -270,10 +345,12 @@ python3 scripts/grade.py brief check \
   --rubric grading_rubric.md
 ```
 
-On resume, run `brief check`; do not repeat the interview when the approved
-inputs have not changed. A change to the brief body, course, batch, host mode,
-rubric or profile requires approval again. Chat approval records workflow state.
-It is not a signature, human authentication or privacy permission.
+Approval refuses with exit 14 until the course's calibration is approved and
+current. On resume, run `brief check`; do not repeat the interview when the
+approved inputs have not changed. A change to the brief body, course, batch,
+host mode, purpose, review cadence, pilot size, rubric or profile requires
+approval again. Chat approval records workflow state. It is not a signature,
+human authentication or privacy permission.
 
 ### 2.4 Run the next action, then redact
 
@@ -368,13 +445,14 @@ The versioned result contains argument arrays rather than shell strings:
 
 ```json
 {
-  "schema": "grading-next-action/1",
+  "schema": "grading-next-action/2",
   "batch": "essay-2",
   "course": "phil210",
   "stage": "drafting",
   "action": "prepare-record",
   "message": "Prepare the draft pair for STUDENT_01.",
   "token": "STUDENT_01",
+  "tokens": [],
   "commands": [["python3", "scripts/grade.py", "record", "prepare"]],
   "findings": []
 }
@@ -461,7 +539,41 @@ assessable score, rubric level and supporting quote; leave a criterion
 `record prepare` computed that density from the redacted source; there is no
 separate density stage in the `next` lifecycle.
 
-### 2.7 Verify
+### 2.7 Review the pilot
+
+After the second draft pair is complete and clean, `next` returns
+`review-pilot` with both tokens and no further drafting:
+
+```
+Action: review-pilot
+Show the instructor these 2 tokenized pilot drafts, then wait for: Approve pilot drafts for essay-2
+Tokens: STUDENT_01, STUDENT_02
+Command: python3 scripts/grade.py review approve --batch essay-2 --course phil210 ... --scope pilot --approval 'Approve pilot drafts for essay-2'
+```
+
+The drafts are identity-free, so the agent may show them in the conversation
+or you may open them under `.grading/drafts/essay-2/`. Read the scores and the
+feedback. If the profile or the brief is off, this is where it shows, on the
+second essay rather than the fortieth. When they read the way you would have
+written them, send the exact message:
+
+```text
+Approve pilot drafts for essay-2
+```
+
+The agent runs the returned command. It refuses a draft with a verification
+error, a draft count that does not match the pilot size, or any other phrase.
+The approval binds each draft's feedback text and grading judgement by
+digest; an edit after approval makes `next` stop again with
+`draft-review-stale`. Only then does drafting continue with `STUDENT_03`.
+
+With `--review every`, `next` returns `review-draft` after each draft and
+waits for `Approve draft STUDENT_03 for essay-2` before preparing the next.
+
+Drafts made past the pilot without approval return `repair-review` with
+`pilot-overrun`. Remove the extra drafts or ask the instructor how to proceed.
+
+### 2.8 Verify
 
 Nothing reaches a student until this passes.
 
@@ -485,8 +597,12 @@ Before it reads any redacted submission or draft, verification checks
 then checks every quote against the source, the arithmetic against itself, the
 letter against your scale, the structure against your rubric's feedback
 protocol, the phrasing against your never-use list, and the density figures
-against a fresh count. Then it writes the located offsets back into each record,
-so the positions were computed rather than guessed:
+against a fresh count. It then checks the draft review record: under pilot
+review the pilot approval must cover exactly the pilot size and match the
+drafts as they are now; under per-draft review every draft must be approved
+and unchanged. Then it writes the located offsets back into each record, so
+the positions were computed rather than guessed. Offsets never make an
+approval stale; a changed score, quote, or sentence does.
 
 ```json
 "quote": "From Barcelona to Singapore, smart city initiatives ...",
@@ -518,10 +634,13 @@ writes neither offsets nor a receipt. Run `next --json`, repair the reported
 state, then run `next --json` again. `--no-write` checks the batch but writes
 neither artifact.
 
-### 2.8 Look at the outliers
+### 2.9 Look at the outliers, then acknowledge them
+
+After a current receipt, `next` returns `review-consistency` with the
+consistency command alone. Publication is not offered yet.
 
 ```bash
-python3 scripts/grade.py consistency --batch essay-2 --redacted redacted
+python3 scripts/grade.py consistency --batch essay-2 --course phil210 --redacted redacted
 ```
 
 ```
@@ -543,7 +662,30 @@ letter, which is exactly what this tool exists to avoid.
 Outliers are found with the median, not the mean, because one extreme score
 inflates a standard deviation enough to hide itself.
 
-### 2.9 Reattach real names
+Read the flags. Then send the exact message:
+
+```text
+Acknowledge consistency flags for essay-2
+```
+
+The agent runs the same command again with `--acknowledge` and that phrase:
+
+```bash
+python3 scripts/grade.py consistency --batch essay-2 --course phil210 --redacted redacted \
+  --acknowledge "Acknowledge consistency flags for essay-2"
+```
+
+```
+Acknowledged 6 consistency flags for essay-2.
+```
+
+That writes `.grading/drafts/essay-2/_consistency.json`, bound to the digest
+of the verification receipt. It refuses without a current receipt or with any
+other phrase. Verify the batch again and the acknowledgement goes stale; `next`
+returns `review-consistency` until you acknowledge the new receipt. Only after
+a current acknowledgement does `next` return `publish`.
+
+### 2.10 Reattach real names
 
 ```bash
 python3 scripts/rehydrate.py .grading/drafts/essay-2 \
@@ -562,10 +704,13 @@ Wrote final/essay-2. Every rehydrated feedback file is a DRAFT pending your sign
 ```
 
 Local only. It first checks the receipt against the trusted paths in this
-command and reruns semantic verification. It then loads the local token map and
-renders all five drafts in a sibling staging directory. A missing, stale,
-malformed, or self-authored receipt, an unmapped token, or a rendering failure
-exits 5 and leaves the destination unchanged.
+command and reruns semantic verification, which re-checks the draft review
+record. It then requires the consistency acknowledgement for this exact
+receipt and refuses a holdout batch outright. It then loads the local token
+map and renders all five drafts in a sibling staging directory. A missing,
+stale, malformed, or self-authored receipt, a missing acknowledgement, an
+unmapped token, or a rendering failure exits 5 and leaves the destination
+unchanged.
 
 You may instead omit all six context options—`--batch`, `--course`, `--rubric`,
 `--profile`, `--redacted` and `--brief`—and let a current schema 2 receipt
@@ -619,7 +764,8 @@ marker and output hashes without loading the token map.
 ## The optional hook
 
 `SKILL.md` states four hard rules: read only from `redacted/`, accept paths and
-never pasted work, never echo the map, and refuse to grade without a profile.
+never pasted work, never echo the map, and refuse to grade without an approved
+profile.
 
 Those are instructions, and a model can violate an instruction. Markdown cannot
 close that gap.
@@ -642,9 +788,9 @@ guard that blocks every tool call would also block the calls needed to fix it.
 
 ## Synthetic agent conformance
 
-Use only synthetic data for conformance. The invocations in this section are
-illustrative until Task 6 records live evidence. A callable command-line adapter
-can be launched with JSON arguments:
+Use only synthetic data for conformance. The harness has been exercised only
+against its synthetic trial fixture. A callable command-line adapter can be
+launched with JSON arguments:
 
 ```bash
 python3 scripts/agent_conformance.py run \
@@ -675,18 +821,22 @@ interfaces alone are not evidence that any particular runtime or model works.
 | --- | --- |
 | `redact.py SOURCE --roster R --batch B` | Tokenize identity, write the map and review file |
 | `rehydrate.py DRAFTS --batch B --course C --rubric R --profile P --redacted D --brief A --map M --out O [--force]` | Rerun trusted verification, then stage and publish rehydrated draft feedback |
-| `calibrate.py inputs --rubric R --samples D --roster C --holdout N --out F` | Build the name-free calibration packet |
-| `calibrate.py holdout --record J --draft M --sample S` | Report the holdout delta |
-| `grade.py profile --course C --rubric R` | Confirm a profile exists and the rubric has not drifted |
-| `grade.py brief prepare --batch B --course C --mode local\|cloud` | Create an identity-free draft assignment brief |
+| `calibrate.py inputs --rubric R --samples D --roster C --holdout N [--holdout N] [--holdout-out D] --out F` | Build the name-free calibration packet and blind holdout copies |
+| `calibrate.py holdout --course C --rubric R --packet F --record J --draft M --sample S [...]` | Measure every holdout, report agreement, write the calibration receipt |
+| `calibrate.py approve --course C --rubric R --approval TEXT [--accept-gap --reason TEXT]` | Bind the instructor's exact profile approval to the profile, rubric and receipt |
+| `calibrate.py check --course C --rubric R` | Confirm the profile approval is current |
+| `grade.py profile --course C --rubric R` | Confirm a profile exists, the rubric has not drifted, and calibration is approved |
+| `grade.py brief prepare --batch B --course C --mode local\|cloud [--review pilot\|every] [--pilot-size N] [--purpose grading\|holdout]` | Create an identity-free draft assignment brief |
 | `grade.py brief approve --batch B --course C --rubric R --approval TEXT` | Bind the answered brief to the current rubric and profile |
 | `grade.py brief check --batch B --course C --rubric R` | Confirm the exact approved brief is current |
 | `grade.py next --batch B --course C --rubric R --publication final/B --json` | Return the next legal action as versioned JSON argv |
 | `grade.py record prepare --batch B --course C --rubric R --source S` | Create one pending token's unfinished draft pair |
 | `grade.py status --batch B` | Show what still needs grading |
 | `grade.py density FILE [--json]` | Count watched AI terms |
-| `grade.py verify --batch B --course C --rubric R` | Check every draft; write offsets and the verification receipt |
-| `grade.py consistency --batch B [--fail-on-findings]` | Flag outliers across the batch |
+| `grade.py review approve --batch B --course C --rubric R --scope pilot\|draft [--token T] --approval TEXT` | Record the instructor's exact pilot or per-draft approval |
+| `grade.py review check --batch B --course C --rubric R` | Say whether the draft review is current |
+| `grade.py verify --batch B --course C --rubric R` | Check every draft and the draft review; write offsets and the verification receipt |
+| `grade.py consistency --batch B [--course C --acknowledge TEXT] [--fail-on-findings]` | Flag outliers across the batch; with `--acknowledge`, bind the instructor's acknowledgement to the receipt |
 | `agent_conformance.py run --runtime N --command-json JSON --timeout SECONDS` | Launch a synthetic conformance trial |
 | `agent_conformance.py audit --runtime N --workspace D` | Audit an existing synthetic trial workspace |
 
@@ -703,6 +853,8 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 | 11 | `grade.py` | The rubric drifted since calibration |
 | 12 | `grade.py`, `agent_conformance.py` | The current action needs repair, including failed verification, or a completed conformance trial failed |
 | 13 | grading and conformance CLIs | Malformed input or workflow state; assignment brief commands also use it for a missing, draft, malformed, or stale brief |
+| 14 | `grade.py`, `calibrate.py` | Calibration is not approved or its receipt or approval is stale |
+| 15 | `calibrate.py` | The holdouts showed a gap; the receipt records it |
 
 ## What this does not do
 
@@ -713,6 +865,9 @@ Redaction and grading use separate ranges so a code is never ambiguous.
 - **It does not decide policy.** Whether student work may reach a cloud model is
   your institution's call.
 - **It does not sign off.** Every grade it produces is a draft.
+- **It does not grade unattended.** Every course stops for calibration
+  approval, and every real batch stops for the brief, the pilot or each
+  draft, and the consistency flags. The synthetic demo is the one exception.
 
 ## Before you use it on real student work
 

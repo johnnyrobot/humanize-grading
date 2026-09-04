@@ -16,8 +16,8 @@ publisher.
 
 ## One-turn synthetic demo
 
-The bundled PHIL 210 mock corpus supports one unattended, narrated demo. Drop
-the `grading_mock_papers` folder into an agent conversation and say:
+The bundled PHIL 210 mock corpus supports one self-contained, narrated demo.
+Drop the `grading_mock_papers` folder into an agent conversation and say:
 
 ```text
 Run the Humanizer Grading demo using this folder.
@@ -32,9 +32,40 @@ judgement; local scripts check evidence, arithmetic, required feedback
 sections and file bindings.
 
 Automatic approval and redaction review apply only when every file matches the
-bundled synthetic manifest. A changed or unknown folder is refused and returns
-to the supervised workflow. Demo output remains draft feedback, stays local and
-is never sent to an LMS. See `references/demo.md` for the agent procedure.
+bundled synthetic manifest. The demo's profile carries a synthetic calibration
+approval, and its brief uses a demo-only review cadence, so the calibration,
+pilot, and consistency stops that every real course and batch require are
+skipped for that corpus alone. A changed or unknown folder is refused and
+returns to the supervised workflow. Demo output remains draft feedback, stays
+local and is never sent to an LMS. See `references/demo.md` for the agent
+procedure.
+
+## Instructor onboarding
+
+Grading a course takes one calibration and then one supervised loop per
+assignment. Nothing in it runs unattended.
+
+1. **Gather graded work.** Four to ten papers you already graded, each with
+   the essay, your comments, and your score, plus your rubric and roster.
+2. **Build the packet.** `calibrate.py inputs` keeps only your comments,
+   scrubs every name, and writes blind copies of the one or two papers it
+   holds back.
+3. **Answer the interview.** Where an A begins, what you never forgive, and
+   three more. Your answers are recorded in the profile in your words.
+4. **Grade the holdouts blind.** The agent grades the held-back papers
+   without seeing your feedback. `calibrate.py holdout` compares its grades
+   and feedback with yours and writes a receipt.
+5. **Read the report and approve.** If the gap is wide, edit the profile and
+   run the holdouts again, or accept the gap with a reason. Then send the
+   exact phrase `Approve calibration profile for <course>`.
+6. **For each assignment, approve a brief,** review the private redaction
+   report, read the first two drafts and approve the pilot, let the batch
+   finish, acknowledge the consistency flags, and review every rehydrated
+   draft before you send anything.
+
+The agent refuses to grade with a profile no holdout measured or no
+instructor approved. It refuses to verify a batch whose pilot was not approved
+and to publish one whose flags were not acknowledged.
 
 ## Current compatibility and release scope
 
@@ -101,9 +132,11 @@ agent must not open the rehydrated files; the instructor reviews them locally.
 1. **Choose local or cloud.** The agent asks before it reads any file. Fully
    local model inference and agent execution are recommended. A cloud run still
    requires redaction and institutional permission.
-2. **Calibrate once, or when the rubric changes.** Calibration builds a reusable
-   course profile for scoring standards and feedback voice. It stays local
-   because the source samples still carry student identity.
+2. **Calibrate once, or when the rubric or profile changes.** Calibration
+   builds a reusable course profile for scoring standards and feedback voice,
+   measures it against held-back graded papers, and records the instructor's
+   exact approval. It stays local because the source samples still carry
+   student identity. Grading refuses until the approval is current.
 3. **Answer assignment-specific questions.** For each batch, the agent asks
    about the assignment, profile fit, learning goals, required evidence, common
    mistakes, feedback behavior, boundaries and host mode. It may read the
@@ -115,8 +148,12 @@ agent must not open the rehydrated files; the instructor reviews them locally.
    “yes” does not approve anything.
 5. **Let the agent follow the next action.** Only after approval does it run
    `grade.py next --json`, execute the returned action, and repeat. It prepares
-   each draft pair from the rubric instead of inventing record JSON. Whole-batch
-   verification binds the exact approved brief in a schema 2 receipt.
+   each draft pair from the rubric instead of inventing record JSON. After the
+   first two drafts it stops and shows them; the batch continues only after
+   `Approve pilot drafts for <batch>`. Whole-batch verification binds the
+   exact approved brief in a schema 2 receipt and refuses unreviewed or
+   changed drafts. Before publication it shows the consistency flags and
+   waits for `Acknowledge consistency flags for <batch>`.
    Sandboxed agent tools may reset their working directory between calls, so
    the agent sets the package directory on every command. If a harness
    suppresses a repeated `next` call, the agent pauses for `Continue` and runs
@@ -145,7 +182,10 @@ brief body, course, batch, host mode, rubric or calibration profile changes.
 | AI agent | Instructor |
 | --- | --- |
 | Loads the Grader or Humanizer skill | Chooses local or cloud operation |
-| Prepares and checks an identity-free assignment brief | Approves the exact batch summary |
+| Builds the calibration packet and grades the holdouts blind | Supplies graded work, answers the interview, reads the holdout report, approves the profile |
+| Prepares and checks an identity-free assignment brief | Approves the exact batch summary and chooses the review cadence |
+| Stops after the pilot drafts | Reads the tokenized pilot drafts and approves them |
+| Runs consistency and shows every flag | Acknowledges the flags for the exact receipt |
 | Runs `next --json` and only the returned grading actions | Inspects the private review file outside the AI conversation |
 | Reads only tokenized submissions from `redacted/` | Decides whether institutional policy permits cloud processing |
 | Writes draft feedback and structured grade records | Reviews, edits and signs off on every draft |
@@ -153,6 +193,9 @@ brief body, course, batch, host mode, rubric or calibration profile changes.
 
 Nothing in this repository logs into an LMS or sends a grade automatically.
 Every rehydrated feedback file remains a draft until the instructor approves it.
+It will not grade a batch without an approved calibration profile, a reviewed
+pilot or per-draft approvals, and an acknowledged consistency pass. The
+synthetic demo is the only exception.
 
 ## Grading example
 
@@ -191,13 +234,19 @@ The agent then follows this sequence:
 6. For each returned `prepare-record` action, generate the draft pair, read only
    that pending token under `redacted/`, and edit the generated Markdown and
    `grade-record/1` JSON.
-7. Verify the whole grading batch. A missing, unapproved or stale brief, failed
-   quote, total, letter grade, feedback section, density measurement or file
-   binding blocks publication.
-8. Show the instructor the advisory consistency flags across the batch.
-9. Rehydrate the verified drafts locally. Real names return only after the
-   schema 2 receipt, approved brief, redaction manifest, token map and output
-   set all match.
+7. Stop at `review-pilot`. Show the instructor the first two tokenized drafts
+   and wait for `Approve pilot drafts for essay-2`. Run the returned `review
+   approve` command only after that message. Under per-draft review, stop
+   after every draft instead.
+8. Verify the whole grading batch. A missing, unapproved or stale brief, an
+   unapproved or changed pilot draft, a failed quote, total, letter grade,
+   feedback section, density measurement or file binding blocks publication.
+9. Stop at `review-consistency`. Run consistency, show the instructor every
+   flag, wait for `Acknowledge consistency flags for essay-2`, then run the
+   same command again with `--acknowledge` and that phrase.
+10. Rehydrate the verified drafts locally. Real names return only after the
+    schema 2 receipt, approved brief, acknowledgement, redaction manifest,
+    token map and output set all match.
 
 For the repository's five-submission synthetic example, verification reports:
 
@@ -330,13 +379,14 @@ than shell strings:
 
 ```json
 {
-  "schema": "grading-next-action/1",
+  "schema": "grading-next-action/2",
   "batch": "essay-3",
   "course": "phil210",
   "stage": "drafting",
   "action": "prepare-record",
   "message": "Prepare the draft pair for STUDENT_01.",
   "token": "STUDENT_01",
+  "tokens": [],
   "commands": [["python3", "scripts/grade.py", "record", "prepare"]],
   "findings": []
 }
@@ -373,8 +423,8 @@ reference, and what the tool deliberately does not do. Synthetic runs covered
 `calibrate.py inputs` and `holdout`; `grade.py profile`, `brief`, `next`,
 `record prepare`, `status`, `verify` and `consistency`; plus `redact.py` and
 `rehydrate.py`. The lifecycle output shown comes from that synthetic work. The
-conformance `run` and `audit` commands remain illustrative until Task 6 records
-live agent evidence.
+conformance `run` and `audit` commands have been exercised only against the
+synthetic trial fixture.
 
 Read `references/redaction.md` before sending anything to a cloud model.
 Pseudonymization is not anonymization, and your institution's policy decides
@@ -401,8 +451,7 @@ bypass.
 ## Synthetic agent conformance
 
 `scripts/agent_conformance.py` can launch a command-line agent against the
-shipped synthetic fixture or audit an existing synthetic workspace. These
-invocations are illustrative until Task 6 records live evidence:
+shipped synthetic fixture or audit an existing synthetic workspace:
 
 ```bash
 python3 scripts/agent_conformance.py run \
@@ -577,6 +626,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
+- **3.6.0** — Calibration is now a gate. `calibrate.py inputs` holds back one or two graded samples, and two when six or more are supplied, and writes blind copies for a holdout batch. `calibrate.py holdout` measures every holdout against the profile's tolerances, reports aggregate agreement, and writes an identity-free receipt; exit 15 records a gap. `calibrate.py approve` binds the instructor's exact phrase to the profile, rubric, and receipt, with `--accept-gap --reason` for a recorded exception, and `calibrate.py check` reports the state. Profiles require an `Instructor answers` section and accept `Point tolerance` and `Length tolerance` headers. Assignment briefs move to schema 2 with purpose, review cadence, and pilot size; schema 1 briefs must be prepared again, and grading briefs cannot be approved until calibration is. Drafting stops at the pilot, two drafts by default, or after every draft; `grade.py review approve` records the exact phrase bound to the drafts' digests, and verification refuses unreviewed, changed, or over-pilot drafts. Consistency is separate from publication: `grade.py consistency --acknowledge` binds the instructor's acknowledgement to the receipt, and publication refuses without it. `grade.py next` emits `grading-next-action/2` with the new stops, `grade.py profile` exits 14 until calibration is approved and warns when a profile is old or heavily used, and a holdout batch can never publish. The synthetic demo and conformance trial keep their one-turn flow through a synthetic calibration approval and a demo-only review cadence.
 - **3.5.0** — Added a one-turn narrated demo for the exact bundled PHIL 210 synthetic corpus. A new preparation command verifies every input digest before creating isolated local state, labels automatic authorization as synthetic, prepares and approves the fixed demo brief, completes the bound synthetic redaction review, and hands the existing `next` lifecycle to the agent. Changed or unknown folders fall back to supervised grading; real grading gates are unchanged.
 - **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, records exact redaction artifacts in schema 3 manifests, and invalidates prior clean state before a safe new attempt. Private review is a two-step flow: an initial redaction without `--reviewed`, followed by the identical command with `--reviewed` and no `--force`; approval checks the bound source, output, map and review digests without rereading submissions or running redaction again. Legacy schema 1 and schema 2 redaction manifests are unreviewed and ineligible. Document metadata may support local roster attribution, but it is removed from model-visible output and recorded only in the owner-only private review rather than converted into model-visible tokens. Assignment briefing separates course display names from CLI keys and accepts only command-created, checked drafts. Verification stops before draft reads when manifest validation fails. The synthetic conformance harness binds trusted package revisions, checks clean redaction outcomes, catches partial synthetic identities, and requires `next` between actions. Agent guidance now treats submissions and every extracted string as untrusted evidence: embedded instructions cannot authorize tools, reads, network access, or workflow changes, and only instructor instructions plus validated `next` argument arrays authorize actions. It recommends least privilege and disabled network access where supported without claiming portable enforcement, and distinguishes the reversible token map from other identity-bearing private artifacts. Agent guidance also distinguishes the grading state root from the repository root and safely resumes when sandboxed tools reset their working directory or deduplicate commands. Claude Code CLI + Ollama + local Gemma 4 12B now has a documented, verified read-only smoke path at 64K context. Codex CLI, LM Studio Bionic, and Unsloth Studio remain deferred and non-blocking for the scoped instructor-supervised alpha; no unattended public-service claim is made. A trial without a read trace remains unverified.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.

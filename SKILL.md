@@ -7,7 +7,7 @@ description: |
   student identity before any work reaches a cloud model.
 license: MIT
 metadata:
-  version: "3.5.0"
+  version: "3.6.0"
 ---
 
 # Grader
@@ -32,8 +32,8 @@ they are not portable enforcement and do not replace redaction or verification.
 When the user asks to run the demo and supplies the `grading_mock_papers`
 folder, read `references/demo.md` and follow it. This branch comes before the
 ordinary local-or-cloud gate because `scripts/demo.py prepare` must verify the
-exact bundled synthetic corpus before any unattended action. The user's demo
-request authorizes only that synthetic run.
+exact bundled synthetic corpus before any self-approving action. The user's
+demo request authorizes only that synthetic run.
 
 If the command refuses the folder, return to the ordinary gate below. Never use
 demo authorization for changed files, unknown files, or real student work.
@@ -82,7 +82,7 @@ python3 scripts/grade.py profile --course <course> --rubric <rubric.md>
 Keep the human-readable course name separate from the CLI course key. Use the
 path-safe key, such as `phil210`, for every `<course>` argument and profile path.
 
-Then ask these seven groups in order, one at a time when the rubric, profile,
+Then ask these eight groups in order, one at a time when the rubric, profile,
 assignment prompt, course material, or earlier answers do not supply the answer:
 
 1. Course display name, CLI course key, assignment title, batch name, rubric
@@ -96,6 +96,9 @@ assignment prompt, course material, or earlier answers do not supply the answer:
    there is no assignment-specific change.
 6. Assumptions, phrases, or feedback moves to avoid.
 7. Local or cloud operation and the privacy consequence of that choice.
+8. Review cadence: a pilot of the first drafts, two by default, or every
+   draft. Record it with `--review` and `--pilot-size`. Neither can be turned
+   off for a real batch.
 
 You may read the rubric, profile, assignment prompt, and instructor-authored
 course material while preparing the brief. The brief must stay identity-free.
@@ -108,7 +111,8 @@ instructor's answers:
 
 ```bash
 python3 scripts/grade.py brief prepare \
-  --batch <batch> --course <course> --mode <local-or-cloud>
+  --batch <batch> --course <course> --mode <local-or-cloud> \
+  --review pilot --pilot-size 2
 ```
 
 The command must exit 0 and create the expected regular file before you edit
@@ -119,8 +123,9 @@ Drafting is complete only when the file exists and no
 `<!-- answer-required -->` marker remains.
 
 Summarize the course, assignment, batch, paths, profile status, priorities,
-required evidence, feedback behavior, prohibited assumptions, host mode, and
-privacy consequence. Then stop and wait for this exact message:
+required evidence, feedback behavior, prohibited assumptions, host mode,
+review cadence, and privacy consequence. Then stop and wait for this exact
+message:
 
 ```text
 Approve assignment brief for <batch>
@@ -138,8 +143,8 @@ python3 scripts/grade.py brief check \
 ```
 
 On resume, run `brief check` instead of repeating the interview. Any change to
-the brief body, course, batch, host mode, rubric, or profile requires the
-instructor to approve again. Chat approval records workflow state. It does not
+the brief body, course, batch, host mode, purpose, review cadence, pilot size,
+rubric, or profile requires the instructor to approve again. Chat approval records workflow state. It does not
 authenticate a human, act as a signature, or authorize cloud use.
 
 ## Four hard rules
@@ -147,7 +152,7 @@ authenticate a human, act as a signature, or authorize cloud use.
 1. Read only from `redacted/`.
 2. Accept file paths. Never accept pasted student work.
 3. Never echo the map file.
-4. Refuse to grade without a profile.
+4. Refuse to grade without an approved profile.
 
 The token map is the only artifact that reversibly maps stable tokens to real
 identities. It is not the only sensitive artifact. Raw submissions, the roster,
@@ -178,36 +183,79 @@ Read `references/calibration.md` first.
 
 1. **Gate.** If the answer is cloud, stop. Say that calibration reads graded
    work with names in it and must run locally.
-2. **Collect.** The rubric, three to eight already-graded pieces of work, and
-   the roster.
-3. **Build the packet.**
+2. **Collect.** The rubric, four to ten already-graded pieces of work, and
+   the roster. Three to eight become calibration samples. One is held back
+   when there are fewer than six pieces in total, two otherwise.
+3. **Build the packet and the blind holdout copies.**
 
    ```bash
    python3 scripts/calibrate.py inputs \
      --rubric <rubric.md> --samples <graded/> --roster <roster.csv> \
-     --holdout <one-filename.md> --out .grading/calibration-inputs.json
+     --holdout <one-filename.md> --holdout <another-filename.md> \
+     --holdout-out .grading/holdout-submissions/<course> \
+     --out .grading/calibration-inputs.json
    ```
 
-   This is the safety step. It drops every student essay and replaces every
-   roster name in the instructor's comments with `[STUDENT]`. Build the profile
-   from this packet, never from the sample files.
+   This is the safety step. It drops every student essay, replaces every
+   roster name in the instructor's comments with `[STUDENT]`, and writes each
+   holdout's essay without its feedback or bracketed comments. Build the
+   profile from the packet, never from the sample files.
 
-4. **Interview.** Ask only what the samples cannot answer. The five questions
-   are in `references/calibration.md`. Skip any the work already answers.
-5. **Write the profile** to `.grading/profiles/<course>.md` with all eight
+4. **Interview.** Always ask the two range questions in
+   `references/calibration.md`. Ask the other three only when the samples
+   cannot answer them. Record every answer, in the instructor's words, under
+   `## Instructor answers`.
+5. **Write the profile** to `.grading/profiles/<course>.md` with all nine
    sections, including the fingerprint table. Copy the whole-rubric digest and
-   each criterion digest from the packet.
-6. **Validate against the holdout.** Grade the held-back sample blind, using the
-   full grading flow below, then:
+   each criterion digest from the packet. Set `**Samples**` to the packet's
+   sample count.
+6. **Grade the holdouts blind.** Prepare a holdout brief, then run the
+   grading loop below on the blind copies:
+
+   ```bash
+   python3 scripts/grade.py brief prepare \
+     --batch holdout-<course> --course <course> --mode local --purpose holdout
+   ```
+
+   A holdout batch skips the profile-approval gate, has no pilot stop, and
+   ends at `report-holdout`. It can never publish.
+7. **Measure.** One `--record`, `--draft`, and `--sample` per holdout:
 
    ```bash
    python3 scripts/calibrate.py holdout \
-     --record <record.json> --draft <draft.md> --sample <holdout.md>
+     --course <course> --rubric <rubric.md> \
+     --packet .grading/calibration-inputs.json \
+     --record <drafts>/STUDENT_01.json --draft <drafts>/STUDENT_01.md \
+     --sample <graded>/<holdout-one.md> \
+     --record <drafts>/STUDENT_02.json --draft <drafts>/STUDENT_02.md \
+     --sample <graded>/<holdout-two.md>
    ```
 
-7. **Show the instructor the holdout report.** That report is the deliverable,
-   not the profile. If the score gap is wide or no phrasing carried over, say so
-   plainly and offer to edit the profile and run again.
+   The instructor reads the token map locally to pair each token with its
+   sample. The command writes an identity-free calibration receipt. Exit 0
+   means every holdout stayed inside the profile's tolerances. Exit 15 means
+   a gap.
+8. **Show the instructor the holdout report.** That report is the
+   deliverable, not the profile. On a gap, offer to edit the profile and run
+   the holdouts again. The instructor may instead accept the gap; record their
+   reason with `--accept-gap --reason`.
+9. **Approve.** Wait for this exact message:
+
+   ```text
+   Approve calibration profile for <course>
+   ```
+
+   Then run:
+
+   ```bash
+   python3 scripts/calibrate.py approve \
+     --course <course> --rubric <rubric.md> \
+     --approval "Approve calibration profile for <course>"
+   python3 scripts/calibrate.py check --course <course> --rubric <rubric.md>
+   ```
+
+   Any edit to the profile or rubric makes the receipt and approval stale.
+   Grading refuses until the holdouts run and the instructor approves again.
 
 ## Grade
 
@@ -254,6 +302,28 @@ Legacy schema 1 and schema 2 manifests are unreviewed and ineligible; create
 current schema 3 evidence before grading. Read
 `references/redaction.md` before describing what redaction covers.
 
+When the action is `validate-holdout`, `review-holdout`, or
+`approve-profile`, the course is not ready to grade. Return to Calibrate.
+`approve-profile` returns the approval command; run it only after the
+instructor sends the exact phrase.
+
+When the action is `review-pilot` or `review-draft`, stop. Show the
+instructor the tokenized drafts it names, from `.grading/drafts/<batch>/`, or
+tell them where to open them. They are identity-free. Wait for the exact
+phrase in the action's message, then run the returned command. The batch does
+not continue until that command succeeds. A draft edited after approval must
+be shown and approved again.
+
+When the action is `review-consistency`, run the returned consistency command
+and show every flag. Wait for this exact message:
+
+```text
+Acknowledge consistency flags for <batch>
+```
+
+Then run the same consistency command again with `--acknowledge` and that
+phrase. Only then does `next` return `publish`.
+
 When the action is `prepare-record`, use the returned command. Its base form is
 `python3 scripts/grade.py record prepare`. It creates the feedback Markdown and
 `grade-record/1` JSON together. Read only the returned token's file under
@@ -280,6 +350,11 @@ Every condition refuses rather than guesses.
 | --- | --- |
 | No profile for the course | Refuse. Offer `calibrate`. |
 | Rubric changed since calibration | Warn, name the drifted criteria, ask before proceeding |
+| Calibration receipt missing, stale, or failed | Refuse. Return to calibrate. |
+| Profile not approved | Refuse. Wait for the exact approval phrase. |
+| Drafts exist past the pilot without approval | Repair. Remove the extra drafts or ask the instructor. |
+| A draft changed after the instructor approved it | Show it again. Wait for the phrase again. |
+| Consistency flags not acknowledged | Refuse publication. |
 | Assignment brief is missing, unapproved, or stale | Stop before reading submissions or drafts. Prepare or revise it, get the exact approval phrase, run `brief approve`, then run `brief check`. |
 | Student text pasted instead of a path | Refuse. Say the text is already in context and what that means. |
 | `redact.py` exits non-zero | The cloud path refuses. No override. |
@@ -302,6 +377,10 @@ Every condition refuses rather than guesses.
   work may reach a cloud model. This skill does not make that decision and must
   not imply it has been made.
 - **It does not sign off.** Every grade it produces is a draft.
+- **It does not grade unattended.** Every real batch stops for the brief, the
+  pilot or each draft, and the consistency flags, and every course stops for
+  calibration approval. The bundled synthetic demo is the one exception, and
+  only for that exact corpus.
 
 ## References
 
