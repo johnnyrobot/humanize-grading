@@ -56,7 +56,8 @@ before publication.
 
 - Calibration samples remain at least three and at most eight.
 - Holdouts are at least one. When calibration samples plus holdouts number
-  five or more, holdouts must be at least two.
+  six or more, holdouts must be at least two, so calibration never drops
+  below four samples to make room.
 - The packet's `holdout` object becomes `{"count": N, "labels": [...]}`.
   Labels are positional, never filenames.
 - `--holdout-out <dir>` writes each holdout's student half, header and essay

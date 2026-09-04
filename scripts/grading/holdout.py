@@ -24,6 +24,15 @@ LENGTH_TOLERANCE = 2.0
 _WORD = re.compile(r"[A-Za-z0-9']+")
 
 
+def required_holdouts(total_samples: int) -> int:
+    """Say how many holdouts a corpus of graded samples must hold back.
+
+    One holdout cannot show agreement. Six or more graded pieces leave room
+    for two without pushing calibration below four samples.
+    """
+    return 2 if total_samples >= 6 else 1
+
+
 @dataclass(frozen=True)
 class Delta:
     """How far the generated grade sits from the instructor's."""

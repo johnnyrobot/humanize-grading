@@ -246,3 +246,18 @@ def test_a_lowercase_feedback_heading_still_parses(tmp_path):
     )
     sample = load_sample(path)
     assert sample.score == 88
+
+
+def test_student_half_drops_feedback_and_every_bracketed_span(phil210):
+    from scripts.grading.samples import student_half
+
+    text = (
+        phil210 / "graded/paper_5_graded_subscription_software_paradox.md"
+    ).read_text(encoding="utf-8")
+    half = student_half(text)
+    assert "### Student Submission" in half
+    assert "Instructor Feedback" not in half
+    assert "**Grade**" not in half
+    assert "[" not in half and "]" not in half
+    assert "Inline Comments" not in half
+    assert "subscription economy" in half.lower()

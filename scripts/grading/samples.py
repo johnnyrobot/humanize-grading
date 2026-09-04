@@ -117,6 +117,26 @@ def _split_sections(text: str) -> tuple[str, str, str]:
     return header, essay.strip("\n"), feedback.strip("\n")
 
 
+_BRACKETED = re.compile(r"\s*\[[^\[\]]*\]")
+
+
+def student_half(text: str) -> str:
+    """Return the header and essay of a graded sample without any feedback.
+
+    Every bracketed span is removed. The instructor's inline comments live in
+    brackets, and syntax alone cannot tell them from a student's brackets, so
+    the blind copy keeps neither.
+    """
+    header, essay, _ = _split_sections(text)
+    blind_essay = _BRACKETED.sub("", essay)
+    parts = []
+    if header.strip():
+        parts.append(header.strip("\n"))
+        parts.append("### Student Submission")
+    parts.append(blind_essay.strip("\n"))
+    return "\n\n".join(parts) + "\n"
+
+
 def _parse_header(block: str) -> dict[str, str]:
     header: dict[str, str] = {}
     student_fields = 0

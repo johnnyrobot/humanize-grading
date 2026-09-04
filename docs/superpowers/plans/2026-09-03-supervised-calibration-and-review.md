@@ -60,9 +60,10 @@ Append to `tests/grading/test_holdout.py`:
 from scripts.grading.holdout import required_holdouts
 
 
-def test_required_holdouts_rises_to_two_at_five_samples():
+def test_required_holdouts_rises_to_two_at_six_samples():
     assert required_holdouts(4) == 1
-    assert required_holdouts(5) == 2
+    assert required_holdouts(5) == 1
+    assert required_holdouts(6) == 2
     assert required_holdouts(8) == 2
 
 
@@ -153,10 +154,10 @@ In `scripts/grading/holdout.py`, after the constants:
 def required_holdouts(total_samples: int) -> int:
     """Say how many holdouts a corpus of graded samples must hold back.
 
-    One holdout cannot show agreement. Five or more graded pieces leave room
+    One holdout cannot show agreement. Six or more graded pieces leave room
     for two.
     """
-    return 2 if total_samples >= 5 else 1
+    return 2 if total_samples >= 6 else 1
 ```
 
 In `scripts/calibrate.py`, import `required_holdouts` and `student_half`, plus `paths_overlap` from `scripts.path_safety`. Replace the holdout selection in `_inputs`:
@@ -2880,7 +2881,7 @@ Read `references/calibration.md` first.
    work with names in it and must run locally.
 2. **Collect.** The rubric, four to ten already-graded pieces of work, and
    the roster. Three to eight become calibration samples. One or two are
-   held back: one when there are fewer than five pieces in total, two
+   held back: one when there are fewer than six pieces in total, two
    otherwise.
 3. **Build the packet and the blind holdout copies.**
 

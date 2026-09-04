@@ -29,17 +29,18 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.grading.holdout import compare, render  # noqa: E402
+from scripts.grading.holdout import compare, render, required_holdouts  # noqa: E402
 from scripts.grading.records import GradeRecord, RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
 from scripts.grading.samples import (  # noqa: E402
     SampleError,
     load_sample,
     scrub_private_data,
+    student_half,
 )
 from scripts.redaction.roster import load_roster  # noqa: E402
 from scripts.redaction.private_files import write_private_text  # noqa: E402
-from scripts.path_safety import read_text_limited  # noqa: E402
+from scripts.path_safety import paths_overlap, read_text_limited  # noqa: E402
 
 EXIT_OK = 0
 EXIT_MALFORMED = 13
@@ -83,11 +84,15 @@ def _inputs(args: argparse.Namespace) -> int:
         return EXIT_MALFORMED
 
     paths = sorted(p for p in args.samples.rglob("*.md") if p.is_file())
-    holdout_path = next((p for p in paths if p.name == args.holdout), None)
-    if holdout_path is None:
-        print(f"No sample named {args.holdout} under {args.samples}.", file=sys.stderr)
-        return EXIT_MALFORMED
-    calibration = [p for p in paths if p != holdout_path]
+    holdout_names = list(dict.fromkeys(args.holdout))
+    holdout_paths: list[Path] = []
+    for name in holdout_names:
+        match = next((p for p in paths if p.name == name), None)
+        if match is None:
+            print(f"No sample named {name} under {args.samples}.", file=sys.stderr)
+            return EXIT_MALFORMED
+        holdout_paths.append(match)
+    calibration = [p for p in paths if p not in holdout_paths]
 
     if len(calibration) < MIN_SAMPLES:
         print(
@@ -102,14 +107,36 @@ def _inputs(args: argparse.Namespace) -> int:
             "More adds little and costs a long read."
         )
         calibration = calibration[:MAX_SAMPLES]
+    needed = required_holdouts(len(calibration) + len(holdout_paths))
+    if len(holdout_paths) < needed:
+        print(
+            f"{len(calibration) + len(holdout_paths)} graded samples need at "
+            f"least {'two holdouts' if needed == 2 else 'one holdout'}. Name "
+            f"{needed - len(holdout_paths)} more with --holdout.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    if args.holdout_out is not None:
+        if paths_overlap(args.holdout_out, args.samples):
+            print(
+                "--holdout-out must not sit inside the samples folder.",
+                file=sys.stderr,
+            )
+            return EXIT_MALFORMED
+        if args.holdout_out.exists() and (
+            not args.holdout_out.is_dir() or any(args.holdout_out.iterdir())
+        ):
+            print("--holdout-out must be a new or empty folder.", file=sys.stderr)
+            return EXIT_MALFORMED
 
     loaded_calibration = []
     for index, path in enumerate(calibration, start=1):
         sample = load_sample(path)
         _require_roster_identity(sample, roster, f"Calibration sample {index}")
         loaded_calibration.append(sample)
-    holdout_sample = load_sample(holdout_path)
-    _require_roster_identity(holdout_sample, roster, "The holdout sample")
+    for index, path in enumerate(holdout_paths, start=1):
+        holdout_sample = load_sample(path)
+        _require_roster_identity(holdout_sample, roster, f"Holdout sample {index}")
 
     def packet(index: int, sample) -> dict:
         comments, found = scrub_private_data(sample.comments_only(), roster)
@@ -169,7 +196,10 @@ def _inputs(args: argparse.Namespace) -> int:
             packet(index, sample)
             for index, sample in enumerate(loaded_calibration, start=1)
         ],
-        "holdout": {"label": "holdout"},
+        "holdout": {
+            "count": len(holdout_paths),
+            "labels": [f"holdout_{index}" for index in range(1, len(holdout_paths) + 1)],
+        },
         "note": (
             "This packet holds the instructor's comments only. No student "
             "essay text and no student name is in it. Sample labels are "
@@ -184,9 +214,17 @@ def _inputs(args: argparse.Namespace) -> int:
     scrubbed = sum(item["scrubbed_count"] for item in payload["samples"])
     print(
         f"Wrote {args.out}. {len(payload['samples'])} calibration samples, "
-        "1 held back."
+        f"{len(holdout_paths)} held back."
     )
     print(f"Scrubbed {scrubbed} name forms from the comments.")
+    if args.holdout_out is not None:
+        for path in holdout_paths:
+            text = read_text_limited(path, "The holdout sample", 10 * 1024 * 1024)
+            write_private_text(args.holdout_out / path.name, student_half(text))
+        print(
+            f"Wrote {len(holdout_paths)} blind holdout submissions to "
+            f"{args.holdout_out}. Grade them as a holdout batch."
+        )
     print("Read references/calibration.md before building the profile.")
     return EXIT_OK
 
@@ -211,7 +249,18 @@ def main(argv: list[str] | None = None) -> int:
     inputs.add_argument("--rubric", type=Path, required=True)
     inputs.add_argument("--samples", type=Path, required=True)
     inputs.add_argument("--roster", type=Path, required=True)
-    inputs.add_argument("--holdout", required=True, help="Filename to hold back")
+    inputs.add_argument(
+        "--holdout",
+        action="append",
+        required=True,
+        help="Filename to hold back; repeat for each holdout",
+    )
+    inputs.add_argument(
+        "--holdout-out",
+        type=Path,
+        default=None,
+        help="Write each holdout's student half here for blind grading",
+    )
     inputs.add_argument(
         "--out", type=Path, default=Path("calibration-inputs.json")
     )

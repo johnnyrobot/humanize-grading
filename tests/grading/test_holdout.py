@@ -5,7 +5,7 @@ import re
 import subprocess
 import sys
 
-from scripts.grading.holdout import compare, render
+from scripts.grading.holdout import compare, render, required_holdouts
 from scripts.grading.records import CriterionScore, GradeRecord
 from scripts.grading.samples import load_sample
 from scripts.redaction.roster import load_roster
@@ -127,7 +127,7 @@ def test_calibrate_inputs_writes_comments_without_essay_text(phil210, tmp_path):
     assert all("scrubbed_count" in item for item in payload["samples"])
     assert "scrubbed" not in payload["samples"][0]
     assert len(payload["samples"]) == 4
-    assert payload["holdout"] == {"label": "holdout"}
+    assert payload["holdout"] == {"count": 1, "labels": ["holdout_1"]}
     assert [item["label"] for item in payload["samples"]] == [
         "sample_1", "sample_2", "sample_3", "sample_4",
     ]
@@ -372,3 +372,85 @@ def test_a_name_bearing_filename_never_reaches_the_packet(phil210, tmp_path):
             pattern = rf"\b{re.escape(part)}\b"
             assert not re.search(pattern, blob), f"{part} reached the packet"
             assert not re.search(pattern, result.stdout), f"{part} reached stdout"
+
+
+def test_required_holdouts_rises_to_two_at_six_samples():
+    assert required_holdouts(4) == 1
+    assert required_holdouts(5) == 1
+    assert required_holdouts(6) == 2
+    assert required_holdouts(8) == 2
+
+
+def test_calibrate_inputs_needs_two_holdouts_for_six_samples(phil210, tmp_path):
+    six = tmp_path / "six"
+    six.mkdir()
+    for path in (phil210 / "graded").iterdir():
+        (six / path.name).write_bytes(path.read_bytes())
+    (six / "paper_1_second_copy.md").write_bytes(
+        (phil210 / "graded" / "paper_1_graded_algorithmic_gatekeeping.md").read_bytes()
+    )
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(six),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "paper_5_graded_subscription_software_paradox.md",
+            "--out", str(tmp_path / "inputs.json"),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 13
+    assert "two holdouts" in result.stderr.lower()
+    assert not (tmp_path / "inputs.json").exists()
+
+
+def test_calibrate_inputs_writes_blind_holdout_submissions(phil210, tmp_path):
+    out = tmp_path / "inputs.json"
+    blind = tmp_path / "blind"
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(phil210 / "graded"),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "paper_5_graded_subscription_software_paradox.md",
+            "--holdout", "paper_4_graded_predictive_policing.md",
+            "--holdout-out", str(blind),
+            "--out", str(out),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert len(payload["samples"]) == 3
+    assert payload["holdout"] == {"count": 2, "labels": ["holdout_1", "holdout_2"]}
+    written = sorted(path.name for path in blind.iterdir())
+    assert written == [
+        "paper_4_graded_predictive_policing.md",
+        "paper_5_graded_subscription_software_paradox.md",
+    ]
+    for path in blind.iterdir():
+        text = path.read_text(encoding="utf-8")
+        assert "Instructor Feedback" not in text
+        assert "[" not in text
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_calibrate_inputs_refuses_a_holdout_folder_inside_the_samples(phil210, tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/calibrate.py", "inputs",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--samples", str(phil210 / "graded"),
+            "--roster", str(phil210 / "roster.csv"),
+            "--holdout", "paper_5_graded_subscription_software_paradox.md",
+            "--holdout", "paper_4_graded_predictive_policing.md",
+            "--holdout-out", str(phil210 / "graded" / "blind"),
+            "--out", str(tmp_path / "inputs.json"),
+        ],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 13
+    assert "samples folder" in result.stderr
+    assert not (phil210 / "graded" / "blind").exists()
