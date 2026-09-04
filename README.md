@@ -175,7 +175,8 @@ Instructor: Approve assignment brief for essay-3
 The agent records that message with `brief approve`, then confirms it with
 `brief check`. Approval is workflow evidence, not a signature, human
 authentication or privacy permission. The instructor must approve again if the
-brief body, course, batch, host mode, rubric or calibration profile changes.
+brief body, course, batch, host mode, purpose, review cadence, pilot size,
+rubric or calibration profile changes.
 
 ## Who does what
 
@@ -420,9 +421,9 @@ roster or processes submissions.
 **[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
 calibration, a graded batch end to end, the core command and exit-code
 reference, and what the tool deliberately does not do. Synthetic runs covered
-`calibrate.py inputs` and `holdout`; `grade.py profile`, `brief`, `next`,
-`record prepare`, `status`, `verify` and `consistency`; plus `redact.py` and
-`rehydrate.py`. The lifecycle output shown comes from that synthetic work. The
+`calibrate.py inputs`, `holdout`, `approve` and `check`; `grade.py profile`,
+`brief`, `next`, `record prepare`, `review`, `status`, `verify` and
+`consistency`; plus `redact.py` and `rehydrate.py`. The lifecycle output shown comes from that synthetic work. The
 conformance `run` and `audit` commands have been exercised only against the
 synthetic trial fixture.
 
