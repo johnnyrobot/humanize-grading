@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from scripts.grading.brief import ANSWER_REQUIRED, approve_brief, prepare_brief
+from scripts.grading.calibration import approve_synthetic
 from scripts.grading.workflow import WorkflowContext, next_action
 from scripts.path_safety import has_symlink_component, paths_overlap, read_bytes_limited
 from scripts.redaction.pipeline import EXIT_OK, run as redact
@@ -57,8 +58,8 @@ class DemoPreparation:
             "next_action": self.next_action,
             "narration": [
                 "The dropped folder matches the bundled synthetic corpus exactly.",
-                "The demo uses the identity-free PHIL 210 profile built from four calibration samples, with paper 5 reserved as its holdout.",
-                "The fixed synthetic assignment brief is authorized for demo use and bound to the current rubric and profile.",
+                "The demo uses the identity-free PHIL 210 profile built from four calibration samples, with paper 5 reserved as its holdout. It carries a synthetic calibration approval that is valid only inside this prepared run; a real course needs measured holdouts and the instructor's exact approval.",
+                "The fixed synthetic assignment brief is authorized for demo use and bound to the current rubric and profile. Its review cadence is none, so the pilot and consistency stops that every real batch requires are skipped here.",
                 "Five submissions were redacted locally and the bound synthetic review was completed; grading reads only tokenized files.",
             ],
         }
@@ -218,6 +219,8 @@ def prepare_demo(
         ).decode("utf-8"),
     )
 
+    approve_synthetic(state_root, course=course, profile=profile, rubric=rubric)
+
     roster = state_root / "private" / "essay-2.roster.csv"
     _write_batch_roster(
         roster,
@@ -226,7 +229,7 @@ def prepare_demo(
     )
 
     brief = state_root / "assignments" / f"{batch}.md"
-    prepare_brief(brief, batch=batch, course=course, mode="local")
+    prepare_brief(brief, batch=batch, course=course, mode="local", review="none")
     _answer_demo_brief(brief)
     approve_brief(
         brief,
@@ -269,10 +272,6 @@ def prepare_demo(
         roster=roster,
         instructor=("Marcus Vance",),
     )
-    action = next_action(context)
-    if action.action != "prepare-record":
-        raise DemoError("The synthetic demo did not reach its first grading action.")
-
     marker = {
         "schema": DEMO_SCHEMA,
         "synthetic": True,
@@ -284,6 +283,12 @@ def prepare_demo(
         "source": str(source),
     }
     write_private_text(state_root / "demo.json", json.dumps(marker, indent=2) + "\n")
+    action = next_action(context)
+    if action.action != "prepare-record":
+        raise DemoError(
+            "The synthetic demo did not reach its first grading action: "
+            f"{action.action}."
+        )
     return DemoPreparation(
         run_id=run_id,
         batch=batch,

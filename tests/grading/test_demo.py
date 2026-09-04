@@ -127,3 +127,25 @@ def test_prepare_refuses_source_changed_between_validation_and_redaction(
         demo.prepare_demo(REPO_ROOT, dropped, runs_root=runs)
 
     assert not list(runs.rglob("demo.json"))
+
+
+def test_prepare_records_a_synthetic_calibration_approval_and_no_review_stops(
+    tmp_path: Path, phil210: Path
+):
+    dropped = _drop_folder(phil210, tmp_path / "grading_mock_papers")
+
+    result = _prepare(dropped, tmp_path / "runs")
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    state_root = Path(payload["state_root"])
+    approval = json.loads(
+        (state_root / "calibration/phil210.approval.json").read_text(encoding="utf-8")
+    )
+    assert approval["synthetic"] is True
+    assert approval["receipt_sha256"] == ""
+    brief = (state_root / "assignments/synthetic-demo.md").read_text(encoding="utf-8")
+    assert "Review cadence: none" in brief
+    assert "Purpose: grading" in brief
+    assert payload["next_action"]["action"] == "prepare-record"
+    assert any("synthetic calibration approval" in line for line in payload["narration"])
