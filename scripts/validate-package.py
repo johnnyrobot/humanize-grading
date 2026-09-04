@@ -199,7 +199,7 @@ hard_rules = (
     "Read only from `redacted/`.",
     "Accept file paths. Never accept pasted student work.",
     "Never echo the map file.",
-    "Refuse to grade without a profile.",
+    "Refuse to grade without an approved profile.",
 )
 missing_rules = [rule for rule in hard_rules if rule not in SKILL]
 if missing_rules:
@@ -212,6 +212,22 @@ assignment_brief_workflow = (
     "python3 scripts/grade.py brief prepare",
     "python3 scripts/grade.py brief approve",
 )
+supervision_workflow = (
+    "Approve calibration profile for <course>",
+    "python3 scripts/calibrate.py approve",
+    "Approve pilot drafts for <batch>",
+    "Acknowledge consistency flags for <batch>",
+    "It does not grade unattended.",
+)
+missing_supervision_workflow = [
+    text for text in supervision_workflow if text not in SKILL
+]
+if missing_supervision_workflow:
+    raise SystemExit(
+        "Keep the calibration approval, pilot review, and consistency "
+        "acknowledgement stops in SKILL.md: "
+        + "; ".join(missing_supervision_workflow)
+    )
 missing_assignment_brief_workflow = [
     text for text in assignment_brief_workflow if text not in SKILL
 ]
