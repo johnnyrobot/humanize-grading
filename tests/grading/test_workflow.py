@@ -12,6 +12,15 @@ import pytest
 from scripts.grading.density import PATTERNS_PATH
 from scripts.grading.batch import BatchPaths, GradingBatch, VerificationInputs
 from scripts.grading.brief import prepare_brief
+from scripts.grading.calibration import approval_phrase, approve_calibration
+from scripts.grading.review import (
+    ack_path,
+    ack_phrase,
+    approve_review,
+    pilot_phrase,
+    review_path,
+    write_acknowledgement,
+)
 from scripts.grading.drafts import prepare_draft_pair
 from scripts.grading.rubric import load_rubric
 from scripts.grading.records import GradeRecord
@@ -24,12 +33,75 @@ from scripts.redaction.pipeline import (
     run as redact_batch,
 )
 from scripts.redaction.roster import RosterEntry
+from tests.grading.test_calibration import _write as _write_receipt
 from tests.grading.test_verify import (
+    FEEDBACK,
+    SOURCE,
     TEST_MAP_SHA256,
     TEST_REVIEW_SHA256,
+    _approve_pilot,
+    _refresh_redaction_manifest,
     _write_batch,
 )
 from tests.grading.test_publication import FakeRenderer, _acknowledge
+
+
+def _approve_calibration(root: Path, phil210: Path) -> None:
+    profile = root / "profiles" / "phil210.md"
+    _write_receipt(root, phil210, profile)
+    approve_calibration(
+        root,
+        course="phil210",
+        profile=profile,
+        rubric=phil210 / "grading_rubric.md",
+        approval=approval_phrase("phil210"),
+    )
+
+
+def _inputs_for(context: "WorkflowContext") -> VerificationInputs:
+    return VerificationInputs(
+        course=context.course,
+        rubric=context.rubric,
+        profile=context.root / "profiles" / "phil210.md",
+        patterns=context.patterns,
+        brief=context.root / "assignments" / "essay-2.md",
+    )
+
+
+def _add_draft(context: "WorkflowContext", token: str) -> None:
+    """Clone the first drafted pair to a new token, source included."""
+    source = context.redacted / f"{token}.md"
+    source.write_text(SOURCE, encoding="utf-8")
+    (context.drafts / f"{token}.md").write_text(FEEDBACK, encoding="utf-8")
+    record = GradeRecord.load(context.drafts / "STUDENT_01.json")
+    record.token = token
+    record.source = str(source)
+    record.save(context.drafts / f"{token}.json")
+    _refresh_redaction_manifest(context.redacted)
+
+
+def _add_source(context: "WorkflowContext", token: str) -> None:
+    (context.redacted / f"{token}.md").write_text(SOURCE, encoding="utf-8")
+    _refresh_redaction_manifest(context.redacted)
+
+
+def _pilot_context(tmp_path, phil210, approved_brief, *, review="pilot", pilot=2):
+    """One clean drafted submission, no review approval, a pilot-size-two brief."""
+    context = _complete_context(
+        tmp_path, phil210, approved_brief, pilot_approved=False
+    )
+    brief = context.root / "assignments" / "essay-2.md"
+    brief.unlink()
+    approved_brief(
+        brief,
+        batch=context.batch,
+        course=context.course,
+        rubric=context.rubric,
+        profile=context.root / "profiles" / "phil210.md",
+        review=review,
+        pilot=pilot,
+    )
+    return context
 
 
 @dataclass
@@ -65,10 +137,14 @@ def _empty_context(tmp_path: Path, phil210: Path) -> WorkflowContext:
     )
 
 
-def _write_profile(context: WorkflowContext, phil210: Path) -> Path:
+def _write_profile(
+    context: WorkflowContext, phil210: Path, *, approved: bool = True
+) -> Path:
     path = context.root / "profiles" / "phil210.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes((phil210 / "profile_phil210.md").read_bytes())
+    if approved:
+        _approve_calibration(context.root, phil210)
     return path
 
 
@@ -82,9 +158,12 @@ def _answer_brief(path: Path) -> None:
 
 
 def _complete_context(
-    tmp_path: Path, phil210: Path, approved_brief
+    tmp_path: Path, phil210: Path, approved_brief, **batch_options
 ) -> WorkflowContext:
-    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    redacted, drafts, root = _write_batch(
+        tmp_path, phil210, approved_brief, **batch_options
+    )
+    _approve_calibration(root, phil210)
     return WorkflowContext(
         batch="essay-2",
         course="phil210",
@@ -279,6 +358,7 @@ def ready_batch(tmp_path, phil210, approved_brief) -> ReadyBatch:
     profile = root / "profiles" / "phil210.md"
     profile.parent.mkdir(parents=True)
     profile.write_bytes((phil210 / "profile_phil210.md").read_bytes())
+    _approve_calibration(root, phil210)
     approved_brief(
         root / "assignments" / "essay-2.md",
         batch="essay-2",
@@ -328,13 +408,14 @@ def test_next_action_serializes_context_commands_and_findings(tmp_path, ready_ba
     action = next_action(ready_batch.context(tmp_path))
 
     assert action.as_dict() == {
-        "schema": "grading-next-action/1",
+        "schema": "grading-next-action/2",
         "batch": "essay-2",
         "course": "phil210",
         "stage": "drafting",
         "action": "prepare-record",
         "message": "Prepare the draft pair for STUDENT_01.",
         "token": "STUDENT_01",
+        "tokens": [],
         "commands": [list(action.commands[0])],
         "findings": [],
     }
@@ -859,11 +940,16 @@ def test_current_receipt_returns_consistency_and_publish(
 
     action = next_action(context)
 
-    assert action.action == "consistency-and-publish"
-    assert [command[2] for command in action.commands] == [
-        "consistency",
-        str(context.drafts),
-    ]
+    assert action.action == "review-consistency"
+    assert [command[2] for command in action.commands] == ["consistency"]
+    assert "--course" in action.commands[0]
+    assert ack_phrase("essay-2") in action.message
+
+    _acknowledge(context.drafts)
+    action = next_action(context)
+
+    assert action.action == "publish"
+    assert [command[2] for command in action.commands] == [str(context.drafts)]
 
 
 def test_stale_receipt_returns_repair_verification(
@@ -1079,12 +1165,13 @@ def test_publication_action_renders_map_path_without_reading_private_sentinels(
         )
     )
     assert report.persisted is True
+    _acknowledge(context.drafts)
     context, _, _, map_path, _ = _private_sentinels(context, tmp_path)
 
     action = next_action(context)
 
-    assert action.action == "consistency-and-publish"
-    assert action.commands[1][-4:] == (
+    assert action.action == "publish"
+    assert action.commands[0][-4:] == (
         "--map",
         str(map_path),
         "--out",
@@ -1097,7 +1184,7 @@ def test_next_cli_emits_stable_json_argv(tmp_path, ready_batch):
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["schema"] == "grading-next-action/1"
+    assert payload["schema"] == "grading-next-action/2"
     assert payload["action"] == "prepare-record"
     assert isinstance(payload["commands"][0], list)
 
@@ -1119,12 +1206,13 @@ def test_next_cli_defaults_publication_to_batch_directory(
     )
     assert report.persisted is True
 
+    _acknowledge(context.drafts)
     result = _next_run(context, "--json", include_publication=False)
 
     assert result.returncode == 0, result.stderr
     payload = json.loads(result.stdout)
-    assert payload["action"] == "consistency-and-publish"
-    publication = payload["commands"][1]
+    assert payload["action"] == "publish"
+    publication = payload["commands"][0]
     assert publication[-2:] == ["--out", "final/essay-2"]
 
 
@@ -1157,3 +1245,241 @@ def test_next_cli_exits_thirteen_for_malformed_workflow_state(
     assert result.returncode == 13
     assert result.stdout == ""
     assert "Traceback" not in result.stderr
+
+
+def test_missing_receipt_returns_validate_holdout(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210, approved=False)
+
+    action = next_action(context)
+
+    assert action.action == "validate-holdout"
+    assert action.stage == "calibration"
+    assert "holdout" in action.message
+    assert action.commands == ()
+
+
+def test_passed_receipt_returns_approve_profile_with_the_command(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    profile = _write_profile(context, phil210, approved=False)
+    _write_receipt(context.root, phil210, profile)
+
+    action = next_action(context)
+
+    assert action.action == "approve-profile"
+    assert action.commands[0][:3] == ("python3", "scripts/calibrate.py", "approve")
+    assert "Approve calibration profile for phil210" in action.commands[0]
+    assert "--accept-gap" not in action.commands[0]
+
+
+def test_failed_receipt_returns_review_holdout_without_commands(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    profile = _write_profile(context, phil210, approved=False)
+    _write_receipt(context.root, phil210, profile, totals=(97, None))
+
+    action = next_action(context)
+
+    assert action.action == "review-holdout"
+    assert action.commands == ()
+    assert action.findings
+    assert all(finding.code == "holdout-gap" for finding in action.findings)
+    assert "accept-gap" in action.message
+
+
+def test_edited_profile_after_approval_returns_validate_holdout(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    profile = _write_profile(context, phil210)
+    profile.write_text(profile.read_text(encoding="utf-8") + "\n- extra\n", encoding="utf-8")
+
+    action = next_action(context)
+
+    assert action.action == "validate-holdout"
+    assert action.findings[0].code == "stale-receipt"
+
+
+def test_malformed_receipt_returns_repair_calibration_and_exits_twelve(
+    tmp_path, phil210
+):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210, approved=False)
+    receipt = context.root / "calibration" / "phil210.receipt.json"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text("{}", encoding="utf-8")
+
+    assert next_action(context).action == "repair-calibration"
+    result = _next_run(context)
+    assert result.returncode == 12
+
+
+def test_a_holdout_brief_skips_the_calibration_gate(tmp_path, phil210):
+    context = _empty_context(tmp_path, phil210)
+    _write_profile(context, phil210, approved=False)
+    path = context.root / "assignments" / "essay-2.md"
+    prepare_brief(
+        path, batch="essay-2", course="phil210", mode="local",
+        purpose="holdout", review="none",
+    )
+
+    assert next_action(context).action == "complete-brief"
+
+
+def test_review_none_grading_brief_needs_the_demo_marker(
+    tmp_path, phil210, approved_brief
+):
+    context = replace(_empty_context(tmp_path, phil210), batch="synthetic-demo")
+    profile = _write_profile(context, phil210)
+    approved_brief(
+        context.root / "assignments" / "synthetic-demo.md",
+        batch="synthetic-demo",
+        course="phil210",
+        rubric=context.rubric,
+        profile=profile,
+        review="none",
+    )
+
+    action = next_action(context)
+
+    assert action.action == "repair-brief"
+    assert action.findings[0].code == "review-cadence-reserved"
+    (context.root / "demo.json").write_text(
+        json.dumps({"authorization": "synthetic-demo"}), encoding="utf-8"
+    )
+    assert next_action(context).action == "redact"
+
+
+def test_pilot_stops_after_the_pilot_size(tmp_path, phil210, approved_brief):
+    context = _pilot_context(tmp_path, phil210, approved_brief)
+    _add_source(context, "STUDENT_02")
+
+    action = next_action(context)
+    assert action.action == "prepare-record"
+    assert action.token == "STUDENT_02"
+
+    _add_draft(context, "STUDENT_02")
+    action = next_action(context)
+    assert action.action == "review-pilot"
+    assert action.stage == "review"
+    assert action.tokens == ("STUDENT_01", "STUDENT_02")
+    assert action.commands[0][:4] == ("python3", "scripts/grade.py", "review", "approve")
+    assert pilot_phrase("essay-2") in action.commands[0]
+    assert pilot_phrase("essay-2") in action.message
+
+    _add_source(context, "STUDENT_03")
+    assert next_action(context).action == "review-pilot"
+
+    _approve_pilot(context.redacted, context.drafts, tokens=("STUDENT_01", "STUDENT_02"))
+    review = review_path(context.drafts)
+    review.write_text(
+        review.read_text(encoding="utf-8").replace('"pilot": 1', '"pilot": 2'),
+        encoding="utf-8",
+    )
+    action = next_action(context)
+    assert action.action == "prepare-record"
+    assert action.token == "STUDENT_03"
+
+
+def test_a_pilot_draft_edited_after_approval_stops_again(
+    tmp_path, phil210, approved_brief
+):
+    context = _pilot_context(tmp_path, phil210, approved_brief, pilot=1)
+    _approve_pilot(context.redacted, context.drafts)
+    _add_source(context, "STUDENT_02")
+    assert next_action(context).action == "prepare-record"
+
+    (context.drafts / "STUDENT_01.md").write_text(
+        FEEDBACK.replace("holds", "stands"), encoding="utf-8"
+    )
+    action = next_action(context)
+
+    assert action.action == "review-pilot"
+    assert action.tokens == ("STUDENT_01",)
+    assert [finding.code for finding in action.findings] == ["draft-review-stale"]
+
+
+def test_drafting_past_the_pilot_without_approval_is_a_repair(
+    tmp_path, phil210, approved_brief
+):
+    context = _pilot_context(tmp_path, phil210, approved_brief)
+    for token in ("STUDENT_02", "STUDENT_03"):
+        _add_draft(context, token)
+
+    action = next_action(context)
+
+    assert action.action == "repair-review"
+    assert action.findings[0].code == "pilot-overrun"
+    assert "STUDENT_03" in action.findings[0].message
+    assert _next_run(context).returncode == 12
+
+
+def test_every_cadence_stops_after_each_draft(tmp_path, phil210, approved_brief):
+    context = _pilot_context(tmp_path, phil210, approved_brief, review="every")
+    _add_source(context, "STUDENT_02")
+
+    action = next_action(context)
+
+    assert action.action == "review-draft"
+    assert action.token == "STUDENT_01"
+    assert "Approve draft STUDENT_01 for essay-2" in action.commands[0]
+    assert ("--scope", "draft", "--token", "STUDENT_01") == action.commands[0][-6:-2]
+
+    artifacts = GradingBatch.open(
+        BatchPaths("essay-2", context.redacted, context.drafts)
+    ).draft_artifacts()
+    approve_review(
+        review_path(context.drafts), batch="essay-2", course="phil210",
+        cadence="every", pilot=2, scope="draft",
+        artifacts=[artifacts["STUDENT_01"]],
+        approval="Approve draft STUDENT_01 for essay-2",
+    )
+    action = next_action(context)
+    assert action.action == "prepare-record"
+    assert action.token == "STUDENT_02"
+
+
+def test_verified_batch_stops_for_consistency_then_publishes(
+    tmp_path, phil210, approved_brief
+):
+    context = _complete_context(tmp_path, phil210, approved_brief)
+    GradingBatch.open(
+        BatchPaths("essay-2", context.redacted, context.drafts)
+    ).verify(_inputs_for(context))
+
+    action = next_action(context)
+    assert action.action == "review-consistency"
+    assert action.commands[0][:3] == ("python3", "scripts/grade.py", "consistency")
+
+    write_acknowledgement(
+        ack_path(context.drafts), batch="essay-2", course="phil210",
+        receipt_sha256="b" * 64, flags=[], approval=ack_phrase("essay-2"),
+    )
+    assert next_action(context).action == "review-consistency"
+
+    _acknowledge(context.drafts)
+    action = next_action(context)
+    assert action.action == "publish"
+    assert action.commands[0][:2] == ("python3", "scripts/rehydrate.py")
+
+
+def test_holdout_batch_ends_at_report_holdout(tmp_path, phil210, approved_brief):
+    context = _complete_context(
+        tmp_path, phil210, approved_brief, pilot_approved=False
+    )
+    brief = context.root / "assignments" / "essay-2.md"
+    brief.unlink()
+    approved_brief(
+        brief, batch="essay-2", course="phil210", rubric=context.rubric,
+        profile=context.root / "profiles" / "phil210.md", purpose="holdout",
+    )
+    for path in (context.root / "calibration").iterdir():
+        path.unlink()
+
+    assert next_action(context).action == "verify"
+    GradingBatch.open(
+        BatchPaths("essay-2", context.redacted, context.drafts)
+    ).verify(_inputs_for(context))
+    action = next_action(context)
+
+    assert action.action == "report-holdout"
+    assert action.stage == "calibration"
+    assert action.commands == ()
+    assert "calibrate.py holdout" in action.message

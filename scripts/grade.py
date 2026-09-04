@@ -801,6 +801,8 @@ def _cmd_next(args: argparse.Namespace) -> int:
         print(action.message)
         if action.token:
             print(f"Token: {action.token}")
+        if action.tokens:
+            print("Tokens: " + ", ".join(action.tokens))
         for command in action.commands:
             print(f"Command: {shlex.join(command)}")
         for finding in action.findings:
@@ -810,9 +812,11 @@ def _cmd_next(args: argparse.Namespace) -> int:
             )
     if action.action in {
         "repair-brief",
+        "repair-calibration",
         "repair-redaction",
         "repair-batch",
         "repair-verification",
+        "repair-review",
     }:
         return EXIT_FAILED
     return EXIT_OK
