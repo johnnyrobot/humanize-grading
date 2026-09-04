@@ -11,6 +11,7 @@ Subcommands:
     consistency  Flag outliers across a graded batch.
     brief        Prepare, approve, or check an assignment brief.
     record       Prepare one pending submission's draft pair.
+    review       Record or check the instructor's pilot or per-draft approval.
     next         Show the next legal grading action.
 
 Exit codes: 0 clean, 10 no profile, 11 the rubric drifted since calibration,
@@ -65,6 +66,15 @@ from scripts.grading.profile import (  # noqa: E402
     profile_path,
 )
 from scripts.grading.records import RecordError  # noqa: E402
+from scripts.grading.review import (  # noqa: E402
+    REVIEW_CODES,
+    ReviewError,
+    ack_path,
+    approve_review,
+    load_review,
+    review_path,
+    write_acknowledgement,
+)
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
 from scripts.grading.workflow import (  # noqa: E402
     WorkflowContext,
@@ -383,6 +393,43 @@ def _cmd_consistency(args: argparse.Namespace) -> int:
     )
     if report.blocking_findings:
         return EXIT_MALFORMED
+    if args.acknowledge is not None:
+        if args.course is None:
+            print("ERROR consistency: --acknowledge needs --course.", file=sys.stderr)
+            return EXIT_MALFORMED
+        verified = GradingBatch.open(
+            BatchPaths(batch=args.batch, redacted=args.redacted, drafts=drafts_dir)
+        ).status(require_verified=True)
+        if verified.blocking_findings:
+            for finding in verified.blocking_findings:
+                _print_batch_finding(finding, blocking=True)
+            print(
+                "ERROR consistency: verification must pass before the flags can "
+                "be acknowledged.",
+                file=sys.stderr,
+            )
+            return EXIT_FAILED
+        receipt_digest = hashlib.sha256(
+            read_bytes_limited(
+                drafts_dir / "_verification.json",
+                "The verification receipt",
+                10 * 1024 * 1024,
+            )
+        ).hexdigest()
+        try:
+            write_acknowledgement(
+                ack_path(drafts_dir),
+                batch=args.batch,
+                course=args.course,
+                receipt_sha256=receipt_digest,
+                flags=[(flag.kind, flag.message) for flag in report.flags],
+                approval=args.acknowledge,
+            )
+        except (ReviewError, OSError, ValueError) as error:
+            print(f"ERROR consistency: {_one_line(error)}", file=sys.stderr)
+            return EXIT_MALFORMED
+        print(f"Acknowledged {len(report.flags)} consistency flags for {args.batch}.")
+        return EXIT_OK
     if report.flags and args.fail_on_findings:
         return EXIT_FAILED
     return EXIT_OK
@@ -473,6 +520,125 @@ def _cmd_brief_check(args: argparse.Namespace) -> int:
     except (BriefError, OSError, UnicodeError, ValueError) as error:
         return _brief_error(error)
     print(f"Approved assignment brief is current: {brief.path}")
+    return EXIT_OK
+
+
+def _review_context(args: argparse.Namespace):
+    profile = load_profile(profile_path(args.course, args.root))
+    if profile.course != args.course:
+        raise BriefError(
+            f"The profile belongs to {profile.course!r}, not {args.course!r}."
+        )
+    rubric = load_rubric(args.rubric)
+    drifted = profile.drift(rubric)
+    if drifted:
+        raise BriefError("The rubric changed since calibration: " + "; ".join(drifted))
+    brief = check_brief(
+        args.brief or brief_path(args.root, args.batch),
+        batch=args.batch,
+        course=args.course,
+        rubric=rubric.path,
+        profile=profile.path,
+    )
+    drafts = _drafts_dir(args)
+    batch = GradingBatch.open(
+        BatchPaths(batch=args.batch, redacted=args.redacted, drafts=drafts)
+    )
+    inputs = VerificationInputs(
+        course=args.course,
+        rubric=args.rubric,
+        profile=profile.path,
+        patterns=args.patterns,
+        brief=brief.path,
+    )
+    return brief, batch, drafts, inputs
+
+
+def _review_error(message: object, *, exit_code: int = EXIT_MALFORMED) -> int:
+    print(f"ERROR review: {_one_line(message)}", file=sys.stderr)
+    return exit_code
+
+
+def _cmd_review_approve(args: argparse.Namespace) -> int:
+    try:
+        brief, batch, drafts, inputs = _review_context(args)
+    except (BriefError, ProfileError, RubricError, OSError, UnicodeError, ValueError) as error:
+        return _review_error(error)
+    if brief.purpose != "grading" or brief.review == "none":
+        return _review_error("This brief has no draft review stops.")
+    if (args.scope == "pilot") != (brief.review == "pilot"):
+        return _review_error(
+            f"The brief's review cadence is {brief.review}; use the matching scope."
+        )
+    if args.scope == "draft" and not args.token:
+        return _review_error("--scope draft needs --token.")
+    try:
+        artifacts = batch.draft_artifacts()
+        status = batch.status()
+        existing = load_review(review_path(drafts), batch=args.batch, course=args.course)
+    except (ReviewError, OSError, UnicodeError, ValueError) as error:
+        return _review_error(error)
+    total = sum(1 for entry in status.entries if entry.progress is not None)
+    if args.scope == "pilot":
+        prior = existing.pilot_approval() if existing is not None else None
+        tokens = list(prior.tokens) if prior is not None else sorted(artifacts)
+        expected = min(brief.pilot, total)
+        if prior is None and len(tokens) != expected:
+            return _review_error(
+                f"The pilot needs exactly {expected} drafted submissions; found "
+                f"{len(tokens)}. Remove extra drafts or draft the missing ones.",
+                exit_code=EXIT_FAILED,
+            )
+    else:
+        tokens = [args.token]
+    missing = [token for token in tokens if token not in artifacts]
+    if missing:
+        return _review_error(
+            "Not drafted or unreadable: " + ", ".join(missing), exit_code=EXIT_FAILED
+        )
+    report = batch.verify(inputs, persist=False)
+    dirty = [
+        finding
+        for finding in report.blocking_findings
+        if finding.code not in REVIEW_CODES
+        and (finding.token in tokens or not finding.token)
+    ]
+    if dirty:
+        for finding in dirty:
+            _print_batch_finding(finding, blocking=True)
+        return _review_error(
+            "Fix these findings before asking the instructor to approve.",
+            exit_code=EXIT_FAILED,
+        )
+    try:
+        approve_review(
+            review_path(drafts),
+            batch=args.batch,
+            course=args.course,
+            cadence=brief.review,
+            pilot=brief.pilot,
+            scope=args.scope,
+            artifacts=[artifacts[token] for token in tokens],
+            approval=args.approval,
+        )
+    except (ReviewError, OSError, ValueError) as error:
+        return _review_error(error)
+    print(f"Approved {args.scope} drafts: " + ", ".join(tokens))
+    return EXIT_OK
+
+
+def _cmd_review_check(args: argparse.Namespace) -> int:
+    try:
+        brief, batch, drafts, inputs = _review_context(args)
+    except (BriefError, ProfileError, RubricError, OSError, UnicodeError, ValueError) as error:
+        return _review_error(error)
+    report = batch.verify(inputs, persist=False)
+    findings = [f for f in report.blocking_findings if f.code in REVIEW_CODES]
+    for finding in findings:
+        _print_batch_finding(finding, blocking=True)
+    if findings:
+        return EXIT_FAILED
+    print(f"Draft review for {args.batch} is current ({brief.review}).")
     return EXIT_OK
 
 
@@ -712,9 +878,19 @@ def build_parser() -> argparse.ArgumentParser:
         "consistency", help="Flag outliers across a graded batch"
     )
     consistency.add_argument("--batch", required=True, type=_component("The grading batch"))
+    consistency.add_argument("--course", type=_component("The course"), default=None)
     consistency.add_argument("--redacted", type=Path, default=Path("redacted"))
     consistency.add_argument("--drafts", type=Path, default=None)
     consistency.add_argument("--threshold", type=float, default=2.0)
+    consistency.add_argument(
+        "--acknowledge",
+        default=None,
+        metavar="PHRASE",
+        help=(
+            "Record that the instructor saw these flags for the current "
+            "verification receipt; needs --course"
+        ),
+    )
     consistency.add_argument(
         "--fail-on-findings",
         action="store_true",
@@ -798,6 +974,29 @@ def build_parser() -> argparse.ArgumentParser:
     record_prepare.add_argument("--brief", type=Path, default=None)
     _add_common(record_prepare)
     record_prepare.set_defaults(handler=_cmd_record_prepare)
+
+    review = subparsers.add_parser(
+        "review", help="Record or check the instructor's draft review"
+    )
+    review_actions = review.add_subparsers(dest="review_action", required=True)
+    for name, handler, help_text in (
+        ("approve", _cmd_review_approve, "Record the exact pilot or per-draft approval"),
+        ("check", _cmd_review_check, "Say whether the draft review is current"),
+    ):
+        action = review_actions.add_parser(name, help=help_text)
+        action.add_argument("--batch", required=True, type=_component("The grading batch"))
+        action.add_argument("--course", required=True, type=_component("The course"))
+        action.add_argument("--rubric", required=True, type=Path)
+        action.add_argument("--redacted", type=Path, default=Path("redacted"))
+        action.add_argument("--drafts", type=Path, default=None)
+        action.add_argument("--patterns", type=Path, default=PATTERNS_PATH)
+        action.add_argument("--brief", type=Path, default=None)
+        if name == "approve":
+            action.add_argument("--scope", required=True, choices=("pilot", "draft"))
+            action.add_argument("--token", default=None)
+            action.add_argument("--approval", required=True)
+        _add_common(action)
+        action.set_defaults(handler=handler)
 
     next_command = subparsers.add_parser(
         "next", help="Show the next legal grading action."

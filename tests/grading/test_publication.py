@@ -23,7 +23,31 @@ from scripts.grading.records import GradeRecord
 from scripts.redaction.tokens import TokenMap
 from scripts.redaction.manifest import RedactionManifest
 from scripts.rehydrate import TokenMapRenderer
-from tests.grading.test_verify import _refresh_redaction_manifest, _write_batch
+from scripts.grading.review import (
+    ack_path,
+    ack_phrase,
+    load_acknowledgement,
+    write_acknowledgement,
+)
+from tests.grading.test_verify import (
+    _approve_pilot,
+    _inputs,
+    _refresh_redaction_manifest,
+    _write_batch,
+)
+
+
+def _acknowledge(drafts: Path, batch: str = "essay-2") -> None:
+    """Acknowledge the consistency flags for the receipt as it is right now."""
+    receipt = hashlib.sha256((drafts / "_verification.json").read_bytes()).hexdigest()
+    write_acknowledgement(
+        ack_path(drafts),
+        batch=batch,
+        course="phil210",
+        receipt_sha256=receipt,
+        flags=[],
+        approval=ack_phrase(batch),
+    )
 
 
 TEST_MAP_SHA256 = hashlib.sha256(b"test-token-map").hexdigest()
@@ -106,6 +130,7 @@ def _refresh_density(redacted: Path, drafts: Path, token: str) -> None:
     source = (redacted / f"{token}.md").read_text(encoding="utf-8")
     record.pattern_density = scan(source, load_terms(PATTERNS_PATH)).as_dict()
     record.save(drafts / f"{token}.json")
+    _approve_pilot(redacted, drafts)
     manifest = RedactionManifest.load(redacted)
     RedactionManifest.create(
         manifest.batch,
@@ -134,6 +159,7 @@ def _verified_fixture(tmp_path, phil210, approved_brief):
         .verified_batch
     )
     assert verified is not None
+    _acknowledge(drafts)
     return redacted, drafts, verified
 
 
@@ -906,6 +932,7 @@ def test_verified_batch_publishes_complete_first_destination(
         .verified_batch
     )
     assert verified is not None
+    _acknowledge(drafts)
     renderer = FakeRenderer()
     target = tmp_path / "final"
 
@@ -1006,6 +1033,7 @@ def test_first_publication_refuses_nonempty_destination(
         .verified_batch
     )
     assert verified is not None
+    _acknowledge(drafts)
     renderer = FakeRenderer()
     target = tmp_path / "final"
     target.mkdir()
@@ -1306,6 +1334,7 @@ def test_publish_aggregates_renderer_failures_and_keeps_destination_untouched(
         .verified_batch
     )
     assert verified is not None
+    _acknowledge(drafts)
     renderer = FakeRenderer(
         unmapped={"STUDENT_01.md": ("STUDENT_99",)},
         errors={"STUDENT_02.md": "Could not render this draft."},
@@ -1358,6 +1387,7 @@ def test_rehydrate_cli_publishes_through_verified_batch(
     )
     target = tmp_path / "final"
 
+    _acknowledge(drafts)
     result = subprocess.run(
         _rehydrate_command(
             drafts, map_path, target, redacted, root, phil210 / "grading_rubric.md"
@@ -1417,6 +1447,7 @@ def test_rehydrate_cli_safe_force_replaces_recognized_publication(
         )
     )
     target = tmp_path / "final"
+    _acknowledge(drafts)
     command = _rehydrate_command(
         drafts, map_path, target, redacted, root, phil210 / "grading_rubric.md"
     )
@@ -1458,6 +1489,7 @@ def test_rehydrate_cli_recovers_schema_2_receipt_context_and_publishes(
     record = GradeRecord.load(record_path)
     record.rubric = str(tmp_path / "grading_rubric.md")
     record.save(record_path)
+    _approve_pilot(redacted, drafts)
     GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
     ).verify(
@@ -1470,6 +1502,7 @@ def test_rehydrate_cli_recovers_schema_2_receipt_context_and_publishes(
         )
     )
 
+    _acknowledge(drafts)
     result = subprocess.run(
         [
             sys.executable,
@@ -1669,6 +1702,7 @@ def test_rehydrate_cli_leaves_destination_absent_for_unmapped_token(
     )
     target = tmp_path / "final"
 
+    _acknowledge(drafts)
     result = subprocess.run(
         _rehydrate_command(
             drafts, map_path, target, redacted, root, phil210 / "grading_rubric.md"
@@ -1681,3 +1715,64 @@ def test_rehydrate_cli_leaves_destination_absent_for_unmapped_token(
     assert "unmapped-token" in result.stderr
     assert "STUDENT_01" in result.stderr
     assert not target.exists()
+
+
+def test_publish_refuses_without_a_current_acknowledgement(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    verified = batch.verify(_inputs(phil210, root)).verified_batch
+    assert verified is not None
+    result = verified.publish(tmp_path / "final", FakeRenderer())
+    assert [f.code for f in result.findings] == ["consistency-acknowledgement-required"]
+    assert not (tmp_path / "final").exists()
+    write_acknowledgement(
+        ack_path(drafts),
+        batch="essay-2",
+        course="phil210",
+        receipt_sha256="b" * 64,
+        flags=[],
+        approval=ack_phrase("essay-2"),
+    )
+    result = verified.publish(tmp_path / "final", FakeRenderer())
+    assert [f.code for f in result.findings] == ["consistency-acknowledgement-required"]
+    _acknowledge(drafts)
+    result = verified.publish(tmp_path / "final", FakeRenderer())
+    assert result.findings == ()
+    assert result.changed is True
+
+
+def test_a_holdout_batch_never_publishes(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(
+        tmp_path, phil210, approved_brief, pilot_approved=False
+    )
+    brief = root / "assignments" / "essay-2.md"
+    brief.unlink()
+    approved_brief(
+        brief,
+        batch="essay-2",
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        purpose="holdout",
+    )
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    verified = batch.verify(_inputs(phil210, root)).verified_batch
+    assert verified is not None
+    _acknowledge(drafts)
+    result = verified.publish(tmp_path / "final", FakeRenderer())
+    assert [f.code for f in result.findings] == ["holdout-cannot-publish"]
+    assert not (tmp_path / "final").exists()
+
+
+def test_acknowledgement_survives_but_is_checked_on_resume(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    GradingBatch.open(BatchPaths("essay-2", redacted, drafts)).verify(_inputs(phil210, root))
+    _acknowledge(drafts)
+    resumed = _resume(redacted, drafts, root, phil210)
+    assert resumed.verified_batch is not None
+    assert resumed.verified_batch.publish(tmp_path / "final", FakeRenderer()).findings == ()
+    assert load_acknowledgement(ack_path(drafts), batch="essay-2", course="phil210") is not None

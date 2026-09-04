@@ -119,6 +119,7 @@ tests/grading/test_profile_command.py
 tests/grading/test_publication.py
 tests/grading/test_records.py
 tests/grading/test_review.py
+tests/grading/test_review_command.py
 tests/grading/test_rubric.py
 tests/grading/test_samples.py
 tests/grading/test_verify.py

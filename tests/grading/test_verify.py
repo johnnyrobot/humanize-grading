@@ -24,6 +24,7 @@ from scripts.grading.records import (
     GradeRecord,
     Justification,
 )
+from scripts.grading.review import approve_review, pilot_phrase, review_path
 from scripts.grading.rubric import load_rubric
 from scripts.grading.verify import errors, verify_draft
 from scripts.redaction.manifest import RedactionManifest
@@ -335,7 +336,36 @@ def test_watched_terms_in_the_feedback_are_a_warning_not_an_error(
     assert not any(finding.code == "watched-term" for finding in errors(findings))
 
 
-def _write_batch(tmp_path, phil210, approved_brief, feedback=FEEDBACK):
+def _inputs(phil210, root):
+    return VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=root / "profiles" / "phil210.md",
+        patterns=PATTERNS_PATH,
+        brief=root / "assignments" / "essay-2.md",
+    )
+
+
+def _approve_pilot(redacted, drafts, tokens=("STUDENT_01",), batch="essay-2"):
+    """Approve the pilot for the named tokens as they are right now."""
+    artifacts = GradingBatch.open(
+        BatchPaths(batch=batch, redacted=redacted, drafts=drafts)
+    ).draft_artifacts()
+    return approve_review(
+        review_path(drafts),
+        batch=batch,
+        course="phil210",
+        cadence="pilot",
+        pilot=1,
+        scope="pilot",
+        artifacts=[artifacts[token] for token in tokens],
+        approval=pilot_phrase(batch),
+    )
+
+
+def _write_batch(
+    tmp_path, phil210, approved_brief, feedback=FEEDBACK, *, pilot_approved=True
+):
     redacted = tmp_path / "redacted"
     drafts = tmp_path / "drafts"
     redacted.mkdir()
@@ -355,6 +385,7 @@ def _write_batch(tmp_path, phil210, approved_brief, feedback=FEEDBACK):
         course="phil210",
         rubric=phil210 / "grading_rubric.md",
         profile=profile_path,
+        pilot=1,
     )
     record = _record(
         source=str(redacted / "STUDENT_01.md"),
@@ -362,20 +393,24 @@ def _write_batch(tmp_path, phil210, approved_brief, feedback=FEEDBACK):
         profile=str(profile_path),
     )
     record.save(drafts / "STUDENT_01.json")
+    if pilot_approved:
+        _approve_pilot(redacted, drafts)
     return redacted, drafts, root
 
 
 def _replace_approved_brief(
-    root, phil210, approved_brief, *, rubric=None, profile=None
+    root, phil210, approved_brief, *, rubric=None, profile=None, **brief_options
 ):
     brief = root / "assignments" / "essay-2.md"
     brief.unlink()
+    brief_options.setdefault("pilot", 1)
     return approved_brief(
         brief,
         batch="essay-2",
         course="phil210",
         rubric=rubric or phil210 / "grading_rubric.md",
         profile=profile or root / "profiles" / "phil210.md",
+        **brief_options,
     )
 
 
@@ -1058,6 +1093,7 @@ def test_edit_to_each_bound_artifact_role_invalidates_receipt(
     record = GradeRecord.load(record_path)
     record.rubric = str(rubric)
     record.save(record_path)
+    _approve_pilot(redacted, drafts)
     inputs = VerificationInputs(
         course="phil210",
         rubric=rubric,
@@ -1134,6 +1170,7 @@ def test_reverification_replaces_a_stale_receipt(tmp_path, phil210, approved_bri
         finding.code for finding in batch.status().blocking_findings
     }
 
+    _approve_pilot(redacted, drafts)
     report = batch.verify(inputs)
 
     assert report.persisted is True
@@ -1308,6 +1345,7 @@ def test_grading_batch_accepts_equivalent_normalized_paths(
     record.rubric = str(phil210 / ".." / "phil210" / "grading_rubric.md")
     record.profile = str(root / "profiles" / ".." / "profiles" / "phil210.md")
     record.save(record_path)
+    _approve_pilot(redacted, drafts)
 
     report = GradingBatch.open(
         BatchPaths(batch="essay-2", redacted=redacted, drafts=drafts)
@@ -2006,3 +2044,104 @@ def test_the_cli_accepts_a_matching_rubric(tmp_path, phil210):
     result = _run("profile", "--course", "phil210",
                   "--rubric", str(phil210 / "grading_rubric.md"), "--root", str(root))
     assert result.returncode == 0
+
+
+def test_verification_blocks_until_the_pilot_is_approved(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(
+        tmp_path, phil210, approved_brief, pilot_approved=False
+    )
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    report = batch.verify(_inputs(phil210, root), persist=False)
+    assert [f.code for f in report.blocking_findings] == ["draft-review-required"]
+    assert "Approve pilot drafts for essay-2" in report.blocking_findings[0].message
+    _approve_pilot(redacted, drafts)
+    report = batch.verify(_inputs(phil210, root))
+    assert report.blocking_findings == ()
+    assert report.persisted is True
+
+
+def test_a_draft_edited_after_pilot_approval_blocks_verification(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    (drafts / "STUDENT_01.md").write_text(
+        FEEDBACK.replace("holds", "stands"), encoding="utf-8"
+    )
+    report = batch.verify(_inputs(phil210, root), persist=False)
+    assert [(f.code, f.token) for f in report.blocking_findings] == [
+        ("draft-review-stale", "STUDENT_01")
+    ]
+
+
+def test_a_record_edited_after_pilot_approval_blocks_verification(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    record = GradeRecord.load(drafts / "STUDENT_01.json")
+    record.criteria[0].justifications[0].note = "edited after approval"
+    record.save(drafts / "STUDENT_01.json")
+    report = GradingBatch.open(BatchPaths("essay-2", redacted, drafts)).verify(
+        _inputs(phil210, root), persist=False
+    )
+    assert [(f.code, f.token) for f in report.blocking_findings] == [
+        ("draft-review-stale", "STUDENT_01")
+    ]
+
+
+def test_verification_offsets_do_not_stale_the_pilot_approval(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    assert batch.verify(_inputs(phil210, root)).persisted is True
+    record = json.loads((drafts / "STUDENT_01.json").read_text(encoding="utf-8"))
+    assert "offset" in record["criteria"][0]["justifications"][0]
+    assert batch.verify(_inputs(phil210, root), persist=False).blocking_findings == ()
+
+
+def test_every_cadence_requires_each_draft_approval(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(
+        tmp_path, phil210, approved_brief, pilot_approved=False
+    )
+    _replace_approved_brief(root, phil210, approved_brief, review="every")
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    report = batch.verify(_inputs(phil210, root), persist=False)
+    assert [(f.code, f.token) for f in report.blocking_findings] == [
+        ("draft-review-required", "STUDENT_01")
+    ]
+
+
+def test_a_holdout_brief_verifies_without_review(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(
+        tmp_path, phil210, approved_brief, pilot_approved=False
+    )
+    _replace_approved_brief(root, phil210, approved_brief, purpose="holdout")
+    batch = GradingBatch.open(BatchPaths("essay-2", redacted, drafts))
+    assert batch.verify(_inputs(phil210, root), persist=False).blocking_findings == ()
+
+
+def test_a_malformed_review_record_blocks_verification(
+    tmp_path, phil210, approved_brief
+):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    review_path(drafts).write_text("{not json", encoding="utf-8")
+    report = GradingBatch.open(BatchPaths("essay-2", redacted, drafts)).verify(
+        _inputs(phil210, root), persist=False
+    )
+    assert [f.code for f in report.blocking_findings] == ["malformed-draft-review"]
+
+
+def test_draft_artifacts_digest_every_readable_pair(tmp_path, phil210, approved_brief):
+    redacted, drafts, root = _write_batch(tmp_path, phil210, approved_brief)
+    artifacts = GradingBatch.open(BatchPaths("essay-2", redacted, drafts)).draft_artifacts()
+    assert set(artifacts) == {"STUDENT_01"}
+    assert artifacts["STUDENT_01"].feedback_sha256 == hashlib.sha256(
+        FEEDBACK.encode("utf-8")
+    ).hexdigest()
+    (drafts / "STUDENT_01.json").write_text("{not json", encoding="utf-8")
+    assert GradingBatch.open(BatchPaths("essay-2", redacted, drafts)).draft_artifacts() == {}

@@ -21,11 +21,21 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol
 
-from scripts.grading.brief import BriefError, brief_path, check_brief
+from scripts.grading.brief import BriefError, brief_path, check_brief, load_brief
 from scripts.grading.consistency import Outlier, review
 from scripts.grading.density import PATTERNS_PATH, load_terms
 from scripts.grading.profile import ProfileError, load_profile
 from scripts.grading.records import GradeRecord, RecordError
+from scripts.grading.review import (
+    DraftArtifacts,
+    ReviewError,
+    ack_path,
+    feedback_digest,
+    load_acknowledgement,
+    load_review,
+    review_findings,
+    review_path,
+)
 from scripts.grading.rubric import RubricError, load_rubric
 from scripts.grading.verify import ERROR, verify_draft
 from scripts.redaction.manifest import NAME as REDACTION_MANIFEST_NAME
@@ -225,6 +235,9 @@ class VerifiedBatch:
         "_redaction_run_id",
         "_map_sha256",
         "_draft_digests",
+        "_course",
+        "_review_cadence",
+        "_purpose",
     )
 
     def __init__(
@@ -235,6 +248,9 @@ class VerifiedBatch:
         redaction_run_id: str = "",
         map_sha256: str = "",
         draft_digests: dict[str, str] | None = None,
+        course: str = "",
+        review_cadence: str = "pilot",
+        purpose: str = "grading",
     ) -> None:
         if key is not _VERIFIED_BATCH_KEY:
             raise TypeError(
@@ -246,6 +262,9 @@ class VerifiedBatch:
         self._redaction_run_id = redaction_run_id
         self._map_sha256 = map_sha256
         self._draft_digests = dict(draft_digests or {})
+        self._course = course
+        self._review_cadence = review_cadence
+        self._purpose = purpose
 
     @classmethod
     def _create(
@@ -277,6 +296,16 @@ class VerifiedBatch:
                 "The redaction manifest changed while the verified batch was created."
             )
         manifest = RedactionManifest.from_bytes(manifest_bytes)
+        brief_artifact = next(
+            item for item in artifacts if item["role"] == "assignment-brief"
+        )
+        brief_locator = Path(brief_artifact["path"])
+        brief_file = (
+            brief_locator
+            if brief_locator.is_absolute()
+            else receipt.parent / brief_locator
+        )
+        brief = load_brief(brief_file)
         draft_digests = {
             Path(item["path"]).name: item["sha256"]
             for item in decoded.artifacts
@@ -292,7 +321,56 @@ class VerifiedBatch:
             redaction_run_id=manifest.run_id,
             map_sha256=manifest.map_sha256,
             draft_digests=draft_digests,
+            course=decoded.course,
+            review_cadence=brief.review,
+            purpose=brief.purpose,
         )
+
+    def _publication_gate_findings(self) -> list[BlockingFinding]:
+        """Refuse publication for a holdout batch or an unacknowledged one."""
+        if self._purpose != "grading":
+            return [
+                BlockingFinding(
+                    code="holdout-cannot-publish",
+                    message=(
+                        "A holdout batch measures the profile. It never publishes "
+                        "feedback."
+                    ),
+                    token="",
+                )
+            ]
+        if self._review_cadence == "none":
+            return []
+        try:
+            acknowledgement = load_acknowledgement(
+                ack_path(self._paths.drafts),
+                batch=self._paths.batch,
+                course=self._course,
+            )
+        except ReviewError as error:
+            return [
+                BlockingFinding(
+                    code="consistency-acknowledgement-required",
+                    message=str(error),
+                    token="",
+                )
+            ]
+        if (
+            acknowledgement is None
+            or acknowledgement.receipt_sha256 != self._receipt_digest
+        ):
+            return [
+                BlockingFinding(
+                    code="consistency-acknowledgement-required",
+                    message=(
+                        "The instructor must see the consistency flags for this exact "
+                        "receipt before publication. Run consistency, then run it "
+                        "again with --acknowledge and the exact phrase."
+                    ),
+                    token="",
+                )
+            ]
+        return []
 
     @classmethod
     def resume(
@@ -482,6 +560,8 @@ class VerifiedBatch:
                     token="",
                 )
             )
+        if not findings:
+            findings.extend(self._publication_gate_findings())
         if findings:
             return PublicationReport(
                 destination=target,
@@ -888,6 +968,24 @@ class GradingBatch:
             ),
             blocking_findings=(),
         )
+
+    def draft_artifacts(self) -> dict[str, DraftArtifacts]:
+        """Digest every readable drafted pair without judging it."""
+        artifacts: dict[str, DraftArtifacts] = {}
+        for entry in self._status(check_receipt=False).entries:
+            if entry.progress is not Progress.DRAFTED:
+                continue
+            loaded = _load_entry(entry, self.paths)
+            if loaded.record is None or loaded.draft_text is None or any(
+                finding.code in _MALFORMED_CODES for finding in loaded.findings
+            ):
+                continue
+            artifacts[entry.token] = DraftArtifacts(
+                entry.token,
+                feedback_digest(loaded.draft_text),
+                loaded.record.review_digest(),
+            )
+        return artifacts
 
     def _status(
         self,
@@ -1296,6 +1394,10 @@ class GradingBatch:
                         )
                     )
 
+        if not blocking:
+            blocking.extend(
+                self._review_findings(approved_brief, inputs, status, loaded_entries)
+            )
         receipt = None
         receipt_bytes = None
         if not blocking:
@@ -1429,6 +1531,44 @@ class GradingBatch:
                 else None
             ),
         )
+
+    def _review_findings(
+        self, approved_brief, inputs: VerificationInputs, status, loaded_entries
+    ) -> list[BlockingFinding]:
+        """Require the instructor's draft review before the batch verifies."""
+        if approved_brief.review == "none":
+            return []
+        drafted = {
+            loaded.entry.token: DraftArtifacts(
+                loaded.entry.token,
+                feedback_digest(loaded.draft_text),
+                loaded.record.review_digest(),
+            )
+            for loaded in loaded_entries
+            if loaded.entry.progress is Progress.DRAFTED
+            and loaded.record is not None
+            and loaded.draft_text is not None
+        }
+        total = sum(1 for entry in status.entries if entry.progress is not None)
+        try:
+            review = load_review(
+                review_path(self.paths.drafts),
+                batch=self.paths.batch,
+                course=inputs.course,
+            )
+        except ReviewError as error:
+            return [BlockingFinding("malformed-draft-review", str(error), "")]
+        return [
+            BlockingFinding(finding.code, finding.message, finding.token)
+            for finding in review_findings(
+                cadence=approved_brief.review,
+                pilot=approved_brief.pilot,
+                total=total,
+                drafted=drafted,
+                review=review,
+                batch=self.paths.batch,
+            )
+        ]
 
     def consistency(self, *, threshold: float = 2.0) -> ConsistencyReport:
         status = self._status(check_receipt=False)

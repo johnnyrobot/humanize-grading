@@ -204,6 +204,38 @@ def _complete_trial(workspace: Path) -> None:
     _write_valid_pair(workspace, source)
     environment = os.environ.copy()
     environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    reviewed = subprocess.run(
+        [
+            sys.executable,
+            "scripts/grade.py",
+            "review",
+            "approve",
+            "--batch",
+            "essay-2",
+            "--course",
+            "phil210",
+            "--rubric",
+            str(RUBRIC),
+            "--redacted",
+            "redacted",
+            "--drafts",
+            "drafts/essay-2",
+            "--patterns",
+            str(PATTERNS),
+            "--root",
+            ".grading",
+            "--scope",
+            "pilot",
+            "--approval",
+            "Approve pilot drafts for essay-2",
+        ],
+        cwd=workspace,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert reviewed.returncode == 0, reviewed.stdout + reviewed.stderr
     verified = subprocess.run(
         [
             sys.executable,
@@ -231,6 +263,31 @@ def _complete_trial(workspace: Path) -> None:
         check=False,
     )
     assert verified.returncode == 0, verified.stderr
+    acknowledged = subprocess.run(
+        [
+            sys.executable,
+            "scripts/grade.py",
+            "consistency",
+            "--batch",
+            "essay-2",
+            "--course",
+            "phil210",
+            "--redacted",
+            "redacted",
+            "--drafts",
+            "drafts/essay-2",
+            "--root",
+            ".grading",
+            "--acknowledge",
+            "Acknowledge consistency flags for essay-2",
+        ],
+        cwd=workspace,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert acknowledged.returncode == 0, acknowledged.stdout + acknowledged.stderr
     published = subprocess.run(
         [
             sys.executable,

@@ -7,6 +7,7 @@ Whether a model's judgement is any good is what the holdout report answers.
 
 from __future__ import annotations
 
+import hashlib
 import re
 import subprocess
 import sys
@@ -24,6 +25,14 @@ from scripts.grading.batch import (
 )
 from scripts.grading.density import PATTERNS_PATH, load_terms, scan
 from scripts.grading.records import CriterionScore, GradeRecord, Justification, locate
+from scripts.grading.review import (
+    ack_path,
+    ack_phrase,
+    approve_review,
+    pilot_phrase,
+    review_path,
+    write_acknowledgement,
+)
 from scripts.grading.rubric import load_rubric
 from scripts.redaction.pipeline import EXIT_OK, run
 from scripts.redaction.roster import load_roster
@@ -176,15 +185,28 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
         rubric=phil210 / "grading_rubric.md",
         profile=profile_path,
     )
-    verification = batch.verify(
-        VerificationInputs(
-            course="phil210",
-            rubric=phil210 / "grading_rubric.md",
-            profile=profile_path,
-            patterns=PATTERNS_PATH,
-            brief=brief,
-        )
+    inputs = VerificationInputs(
+        course="phil210",
+        rubric=phil210 / "grading_rubric.md",
+        profile=profile_path,
+        patterns=PATTERNS_PATH,
+        brief=brief,
     )
+    unreviewed = batch.verify(inputs, persist=False)
+    assert [f.code for f in unreviewed.blocking_findings] == ["draft-review-required"]
+    artifacts = batch.draft_artifacts()
+    pilot_tokens = sorted(artifacts)[:2]
+    approve_review(
+        review_path(drafts),
+        batch="essay-2",
+        course="phil210",
+        cadence="pilot",
+        pilot=2,
+        scope="pilot",
+        artifacts=[artifacts[token] for token in pilot_tokens],
+        approval=pilot_phrase("essay-2"),
+    )
+    verification = batch.verify(inputs)
     assert verification.blocking_findings == ()
     assert verification.receipt is not None
     assert all(
@@ -198,6 +220,31 @@ def test_the_chain_runs_from_redaction_to_final_feedback(
     )
 
     final = tmp_path / "final"
+    refused = subprocess.run(
+        [
+            sys.executable, "scripts/rehydrate.py", str(drafts),
+            "--batch", "essay-2",
+            "--course", "phil210",
+            "--rubric", str(phil210 / "grading_rubric.md"),
+            "--profile", str(profile_path),
+            "--redacted", str(redacted),
+            "--brief", str(brief),
+            "--map", str(tmp_path / "maps" / "essay-2.json"),
+            "--out", str(final),
+        ],
+        capture_output=True, text=True,
+    )
+    assert refused.returncode == 5
+    assert "consistency-acknowledgement-required" in refused.stderr
+    assert not final.exists()
+    write_acknowledgement(
+        ack_path(drafts),
+        batch="essay-2",
+        course="phil210",
+        receipt_sha256=hashlib.sha256(verification.receipt.read_bytes()).hexdigest(),
+        flags=[(flag.kind, flag.message) for flag in consistency.flags],
+        approval=ack_phrase("essay-2"),
+    )
     rehydrated = subprocess.run(
             [
                 sys.executable, "scripts/rehydrate.py", str(drafts),

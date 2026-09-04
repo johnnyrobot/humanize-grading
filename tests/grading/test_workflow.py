@@ -29,7 +29,7 @@ from tests.grading.test_verify import (
     TEST_REVIEW_SHA256,
     _write_batch,
 )
-from tests.grading.test_publication import FakeRenderer
+from tests.grading.test_publication import FakeRenderer, _acknowledge
 
 
 @dataclass
@@ -127,6 +127,7 @@ def _published_context(
         )
     )
     assert report.verified_batch is not None
+    _acknowledge(context.drafts)
     published = report.verified_batch.publish(context.publication, FakeRenderer())
     assert published.changed is True
     return context
