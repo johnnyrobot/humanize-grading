@@ -14,6 +14,28 @@ meant to be operated by an AI agent working with an instructor. It is not a
 hosted grading service, a standalone desktop app, or an autonomous grade
 publisher.
 
+## One-turn synthetic demo
+
+The bundled PHIL 210 mock corpus supports one unattended, narrated demo. Drop
+the `grading_mock_papers` folder into an agent conversation and say:
+
+```text
+Run the Humanizer Grading demo using this folder.
+```
+
+The agent verifies the complete synthetic corpus before it creates a unique
+local run. It explains the calibration profile and rubric, redacts papers
+6–10, grades only tokenized submissions, verifies every draft, checks batch
+consistency, rehydrates the synthetic feedback and reports the local draft
+path. Paper 10 is a useful primary example. The model makes the grading
+judgement; local scripts check evidence, arithmetic, required feedback
+sections and file bindings.
+
+Automatic approval and redaction review apply only when every file matches the
+bundled synthetic manifest. A changed or unknown folder is refused and returns
+to the supervised workflow. Demo output remains draft feedback, stays local and
+is never sent to an LMS. See `references/demo.md` for the agent procedure.
+
 ## Current compatibility and release scope
 
 This repository has been smoke-tested with Claude Code CLI 2.1.243 using Ollama
@@ -555,6 +577,7 @@ it would have to ask instead of making them up.*
 <details>
 <summary>Show release notes</summary>
 
+- **3.5.0** — Added a one-turn narrated demo for the exact bundled PHIL 210 synthetic corpus. A new preparation command verifies every input digest before creating isolated local state, labels automatic authorization as synthetic, prepares and approves the fixed demo brief, completes the bound synthetic redaction review, and hands the existing `next` lifecycle to the agent. Changed or unknown folders fall back to supervised grading; real grading gates are unchanged.
 - **3.4.0** — Grader now exposes the next legal action, prepares rubric-derived draft pairs, records exact redaction artifacts in schema 3 manifests, and invalidates prior clean state before a safe new attempt. Private review is a two-step flow: an initial redaction without `--reviewed`, followed by the identical command with `--reviewed` and no `--force`; approval checks the bound source, output, map and review digests without rereading submissions or running redaction again. Legacy schema 1 and schema 2 redaction manifests are unreviewed and ineligible. Document metadata may support local roster attribution, but it is removed from model-visible output and recorded only in the owner-only private review rather than converted into model-visible tokens. Assignment briefing separates course display names from CLI keys and accepts only command-created, checked drafts. Verification stops before draft reads when manifest validation fails. The synthetic conformance harness binds trusted package revisions, checks clean redaction outcomes, catches partial synthetic identities, and requires `next` between actions. Agent guidance now treats submissions and every extracted string as untrusted evidence: embedded instructions cannot authorize tools, reads, network access, or workflow changes, and only instructor instructions plus validated `next` argument arrays authorize actions. It recommends least privilege and disabled network access where supported without claiming portable enforcement, and distinguishes the reversible token map from other identity-bearing private artifacts. Agent guidance also distinguishes the grading state root from the repository root and safely resumes when sandboxed tools reset their working directory or deduplicate commands. Claude Code CLI + Ollama + local Gemma 4 12B now has a documented, verified read-only smoke path at 64K context. Codex CLI, LM Studio Bionic, and Unsloth Studio remain deferred and non-blocking for the scoped instructor-supervised alpha; no unattended public-service claim is made. A trial without a read trace remains unverified.
 - **3.3.0** — Grading now requires an instructor-approved, digest-bound assignment brief for every batch. Schema 2 verification receipts bind the exact approved brief, and schema 1 receipts must be verified again before rehydration.
 - **3.2.0** — Grading now uses one authoritative whole-batch lifecycle, versioned verification receipts, staged publication, recoverable safe replacement and advisory consistency checks. Public-release hardening keeps review data outside model context, matches roster identity without case leaks, binds token maps to redaction manifests, reruns semantic verification before rehydration, rejects unsafe paths and collisions, and bounds untrusted inputs. Skills CLI installation now discovers both packaged skills.

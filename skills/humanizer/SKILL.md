@@ -7,7 +7,7 @@ description: |
   voice, filler, or chatbot artifacts. Based on Wikipedia's "Signs of AI writing."
 license: MIT
 metadata:
-  version: "3.4.0"
+  version: "3.5.0"
 ---
 
 # Humanizer: remove AI writing patterns

@@ -1,6 +1,6 @@
 {
   "name": "humanizer",
-  "version": "3.4.0",
+  "version": "3.5.0",
   "description": "Rewrite AI-sounding text so it reads naturally without changing what it says.",
   "author": { "name": "Siqi Chen and contributors" },
   "license": "MIT",

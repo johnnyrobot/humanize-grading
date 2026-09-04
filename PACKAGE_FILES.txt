@@ -38,12 +38,15 @@ references/agent-conformance.md
 references/ai-patterns.md
 references/assignment-brief.md
 references/calibration.md
+references/demo-corpus.json
+references/demo.md
 references/redaction.md
 references/rubric-format.md
 requirements-dev.txt
 scripts/__init__.py
 scripts/agent_conformance.py
 scripts/calibrate.py
+scripts/demo.py
 scripts/grade.py
 scripts/grading/__init__.py
 scripts/grading/_conformance_audit.py
@@ -55,6 +58,7 @@ scripts/grading/batch.py
 scripts/grading/brief.py
 scripts/grading/conformance.py
 scripts/grading/consistency.py
+scripts/grading/demo.py
 scripts/grading/density.py
 scripts/grading/drafts.py
 scripts/grading/holdout.py
@@ -98,6 +102,7 @@ tests/grading/test_batch.py
 tests/grading/test_brief.py
 tests/grading/test_conformance.py
 tests/grading/test_consistency.py
+tests/grading/test_demo.py
 tests/grading/test_density.py
 tests/grading/test_drafts.py
 tests/grading/test_end_to_end.py

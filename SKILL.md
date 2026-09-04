@@ -2,11 +2,12 @@
 name: grader
 description: |
   Score student work against the instructor's rubric and draft feedback in the
-  instructor's voice, calibrated from their rubric and past graded work.
-  Redacts student identity before any work reaches a cloud model.
+  instructor's voice, calibrated from their rubric and past graded work, or run
+  the narrated synthetic demo when the user says "run the demo." Redacts
+  student identity before any work reaches a cloud model.
 license: MIT
 metadata:
-  version: "3.4.0"
+  version: "3.5.0"
 ---
 
 # Grader
@@ -25,6 +26,17 @@ the privacy behavior of any third-party runtime separately.
 Run the agent with only the file and tool access this workflow needs. Disable
 network access when the runtime supports it. These settings reduce exposure;
 they are not portable enforcement and do not replace redaction or verification.
+
+## Synthetic narrated demo
+
+When the user asks to run the demo and supplies the `grading_mock_papers`
+folder, read `references/demo.md` and follow it. This branch comes before the
+ordinary local-or-cloud gate because `scripts/demo.py prepare` must verify the
+exact bundled synthetic corpus before any unattended action. The user's demo
+request authorizes only that synthetic run.
+
+If the command refuses the folder, return to the ordinary gate below. Never use
+demo authorization for changed files, unknown files, or real student work.
 
 ## The gate, before anything else
 

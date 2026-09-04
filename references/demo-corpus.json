@@ -1,0 +1,28 @@
+{
+  "schema": "humanizer-grading-demo-corpus/1",
+  "name": "PHIL/POLISCI 210 synthetic grading demo",
+  "course": "phil210",
+  "batch": "synthetic-demo",
+  "profile": "tests/fixtures/phil210/profile_phil210.md",
+  "roster": "tests/fixtures/phil210/roster.csv",
+  "batch_student_ids": [
+    "S1000433",
+    "S1000435",
+    "S1000438",
+    "S1000439",
+    "S1000440"
+  ],
+  "files": {
+    "graded/paper_1_graded_algorithmic_gatekeeping.md": "b8b7a7bc0748e158ea1ba98c071111b589b5e63f9a7c148df12616b839d3d27e",
+    "graded/paper_2_graded_carbon_pricing_developing_nations.md": "09acc8907608aec72adf889dffb9e23bddf5afd0f54757e4110aaf3b3d88a4f4",
+    "graded/paper_3_graded_gig_economy_ai_slop.md": "c26abddb29f9ac65c4b16e9fc5403d7681258fa2aa957d6c3d4378371fadf7d4",
+    "graded/paper_4_graded_predictive_policing.md": "b07b1dc608b1694486179f53b3758782cfd899e10b0a731952529c495a23efe8",
+    "graded/paper_5_graded_subscription_software_paradox.md": "20712c772d39d7a7001e1cb694c5e76fa547546b7a91ef63462aab1371f2113c",
+    "grading_rubric.md": "9dac71a12f457a8a38378b93ce49be80f0fd5ddec1c56fae279a60561034f7e5",
+    "ungraded/paper_10_ungraded_smart_cities_hybrid_slop.md": "31f1297c88e9e108102122f55b8e5da156a190804c7cdf3835325e345776bfa0",
+    "ungraded/paper_6_ungraded_community_solar_interconnection.md": "fa0c4409cd866a02f434dc6e4ed21d24b20ee5c44dc94ff223cf231b84911b94",
+    "ungraded/paper_7_ungraded_ai_healthcare_slop.md": "751caf10718516912c6899bbb6202a9014d1ab0150ab3a7ee454b5aeb39bd475",
+    "ungraded/paper_8_ungraded_agricultural_right_to_repair.md": "4886481114f797e3397c15e90da2628c22d06aa356a9dd92b61492c958cfefd9",
+    "ungraded/paper_9_ungraded_algorithmic_rent_fixing.md": "fc1e5f42c05829682938c9bc6d9ea8822db343dbdce7644235064ff7fa340bbc"
+  }
+}
