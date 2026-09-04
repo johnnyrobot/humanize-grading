@@ -12,6 +12,7 @@ up the instructor's judgement.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from scripts.grading.records import GradeRecord
@@ -157,6 +158,109 @@ def render(delta: Delta) -> str:
         "This report judges the profile, not the student. A close match means "
         "the profile is worth grading with. A wide one means edit the profile "
         "and run calibration again.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+@dataclass(frozen=True)
+class Aggregate:
+    """How the profile did across every holdout together."""
+
+    holdouts: int
+    required: int
+    mean_abs_points: float
+    max_abs_points: int
+    letter_match_rate: float
+    phrase_carry_rate: float
+    length_ratio_low: float
+    length_ratio_high: float
+    passed: bool
+
+
+def aggregate(deltas: Sequence[Delta], *, required: int) -> Aggregate:
+    """Summarize holdout deltas. Passing means no holdout had a finding."""
+    count = len(deltas)
+    if count == 0:
+        return Aggregate(0, required, 0.0, 0, 0.0, 0.0, 0.0, 0.0, False)
+    abs_points = [abs(delta.points) for delta in deltas]
+    ratios = [delta.length_ratio for delta in deltas]
+    return Aggregate(
+        holdouts=count,
+        required=required,
+        mean_abs_points=round(sum(abs_points) / count, 2),
+        max_abs_points=max(abs_points),
+        letter_match_rate=round(
+            sum(delta.letter_match for delta in deltas) / count, 2
+        ),
+        phrase_carry_rate=round(
+            sum(bool(delta.shared_phrases) for delta in deltas) / count, 2
+        ),
+        length_ratio_low=min(ratios),
+        length_ratio_high=max(ratios),
+        passed=count >= required and all(not delta.findings for delta in deltas),
+    )
+
+
+def _render_one(delta: Delta) -> list[str]:
+    lines = [
+        f"## Holdout `{delta.token}`",
+        "",
+        "| Measure | Instructor | Generated |",
+        "| --- | --- | --- |",
+        f"| Total | {delta.instructor_total} | {delta.generated_total} |",
+        f"| Letter | {delta.instructor_letter} | {delta.generated_letter} |",
+        f"| Feedback words | {delta.instructor_words} | {delta.generated_words} |",
+        "",
+        f"Score gap: {delta.points:+d} points. "
+        f"Letter: {'match' if delta.letter_match else 'differs'}.",
+        "",
+        "Phrasing carried over:",
+        "",
+    ]
+    if delta.shared_phrases:
+        lines += [f"- {phrase}" for phrase in delta.shared_phrases[:10]]
+        if len(delta.shared_phrases) > 10:
+            lines.append(f"- ... and {len(delta.shared_phrases) - 10} more")
+    else:
+        lines.append("- None. The voice did not carry.")
+    lines += ["", "What to look at:", ""]
+    if delta.findings:
+        lines += [f"- {finding}" for finding in delta.findings]
+    else:
+        lines.append("- Nothing. The profile reproduced this sample closely.")
+    lines.append("")
+    return lines
+
+
+def render_report(deltas: Sequence[Delta], summary: Aggregate) -> str:
+    """Render every holdout and the aggregate as the report the instructor reads."""
+    lines = ["# Holdout report", ""]
+    for delta in deltas:
+        lines += _render_one(delta)
+    if summary.passed:
+        result = "passed. The profile is worth grading with."
+    else:
+        result = (
+            "gap. Edit the profile and run the holdouts again, or accept the "
+            "gap with a reason."
+        )
+    lines += [
+        "## Agreement across holdouts",
+        "",
+        "| Measure | Value |",
+        "| --- | --- |",
+        f"| Holdouts | {summary.holdouts} of {summary.required} required |",
+        f"| Mean score gap | {summary.mean_abs_points} points |",
+        f"| Largest score gap | {summary.max_abs_points} points |",
+        f"| Letter matches | {int(round(summary.letter_match_rate * 100))}% |",
+        "| Holdouts with the instructor's phrasing | "
+        f"{int(round(summary.phrase_carry_rate * 100))}% |",
+        f"| Length ratio range | {summary.length_ratio_low} to {summary.length_ratio_high} |",
+        "",
+        f"Result: {result}",
+        "",
+        "This report judges the profile, not the students.",
         "",
     ]
     return "\n".join(lines)

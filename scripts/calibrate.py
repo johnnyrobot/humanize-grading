@@ -1,27 +1,41 @@
 #!/usr/bin/env python3
-"""Build calibration inputs and check a profile against a held-back sample.
+"""Build calibration inputs, measure a profile against its holdouts, approve it.
 
 Runs locally only. Calibration reads graded work that still carries names, so
 it must not run when the instructor answers "cloud" at the gate.
 
 Usage:
     python3 scripts/calibrate.py inputs --rubric RUBRIC --samples DIR \\
-        --roster ROSTER --holdout NAME --out inputs.json
+        --roster ROSTER --holdout NAME [--holdout NAME] \\
+        [--holdout-out DIR] --out inputs.json
 
-    python3 scripts/calibrate.py holdout --record R.json --draft R.md \\
-        --sample SAMPLE.md
+    python3 scripts/calibrate.py holdout --course COURSE --rubric RUBRIC \\
+        --packet inputs.json --record R.json --draft R.md --sample SAMPLE.md \\
+        [--record ... --draft ... --sample ...]
+
+    python3 scripts/calibrate.py approve --course COURSE --rubric RUBRIC \\
+        --approval "Approve calibration profile for COURSE" \\
+        [--accept-gap --reason TEXT]
+
+    python3 scripts/calibrate.py check --course COURSE --rubric RUBRIC
 
 `inputs` is the safety step. It parses the rubric and every graded sample,
 throws away the student essay text, scrubs roster names out of the
 instructor's comments, and writes one JSON packet. Building a profile from
 that packet is what keeps student prose and student names out of it.
 
-Exit codes: 0 clean, 13 malformed input.
+`holdout` writes an identity-free receipt. `approve` binds the instructor's
+exact phrase to the profile, rubric, and receipt. `check` says whether that
+approval is still current.
+
+Exit codes: 0 clean, 13 malformed input, 14 calibration not approved or
+stale, 15 the holdouts showed a gap.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from dataclasses import asdict
@@ -29,7 +43,20 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts.grading.holdout import compare, render, required_holdouts  # noqa: E402
+from scripts.grading.calibration import (  # noqa: E402
+    CalibrationError,
+    approve_calibration,
+    check_calibration,
+    receipt_path,
+    write_receipt,
+)
+from scripts.grading.holdout import (  # noqa: E402
+    aggregate,
+    compare,
+    render_report,
+    required_holdouts,
+)
+from scripts.grading.profile import ProfileError, load_profile, profile_path  # noqa: E402
 from scripts.grading.records import GradeRecord, RecordError  # noqa: E402
 from scripts.grading.rubric import RubricError, load_rubric  # noqa: E402
 from scripts.grading.samples import (  # noqa: E402
@@ -40,13 +67,31 @@ from scripts.grading.samples import (  # noqa: E402
 )
 from scripts.redaction.roster import load_roster  # noqa: E402
 from scripts.redaction.private_files import write_private_text  # noqa: E402
-from scripts.path_safety import paths_overlap, read_text_limited  # noqa: E402
+from scripts.path_safety import (  # noqa: E402
+    paths_overlap,
+    read_bytes_limited,
+    read_text_limited,
+)
 
 EXIT_OK = 0
 EXIT_MALFORMED = 13
+EXIT_UNAPPROVED = 14
+EXIT_GAP = 15
 
 MIN_SAMPLES = 3
 MAX_SAMPLES = 8
+
+
+def _component(label: str):
+    def parse(value: str) -> str:
+        from scripts.path_safety import require_component
+
+        try:
+            return require_component(value, label)
+        except ValueError as error:
+            raise argparse.ArgumentTypeError(str(error)) from error
+
+    return parse
 
 
 def _identity_key(value: str) -> str:
@@ -230,14 +275,149 @@ def _inputs(args: argparse.Namespace) -> int:
 
 
 def _holdout(args: argparse.Namespace) -> int:
-    record = GradeRecord.load(args.record)
-    feedback = read_text_limited(args.draft, "The holdout draft", 1_048_576)
-    sample = load_sample(args.sample)
-    delta = compare(record, feedback, sample)
+    if not (len(args.record) == len(args.draft) == len(args.sample)):
+        print(
+            "Pass one --record, one --draft, and one --sample per holdout.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    profile = load_profile(profile_path(args.course, args.root))
+    if profile.course != args.course:
+        print(
+            f"The profile belongs to {profile.course!r}, not {args.course!r}.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    rubric = load_rubric(args.rubric)
+    drifted = profile.drift(rubric)
+    if drifted:
+        print(
+            "The rubric changed since calibration: " + "; ".join(drifted),
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    packet_bytes = read_bytes_limited(
+        args.packet, "The calibration packet", 10 * 1024 * 1024
+    )
+    packet = json.loads(packet_bytes.decode("utf-8"))
+    if not isinstance(packet, dict):
+        print("The calibration packet must be a JSON object.", file=sys.stderr)
+        return EXIT_MALFORMED
+    packet_rubric = packet.get("rubric")
+    packet_digest = packet_rubric.get("digest") if isinstance(packet_rubric, dict) else None
+    if packet_digest != rubric.digest or profile.rubric_digest != rubric.digest:
+        print(
+            "The packet, profile, and rubric digests must all match. Build the "
+            "packet and profile from the current rubric.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    samples = packet.get("samples")
+    holdout = packet.get("holdout")
+    count = holdout.get("count") if isinstance(holdout, dict) else None
+    if not isinstance(samples, list) or not isinstance(count, int):
+        print(
+            "The calibration packet is malformed. Build it again with "
+            "calibrate.py inputs.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    if profile.samples != len(samples):
+        print(
+            f"The profile says **Samples**: {profile.samples} but the packet "
+            f"holds {len(samples)}. Fix the profile header.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    if len(args.record) != count:
+        print(
+            f"The packet held back {count} holdouts; pass exactly {count} holdouts.",
+            file=sys.stderr,
+        )
+        return EXIT_MALFORMED
+    deltas = []
+    for record_path, draft_path, sample_path in zip(args.record, args.draft, args.sample):
+        record = GradeRecord.load(record_path)
+        if record.course != args.course:
+            print(f"{record_path} belongs to course {record.course!r}.", file=sys.stderr)
+            return EXIT_MALFORMED
+        feedback = read_text_limited(draft_path, "The holdout draft", 1_048_576)
+        sample = load_sample(sample_path)
+        deltas.append(
+            compare(
+                record,
+                feedback,
+                sample,
+                point_tolerance=profile.point_tolerance,
+                length_tolerance=profile.length_tolerance,
+            )
+        )
+    summary = aggregate(deltas, required=required_holdouts(len(samples) + count))
+    receipt = write_receipt(
+        receipt_path(args.root, args.course),
+        course=args.course,
+        profile_sha256=hashlib.sha256(
+            read_bytes_limited(profile.path, "The calibration profile", 5 * 1024 * 1024)
+        ).hexdigest(),
+        rubric_sha256=hashlib.sha256(
+            read_bytes_limited(rubric.path, "The rubric", 5 * 1024 * 1024)
+        ).hexdigest(),
+        packet_sha256=hashlib.sha256(packet_bytes).hexdigest(),
+        samples=len(samples),
+        deltas=deltas,
+        summary=summary,
+        tolerances={
+            "points": profile.point_tolerance,
+            "length_ratio": profile.length_tolerance,
+        },
+    )
     if args.json:
-        print(json.dumps(asdict(delta), indent=2, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "receipt": str(receipt.path),
+                    "passed": receipt.passed,
+                    "aggregate": receipt.aggregate,
+                    "holdouts": [asdict(delta) for delta in deltas],
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
     else:
-        print(render(delta))
+        print(render_report(deltas, summary))
+        print(f"{summary.holdouts} holdouts measured. Wrote {receipt.path}.")
+    return EXIT_OK if receipt.passed else EXIT_GAP
+
+
+def _approve(args: argparse.Namespace) -> int:
+    profile = load_profile(profile_path(args.course, args.root))
+    try:
+        approval = approve_calibration(
+            args.root,
+            course=args.course,
+            profile=profile.path,
+            rubric=args.rubric,
+            approval=args.approval,
+            accept_gap=args.accept_gap,
+            reason=args.reason or "",
+        )
+    except CalibrationError as error:
+        print(f"ERROR calibration: {error}", file=sys.stderr)
+        return EXIT_UNAPPROVED
+    print(f"Approved calibration profile: {approval.path}")
+    return EXIT_OK
+
+
+def _check(args: argparse.Namespace) -> int:
+    profile = load_profile(profile_path(args.course, args.root))
+    status = check_calibration(
+        args.root, course=args.course, profile=profile.path, rubric=args.rubric
+    )
+    if status.state != "current":
+        print(f"ERROR calibration {status.state}: {status.message}", file=sys.stderr)
+        return EXIT_UNAPPROVED
+    print(f"Calibration for {args.course} is approved and current.")
     return EXIT_OK
 
 
@@ -266,17 +446,48 @@ def main(argv: list[str] | None = None) -> int:
     )
     inputs.set_defaults(handler=_inputs)
 
-    holdout = subparsers.add_parser("holdout", help="Report the holdout delta")
-    holdout.add_argument("--record", type=Path, required=True)
-    holdout.add_argument("--draft", type=Path, required=True)
-    holdout.add_argument("--sample", type=Path, required=True)
+    holdout = subparsers.add_parser(
+        "holdout", help="Measure the profile against its holdouts and write a receipt"
+    )
+    holdout.add_argument("--course", required=True, type=_component("The course"))
+    holdout.add_argument("--rubric", type=Path, required=True)
+    holdout.add_argument("--packet", type=Path, required=True)
+    holdout.add_argument("--record", type=Path, action="append", required=True)
+    holdout.add_argument("--draft", type=Path, action="append", required=True)
+    holdout.add_argument("--sample", type=Path, action="append", required=True)
+    holdout.add_argument("--root", type=Path, default=Path(".grading"))
     holdout.add_argument("--json", action="store_true")
     holdout.set_defaults(handler=_holdout)
+
+    approve = subparsers.add_parser(
+        "approve", help="Record the instructor's exact profile approval"
+    )
+    approve.add_argument("--course", required=True, type=_component("The course"))
+    approve.add_argument("--rubric", type=Path, required=True)
+    approve.add_argument("--approval", required=True)
+    approve.add_argument(
+        "--accept-gap",
+        action="store_true",
+        help="Approve even though the holdouts showed a gap; needs --reason",
+    )
+    approve.add_argument("--reason", default="")
+    approve.add_argument("--root", type=Path, default=Path(".grading"))
+    approve.set_defaults(handler=_approve)
+
+    check = subparsers.add_parser(
+        "check", help="Say whether the profile approval is still current"
+    )
+    check.add_argument("--course", required=True, type=_component("The course"))
+    check.add_argument("--rubric", type=Path, required=True)
+    check.add_argument("--root", type=Path, default=Path(".grading"))
+    check.set_defaults(handler=_check)
 
     args = parser.parse_args(argv)
     try:
         return args.handler(args)
     except (
+        CalibrationError,
+        ProfileError,
         RubricError,
         SampleError,
         RecordError,
