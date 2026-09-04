@@ -42,6 +42,21 @@ def _copy_profile(root: Path, profile: Path) -> None:
     (root / "profiles" / "phil210.md").write_bytes(profile.read_bytes())
 
 
+def _approve_calibration(root: Path, phil210: Path) -> None:
+    from scripts.grading.calibration import approval_phrase, approve_calibration
+    from tests.grading.test_calibration import _write
+
+    installed = root / "profiles" / "phil210.md"
+    _write(root, phil210, installed)
+    approve_calibration(
+        root,
+        course="phil210",
+        profile=installed,
+        rubric=phil210 / "grading_rubric.md",
+        approval=approval_phrase("phil210"),
+    )
+
+
 def _assignment_brief_errors(stderr: str) -> list[str]:
     return [line for line in stderr.splitlines() if line.strip()]
 
@@ -342,7 +357,7 @@ def test_check_refuses_malformed_or_mismatched_briefs(
     _approved(path, phil210, profile)
     text = path.read_text(encoding="utf-8")
     if change == "unknown":
-        text = text.replace("schema: grading-assignment-brief/1", "extra: no\nschema: grading-assignment-brief/1")
+        text = text.replace("schema: grading-assignment-brief/2", "extra: no\nschema: grading-assignment-brief/2")
     elif change == "duplicate":
         text = text.replace("course: phil210", "course: phil210\ncourse: phil210")
     elif change == "missing_heading":
@@ -446,6 +461,7 @@ def test_reapproval_after_a_deliberate_edit_updates_the_bound_body(
 def test_brief_cli_prepares_approves_and_checks(tmp_path, phil210, profile):
     root = tmp_path / ".grading"
     _copy_profile(root, profile)
+    _approve_calibration(root, phil210)
     common = _brief_args(root)
 
     prepared = _grade("brief", "prepare", *common, "--mode", "local")
@@ -529,6 +545,7 @@ def test_brief_cli_preserves_rubric_drift_exit_11(tmp_path, phil210, profile):
 def test_brief_cli_refuses_a_stale_brief_with_exit_13(tmp_path, phil210, profile):
     root = tmp_path / ".grading"
     _copy_profile(root, profile)
+    _approve_calibration(root, phil210)
     common = _brief_args(root)
     assert _grade("brief", "prepare", *common, "--mode", "local").returncode == 0
     path = root / "assignments" / "essay-3.md"
@@ -586,3 +603,175 @@ def test_grade_cli_help_describes_navigation_and_repair_exit():
         "12 a grading action is blocked or requested findings are present, including failed "
         "verification"
     ) in " ".join(result.stdout.split())
+
+
+def test_prepare_records_purpose_cadence_and_pilot_size(tmp_path):
+    path = brief_path(tmp_path, "essay-3")
+    brief = prepare_brief(
+        path, batch="essay-3", course="phil210", mode="local", review="every", pilot=3
+    )
+    assert brief.purpose == "grading"
+    assert brief.review == "every"
+    assert brief.pilot == 3
+    text = path.read_text(encoding="utf-8")
+    assert "schema: grading-assignment-brief/2" in text
+    assert "Purpose: grading" in text
+    assert "Review cadence: every" in text
+    assert "Pilot size: 3" in text
+
+
+def test_prepare_defaults_to_a_two_draft_pilot(tmp_path):
+    brief = prepare_brief(
+        brief_path(tmp_path, "essay-3"), batch="essay-3", course="phil210", mode="cloud"
+    )
+    assert (brief.review, brief.pilot) == ("pilot", 2)
+
+
+def test_a_holdout_brief_must_be_local_with_no_cadence(tmp_path):
+    with pytest.raises(BriefError, match="local"):
+        prepare_brief(
+            brief_path(tmp_path, "h1"), batch="h1", course="phil210", mode="cloud",
+            purpose="holdout", review="none",
+        )
+    with pytest.raises(BriefError, match="none"):
+        prepare_brief(
+            brief_path(tmp_path, "h1"), batch="h1", course="phil210", mode="local",
+            purpose="holdout", review="pilot",
+        )
+    brief = prepare_brief(
+        brief_path(tmp_path, "h2"), batch="h2", course="phil210", mode="local",
+        purpose="holdout", review="none",
+    )
+    assert brief.review == "none"
+    assert brief.purpose == "holdout"
+
+
+def test_review_none_is_reserved_for_the_demo_batch(tmp_path):
+    with pytest.raises(BriefError, match="synthetic"):
+        prepare_brief(
+            brief_path(tmp_path, "essay-3"), batch="essay-3", course="phil210",
+            mode="local", review="none",
+        )
+    brief = prepare_brief(
+        brief_path(tmp_path, "synthetic-demo"), batch="synthetic-demo",
+        course="phil210", mode="local", review="none",
+    )
+    assert brief.review == "none"
+
+
+def test_pilot_size_is_bounded(tmp_path):
+    with pytest.raises(BriefError, match="pilot size"):
+        prepare_brief(
+            brief_path(tmp_path, "essay-3"), batch="essay-3", course="phil210",
+            mode="local", pilot=0,
+        )
+    with pytest.raises(BriefError, match="pilot size"):
+        prepare_brief(
+            brief_path(tmp_path, "essay-4"), batch="essay-4", course="phil210",
+            mode="local", pilot=51,
+        )
+
+
+def test_schema_one_briefs_are_refused_with_guidance(tmp_path):
+    path = brief_path(tmp_path, "essay-3")
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    text = path.read_text(encoding="utf-8").replace(
+        "grading-assignment-brief/2", "grading-assignment-brief/1"
+    )
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(BriefError, match="schema 1"):
+        load_brief(path)
+
+
+@pytest.mark.parametrize(
+    "line, replacement, field",
+    [
+        ("Pilot size: 2", "Pilot size: 4", "Pilot size"),
+        ("Review cadence: pilot", "Review cadence: every", "Review cadence"),
+        ("Purpose: grading", "Purpose: holdout", "Purpose"),
+    ],
+)
+def test_cadence_lines_must_match_metadata(tmp_path, line, replacement, field):
+    path = brief_path(tmp_path, "essay-3")
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local")
+    text = path.read_text(encoding="utf-8").replace(line, replacement)
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(BriefError, match=field):
+        load_brief(path)
+
+
+def test_approval_carries_purpose_cadence_and_pilot(tmp_path, phil210, profile):
+    path = brief_path(tmp_path, "essay-3")
+    prepare_brief(path, batch="essay-3", course="phil210", mode="local", review="every", pilot=1)
+    _answer(path)
+    approved = approve_brief(
+        path, batch="essay-3", course="phil210", rubric=phil210 / "grading_rubric.md",
+        profile=profile, approval="Approve assignment brief for essay-3",
+    )
+    assert (approved.purpose, approved.review, approved.pilot) == ("grading", "every", 1)
+    checked = check_brief(
+        path, batch="essay-3", course="phil210", rubric=phil210 / "grading_rubric.md",
+        profile=profile,
+    )
+    assert (checked.review, checked.pilot) == ("every", 1)
+
+
+def test_brief_cli_accepts_review_flags_and_holdout_purpose(tmp_path, phil210, profile):
+    root = tmp_path / ".grading"
+    _copy_profile(root, profile)
+    result = _grade(
+        "brief", "prepare", *_brief_args(root), "--mode", "local",
+        "--review", "every", "--pilot-size", "1",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "Review cadence: every" in (root / "assignments" / "essay-3.md").read_text(
+        encoding="utf-8"
+    )
+    result = _grade(
+        "brief", "prepare", "--batch", "holdout-1", "--course", "phil210",
+        "--root", str(root), "--mode", "local", "--purpose", "holdout",
+    )
+    assert result.returncode == 0, result.stderr
+    text = (root / "assignments" / "holdout-1.md").read_text(encoding="utf-8")
+    assert "Purpose: holdout" in text
+    assert "Review cadence: none" in text
+    result = _grade(
+        "brief", "prepare", "--batch", "holdout-2", "--course", "phil210",
+        "--root", str(root), "--mode", "cloud", "--purpose", "holdout",
+    )
+    assert result.returncode == 13
+    assert "local" in result.stderr
+
+
+def test_brief_cli_approve_requires_approved_calibration_for_grading(
+    tmp_path, phil210, profile
+):
+    root = tmp_path / ".grading"
+    _copy_profile(root, profile)
+    _grade("brief", "prepare", *_brief_args(root), "--mode", "local")
+    _answer(root / "assignments" / "essay-3.md")
+    result = _grade(
+        "brief", "approve", *_brief_args(root),
+        "--rubric", str(phil210 / "grading_rubric.md"),
+        "--approval", "Approve assignment brief for essay-3",
+    )
+    assert result.returncode == 14
+    assert "calibration" in result.stderr
+
+
+def test_brief_cli_approve_allows_a_holdout_brief_without_calibration(
+    tmp_path, phil210, profile
+):
+    root = tmp_path / ".grading"
+    _copy_profile(root, profile)
+    _grade(
+        "brief", "prepare", "--batch", "holdout-1", "--course", "phil210",
+        "--root", str(root), "--mode", "local", "--purpose", "holdout",
+    )
+    _answer(root / "assignments" / "holdout-1.md")
+    result = _grade(
+        "brief", "approve", "--batch", "holdout-1", "--course", "phil210",
+        "--root", str(root), "--rubric", str(phil210 / "grading_rubric.md"),
+        "--approval", "Approve assignment brief for holdout-1",
+    )
+    assert result.returncode == 0, result.stderr

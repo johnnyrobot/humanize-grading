@@ -28,9 +28,11 @@ docs/superpowers/plans/2026-08-23-redaction-foundation.md
 docs/superpowers/plans/2026-08-24-voice-calibrated-grading.md
 docs/superpowers/plans/2026-08-26-assignment-briefing.md
 docs/superpowers/plans/2026-08-26-local-agent-compatibility.md
+docs/superpowers/plans/2026-09-03-supervised-calibration-and-review.md
 docs/superpowers/specs/2026-08-23-voice-calibrated-grading-design.md
 docs/superpowers/specs/2026-08-26-assignment-briefing-design.md
 docs/superpowers/specs/2026-08-26-local-agent-compatibility-design.md
+docs/superpowers/specs/2026-09-03-supervised-calibration-and-review-design.md
 docs/using-the-grader.md
 hooks/block-raw-reads.json
 hooks/block_raw_reads.py
@@ -56,6 +58,7 @@ scripts/grading/_conformance_run.py
 scripts/grading/_conformance_trial.py
 scripts/grading/batch.py
 scripts/grading/brief.py
+scripts/grading/calibration.py
 scripts/grading/conformance.py
 scripts/grading/consistency.py
 scripts/grading/demo.py
@@ -100,6 +103,7 @@ tests/fixtures/phil210/ungraded/paper_8_ungraded_agricultural_right_to_repair.md
 tests/fixtures/phil210/ungraded/paper_9_ungraded_algorithmic_rent_fixing.md
 tests/grading/test_batch.py
 tests/grading/test_brief.py
+tests/grading/test_calibration.py
 tests/grading/test_conformance.py
 tests/grading/test_consistency.py
 tests/grading/test_demo.py
@@ -110,6 +114,7 @@ tests/grading/test_holdout.py
 tests/grading/test_hook.py
 tests/grading/test_package_validation.py
 tests/grading/test_profile.py
+tests/grading/test_profile_command.py
 tests/grading/test_publication.py
 tests/grading/test_records.py
 tests/grading/test_rubric.py

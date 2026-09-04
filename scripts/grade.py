@@ -419,6 +419,9 @@ def _cmd_brief_prepare(args: argparse.Namespace) -> int:
             batch=args.batch,
             course=args.course,
             mode=args.mode,
+            purpose=args.purpose,
+            review="none" if args.purpose == "holdout" else args.review,
+            pilot=args.pilot_size,
         )
     except (BriefError, OSError, UnicodeError, ValueError) as error:
         return _brief_error(error)
@@ -430,6 +433,18 @@ def _cmd_brief_approve(args: argparse.Namespace) -> int:
     try:
         profile, rubric = _brief_profile_and_rubric(args)
         path = _brief_file(args)
+        pending = load_brief(path)
+        if pending.purpose == "grading":
+            status = check_calibration(
+                args.root, course=args.course, profile=profile.path, rubric=rubric.path
+            )
+            if status.state != "current":
+                print(
+                    f"ERROR assignment-brief: calibration {status.state}: "
+                    f"{status.message}",
+                    file=sys.stderr,
+                )
+                return EXIT_UNAPPROVED
         brief = approve_brief(
             path,
             batch=args.batch,
@@ -717,6 +732,24 @@ def build_parser() -> argparse.ArgumentParser:
     prepare.add_argument("--batch", required=True, type=_component("The grading batch"))
     prepare.add_argument("--course", required=True, type=_component("The course"))
     prepare.add_argument("--mode", required=True, choices=("local", "cloud"))
+    prepare.add_argument(
+        "--purpose",
+        choices=("grading", "holdout"),
+        default="grading",
+        help="A holdout brief grades held-back samples blind and never publishes",
+    )
+    prepare.add_argument(
+        "--review",
+        choices=("pilot", "every"),
+        default="pilot",
+        help="Stop after the first drafts (pilot) or after every draft",
+    )
+    prepare.add_argument(
+        "--pilot-size",
+        type=int,
+        default=2,
+        help="How many drafts the instructor reviews before the batch continues",
+    )
     prepare.add_argument("--brief", type=Path, default=None)
     _add_common(prepare)
     prepare.set_defaults(handler=_cmd_brief_prepare)

@@ -17,11 +17,16 @@ from scripts.path_safety import (
 )
 from scripts.redaction.private_files import write_private_text
 
-BRIEF_SCHEMA = "grading-assignment-brief/1"
+BRIEF_SCHEMA = "grading-assignment-brief/2"
+LEGACY_BRIEF_SCHEMA = "grading-assignment-brief/1"
 BRIEF_LIMIT = 1_048_576
 EVIDENCE_LIMIT = 5 * 1024 * 1024
 ANSWER_REQUIRED = "<!-- answer-required -->"
 MODES = {"local", "cloud"}
+PURPOSES = {"grading", "holdout"}
+REVIEW_CADENCES = {"pilot", "every", "none"}
+DEMO_BATCH = "synthetic-demo"
+MAX_PILOT = 50
 REQUIRED_HEADINGS = (
     "Assignment",
     "Grading priorities",
@@ -37,6 +42,9 @@ _METADATA = (
     "course",
     "status",
     "mode",
+    "purpose",
+    "review",
+    "pilot",
     "rubric_sha256",
     "profile_sha256",
     "body_sha256",
@@ -60,6 +68,9 @@ class AssignmentBrief:
     course: str
     status: str
     mode: str
+    purpose: str
+    review: str
+    pilot: int
     rubric_sha256: str
     profile_sha256: str
     body_sha256: str
@@ -76,24 +87,35 @@ def brief_path(root: Path, batch: str) -> Path:
 
 
 def prepare_brief(
-    path: Path, *, batch: str, course: str, mode: str
+    path: Path,
+    *,
+    batch: str,
+    course: str,
+    mode: str,
+    purpose: str = "grading",
+    review: str = "pilot",
+    pilot: int = 2,
 ) -> AssignmentBrief:
     """Create one owner-only draft without replacing an existing brief."""
     _safe_component(batch, "The grading batch")
     _safe_component(course, "The course")
     _validate_mode(mode)
+    _validate_review(purpose=purpose, review=review, pilot=pilot, mode=mode, batch=batch)
     _reject_symlink_path(path)
     text = _render(
         batch=batch,
         course=course,
         status="draft",
         mode=mode,
+        purpose=purpose,
+        review=review,
+        pilot=pilot,
         rubric_sha256="",
         profile_sha256="",
         body_sha256="",
         approved_at="",
         approval="",
-        body=_draft_body(batch, mode),
+        body=_draft_body(batch, mode, purpose, review, pilot),
     )
     _create_private_text(path, text)
     return _parse_text(path, text)
@@ -123,6 +145,9 @@ def approve_brief(
         course=brief.course,
         status="approved",
         mode=brief.mode,
+        purpose=brief.purpose,
+        review=brief.review,
+        pilot=brief.pilot,
         rubric_sha256=_digest_bytes(_read_bound_file(rubric, "The rubric")),
         profile_sha256=_digest_bytes(
             _read_bound_file(profile, "The calibration profile")
@@ -187,14 +212,23 @@ def _parse_text(
     path: Path, text: str, *, source_sha256: str = ""
 ) -> AssignmentBrief:
     metadata, body = _split_front_matter(_normalize_line_endings(text))
-    _validate_metadata(metadata)
-    _validate_body(body, metadata["mode"])
+    pilot = _validate_metadata(metadata)
+    _validate_body(
+        body,
+        mode=metadata["mode"],
+        purpose=metadata["purpose"],
+        review=metadata["review"],
+        pilot=pilot,
+    )
     return AssignmentBrief(
         path=path,
         batch=metadata["batch"],
         course=metadata["course"],
         status=metadata["status"],
         mode=metadata["mode"],
+        purpose=metadata["purpose"],
+        review=metadata["review"],
+        pilot=pilot,
         rubric_sha256=metadata["rubric_sha256"],
         profile_sha256=metadata["profile_sha256"],
         body_sha256=metadata["body_sha256"],
@@ -241,7 +275,13 @@ def _split_front_matter(text: str) -> tuple[dict[str, str], str]:
     return metadata, "".join(lines[closing + 1 :])
 
 
-def _validate_metadata(metadata: dict[str, str]) -> None:
+def _validate_metadata(metadata: dict[str, str]) -> int:
+    """Validate the front matter and return the parsed pilot size."""
+    if metadata["schema"] == LEGACY_BRIEF_SCHEMA:
+        raise BriefError(
+            "The assignment brief uses schema 1. Prepare and approve a new brief "
+            "with brief prepare."
+        )
     if metadata["schema"] != BRIEF_SCHEMA:
         raise BriefError(f"The assignment brief must use schema {BRIEF_SCHEMA}.")
     _safe_component(metadata["batch"], "The grading batch")
@@ -249,6 +289,17 @@ def _validate_metadata(metadata: dict[str, str]) -> None:
     if metadata["status"] not in {"draft", "approved"}:
         raise BriefError("The assignment brief status must be draft or approved.")
     _validate_mode(metadata["mode"])
+    try:
+        pilot = int(metadata["pilot"])
+    except ValueError as error:
+        raise BriefError("The assignment brief pilot size must be an integer.") from error
+    _validate_review(
+        purpose=metadata["purpose"],
+        review=metadata["review"],
+        pilot=pilot,
+        mode=metadata["mode"],
+        batch=metadata["batch"],
+    )
     if metadata["status"] == "approved":
         for field in ("rubric_sha256", "profile_sha256", "body_sha256"):
             if not _HASH.fullmatch(metadata[field]):
@@ -261,9 +312,51 @@ def _validate_metadata(metadata: dict[str, str]) -> None:
                 raise BriefError(f"The draft {field} must be empty or a lowercase SHA-256 hash.")
         if metadata["approved_at"]:
             _validate_timestamp(metadata["approved_at"])
+    return pilot
 
 
-def _validate_body(body: str, mode: str) -> None:
+def _validate_review(
+    *, purpose: str, review: str, pilot: int, mode: str, batch: str
+) -> None:
+    if purpose not in PURPOSES:
+        raise BriefError("The assignment brief purpose must be grading or holdout.")
+    if review not in REVIEW_CADENCES:
+        raise BriefError(
+            "The assignment brief review cadence must be pilot, every, or none."
+        )
+    if not isinstance(pilot, int) or isinstance(pilot, bool) or not 1 <= pilot <= MAX_PILOT:
+        raise BriefError(
+            f"The assignment brief pilot size must be from 1 to {MAX_PILOT}."
+        )
+    if purpose == "holdout":
+        if mode != "local":
+            raise BriefError(
+                "A holdout brief must use local mode. Calibration reads past "
+                "students' names."
+            )
+        if review != "none":
+            raise BriefError(
+                "A holdout brief uses review cadence none. The holdout report is "
+                "the review."
+            )
+    elif review == "none" and batch != DEMO_BATCH:
+        raise BriefError(
+            "Review cadence none is reserved for the synthetic demo batch. Use "
+            "pilot or every."
+        )
+
+
+_BOUNDARY_LINES = (
+    ("Host mode", "mode", r"(local|cloud)"),
+    ("Purpose", "purpose", r"(grading|holdout)"),
+    ("Review cadence", "review", r"(pilot|every|none)"),
+    ("Pilot size", "pilot", r"(\d+)"),
+)
+
+
+def _validate_body(
+    body: str, *, mode: str, purpose: str, review: str, pilot: int
+) -> None:
     headings = set(_HEADING.findall(body))
     missing = [heading for heading in REQUIRED_HEADINGS if heading not in headings]
     if missing:
@@ -271,11 +364,19 @@ def _validate_body(body: str, mode: str) -> None:
             "The assignment brief is missing headings: " + ", ".join(missing) + "."
         )
     boundaries = _section_body(body, "Boundaries")
-    host_modes = re.findall(r"^Host mode: (local|cloud)$", boundaries, re.MULTILINE)
-    if host_modes != [mode]:
-        raise BriefError(
-            "The Boundaries section must contain one Host mode line that matches mode."
-        )
+    expected = {
+        "mode": mode,
+        "purpose": purpose,
+        "review": review,
+        "pilot": str(pilot),
+    }
+    for label, field, pattern in _BOUNDARY_LINES:
+        found = re.findall(rf"^{label}: {pattern}$", boundaries, re.MULTILINE)
+        if found != [expected[field]]:
+            raise BriefError(
+                f"The Boundaries section must contain one {label} line that "
+                f"matches {field}."
+            )
 
 
 def _section_body(body: str, heading: str) -> str:
@@ -341,12 +442,15 @@ def _digest_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
-def _draft_body(batch: str, mode: str) -> str:
+def _draft_body(batch: str, mode: str, purpose: str, review: str, pilot: int) -> str:
     sections = []
     for heading in REQUIRED_HEADINGS:
         content = ANSWER_REQUIRED
         if heading == "Boundaries":
-            content = f"Host mode: {mode}\n\n{ANSWER_REQUIRED}"
+            content = (
+                f"Host mode: {mode}\nPurpose: {purpose}\nReview cadence: {review}\n"
+                f"Pilot size: {pilot}\n\n{ANSWER_REQUIRED}"
+            )
         sections.append(f"## {heading}\n\n{content}")
     rendered = "\n\n".join(sections)
     return f"# Assignment brief: {batch}\n\n{rendered}\n"
@@ -358,6 +462,9 @@ def _render_brief(brief: AssignmentBrief) -> str:
         course=brief.course,
         status=brief.status,
         mode=brief.mode,
+        purpose=brief.purpose,
+        review=brief.review,
+        pilot=brief.pilot,
         rubric_sha256=brief.rubric_sha256,
         profile_sha256=brief.profile_sha256,
         body_sha256=brief.body_sha256,
@@ -373,6 +480,9 @@ def _render(
     course: str,
     status: str,
     mode: str,
+    purpose: str,
+    review: str,
+    pilot: int,
     rubric_sha256: str,
     profile_sha256: str,
     body_sha256: str,
@@ -386,6 +496,9 @@ def _render(
         "course": course,
         "status": status,
         "mode": mode,
+        "purpose": purpose,
+        "review": review,
+        "pilot": str(pilot),
         "rubric_sha256": rubric_sha256,
         "profile_sha256": profile_sha256,
         "body_sha256": body_sha256,

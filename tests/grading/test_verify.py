@@ -1986,10 +1986,22 @@ def test_the_cli_names_drifted_criteria(tmp_path, phil210):
 
 
 def test_the_cli_accepts_a_matching_rubric(tmp_path, phil210):
+    from scripts.grading.calibration import approval_phrase, approve_calibration
+    from tests.grading.test_calibration import _write as _write_receipt
+
     root = tmp_path / ".grading"
     (root / "profiles").mkdir(parents=True)
-    (root / "profiles" / "phil210.md").write_text(
+    installed = root / "profiles" / "phil210.md"
+    installed.write_text(
         (phil210 / "profile_phil210.md").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    _write_receipt(root, phil210, installed)
+    approve_calibration(
+        root,
+        course="phil210",
+        profile=installed,
+        rubric=phil210 / "grading_rubric.md",
+        approval=approval_phrase("phil210"),
     )
     result = _run("profile", "--course", "phil210",
                   "--rubric", str(phil210 / "grading_rubric.md"), "--root", str(root))

@@ -29,10 +29,31 @@ def profile() -> Path:
 def approved_brief():
     """Create one answered brief bound to the supplied grading context."""
 
-    def make(path, *, batch, course, rubric, profile, mode="local"):
+    def make(
+        path,
+        *,
+        batch,
+        course,
+        rubric,
+        profile,
+        mode="local",
+        purpose="grading",
+        review="pilot",
+        pilot=2,
+    ):
         from scripts.grading.brief import approve_brief, prepare_brief
 
-        prepare_brief(path, batch=batch, course=course, mode=mode)
+        if purpose == "holdout":
+            review = "none"
+        prepare_brief(
+            path,
+            batch=batch,
+            course=course,
+            mode=mode,
+            purpose=purpose,
+            review=review,
+            pilot=pilot,
+        )
         text = path.read_text(encoding="utf-8").replace(
             "<!-- answer-required -->", "Use the rubric and calibrated profile."
         )
