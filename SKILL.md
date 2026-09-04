@@ -310,9 +310,15 @@ instructor sends the exact phrase.
 When the action is `review-pilot` or `review-draft`, stop. Show the
 instructor the tokenized drafts it names, from `.grading/drafts/<batch>/`, or
 tell them where to open them. They are identity-free. Wait for the exact
-phrase in the action's message, then run the returned command. The batch does
-not continue until that command succeeds. A draft edited after approval must
-be shown and approved again.
+message, then run the returned command:
+
+```text
+Approve pilot drafts for <batch>
+```
+
+Under per-draft review the message is `Approve draft <TOKEN> for <batch>`.
+The batch does not continue until the returned command succeeds. A draft
+edited after approval must be shown and approved again.
 
 When the action is `review-consistency`, run the returned consistency command
 and show every flag. Wait for this exact message:
