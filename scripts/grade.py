@@ -15,7 +15,7 @@ Subcommands:
 
 Exit codes: 0 clean, 10 no profile, 11 the rubric drifted since calibration,
 12 a grading action is blocked or requested findings are present, including
-failed verification, 13 malformed input.
+failed verification, 13 malformed input, 14 calibration not approved or stale.
 
 Nothing here loads the token map. Quotes and tokens are checked against the
 redacted source, which is the file the model actually read.
@@ -28,6 +28,7 @@ import hashlib
 import json
 import shlex
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -49,8 +50,10 @@ from scripts.grading.brief import (  # noqa: E402
     approve_brief,
     brief_path,
     check_brief,
+    load_brief,
     prepare_brief,
 )
+from scripts.grading.calibration import check_calibration  # noqa: E402
 from scripts.grading.density import scan  # noqa: E402
 from scripts.grading.drafts import (  # noqa: E402
     DraftPreparationError,
@@ -81,6 +84,10 @@ EXIT_NO_PROFILE = 10
 EXIT_DRIFT = 11
 EXIT_FAILED = 12
 EXIT_MALFORMED = 13
+EXIT_UNAPPROVED = 14
+
+RECALIBRATE_AFTER_DAYS = 120
+RECALIBRATE_AFTER_BRIEFS = 5
 
 
 def _component(label: str):
@@ -126,6 +133,38 @@ def _profile_or_exit(
         raise SystemExit(EXIT_NO_PROFILE) from error
 
 
+def _recalibration_warnings(profile, root: Path, profile_sha256: str) -> list[str]:
+    """Say when a profile is old or heavily used. Warnings only."""
+    warnings: list[str] = []
+    try:
+        calibrated = datetime.strptime(profile.calibrated, "%Y-%m-%d").date()
+    except ValueError:
+        calibrated = None
+    if calibrated is not None:
+        age = (datetime.now(timezone.utc).date() - calibrated).days
+        if age > RECALIBRATE_AFTER_DAYS:
+            warnings.append(
+                f"warning recalibrate: the profile was calibrated {age} days ago. "
+                "Add graded work and calibrate again."
+            )
+    bound = 0
+    assignments = root / "assignments"
+    if assignments.is_dir():
+        for path in sorted(assignments.glob("*.md")):
+            try:
+                brief = load_brief(path)
+            except (BriefError, OSError, UnicodeError, ValueError):
+                continue
+            if brief.status == "approved" and brief.profile_sha256 == profile_sha256:
+                bound += 1
+    if bound >= RECALIBRATE_AFTER_BRIEFS:
+        warnings.append(
+            f"warning recalibrate: {bound} approved assignment briefs use this "
+            "profile. Add graded work from them and calibrate again."
+        )
+    return warnings
+
+
 def _cmd_profile(args: argparse.Namespace) -> int:
     profile = _profile_or_exit(args)
     rubric = load_rubric(args.rubric)
@@ -141,10 +180,22 @@ def _cmd_profile(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return EXIT_DRIFT
+    status = check_calibration(
+        args.root, course=args.course, profile=profile.path, rubric=args.rubric
+    )
+    if status.state != "current":
+        print(f"ERROR calibration {status.state}: {status.message}", file=sys.stderr)
+        return EXIT_UNAPPROVED
     print(
         f"Profile for {profile.course} is current, calibrated "
-        f"{profile.calibrated} from {profile.samples} samples."
+        f"{profile.calibrated} from {profile.samples} samples. Calibration "
+        f"approved {status.approval.approved_at}."
     )
+    profile_sha256 = hashlib.sha256(
+        read_bytes_limited(profile.path, "The calibration profile", 5 * 1024 * 1024)
+    ).hexdigest()
+    for line in _recalibration_warnings(profile, args.root, profile_sha256):
+        print(line)
     return EXIT_OK
 
 
