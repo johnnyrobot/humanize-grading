@@ -20,6 +20,7 @@ from scripts.grading.batch import (
 )
 from scripts.grading.density import PATTERNS_PATH, load_terms, scan
 from scripts.grading.records import GradeRecord
+from scripts import provenance
 from scripts.redaction.tokens import TokenMap
 from scripts.redaction.manifest import RedactionManifest
 from scripts.rehydrate import TokenMapRenderer
@@ -223,7 +224,11 @@ def test_token_map_renderer_parses_the_same_bytes_it_hashes(tmp_path, monkeypatc
     )
 
     assert result.error == ""
-    assert destination.read_text(encoding="utf-8") == "Maya Lin"
+    # The produced file carries an invisible provenance marker; its visible
+    # rehydrated content is still exactly the mapped name.
+    published = destination.read_text(encoding="utf-8")
+    assert provenance.strip_text_marker(published) == "Maya Lin"
+    assert provenance.read_marker(published) == provenance.WORD
 
 
 def _rehydrate_command(

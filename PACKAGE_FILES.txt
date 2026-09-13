@@ -74,6 +74,7 @@ scripts/grading/samples.py
 scripts/grading/verify.py
 scripts/grading/workflow.py
 scripts/path_safety.py
+scripts/provenance.py
 scripts/redact.py
 scripts/redaction/__init__.py
 scripts/redaction/candidates.py
@@ -90,6 +91,7 @@ scripts/rehydrate.py
 scripts/validate-package.py
 skills/humanizer/SKILL.md
 tests/conftest.py
+tests/test_provenance.py
 tests/fixtures/phil210/graded/paper_1_graded_algorithmic_gatekeeping.md
 tests/fixtures/phil210/graded/paper_2_graded_carbon_pricing_developing_nations.md
 tests/fixtures/phil210/graded/paper_3_graded_gig_economy_ai_slop.md

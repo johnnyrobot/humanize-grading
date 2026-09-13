@@ -29,6 +29,7 @@ from scripts.grading.batch import (  # noqa: E402
 )
 from scripts.grading.density import PATTERNS_PATH  # noqa: E402
 from scripts.path_safety import read_bytes_limited, require_component  # noqa: E402
+from scripts import provenance  # noqa: E402
 from scripts.redaction.rehydrate import rehydrate_text  # noqa: E402
 from scripts.redaction.tokens import TokenMap  # noqa: E402
 
@@ -65,6 +66,9 @@ class TokenMapRenderer:
                 )
             text = source_bytes.decode("utf-8")
             rendered, unmapped = rehydrate_text(text, self._token_map)
+            rendered = provenance.stamp_bytes(
+                rendered.encode("utf-8"), destination.suffix
+            ).decode("utf-8")
             destination.write_text(rendered, encoding="utf-8")
             digest = hashlib.sha256(
                 read_bytes_limited(
