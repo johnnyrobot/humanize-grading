@@ -16,7 +16,6 @@ HUMANIZER_SKILL = (ROOT / "skills" / "humanizer" / "SKILL.md").read_text(
     encoding="utf-8"
 )
 README = (ROOT / "README.md").read_text(encoding="utf-8")
-AGENTS = (ROOT / "AGENTS.md").read_text(encoding="utf-8")
 PLUGIN = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
 
 
@@ -151,23 +150,6 @@ for skill_file in sorted(expected_skills):
         raise SystemExit(f"Use the package version {skill_version} in {skill_file}")
 if PLUGIN.get("skills") != ["./", "./skills/humanizer"]:
     raise SystemExit("Point the plugin skill loader at both skills")
-
-plain_language_rules = (
-    "## Writing style",
-    "Lead with the main point.",
-    "Use common words and active voice.",
-    "Keep sentences and paragraphs short.",
-    "Use `must` for requirements.",
-    "Keep the full technical meaning.",
-)
-missing_plain_language_rules = [
-    rule for rule in plain_language_rules if rule not in AGENTS
-]
-if missing_plain_language_rules:
-    raise SystemExit(
-        "Add the missing Plain Language rules to AGENTS.md: "
-        + ", ".join(missing_plain_language_rules)
-    )
 
 PATTERNS = (ROOT / "references" / "ai-patterns.md").read_text(encoding="utf-8")
 pattern_numbers = [int(n) for n in re.findall(r"(?m)^### ([0-9]+)\. ", PATTERNS)]

@@ -418,9 +418,7 @@ so a late replacement or hard link is left untouched. If invalidation cannot be
 completed, redaction stops with an unsafe-path failure before it loads the
 roster or processes submissions.
 
-**[docs/using-the-grader.md](docs/using-the-grader.md) is the full walkthrough** —
-calibration, a graded batch end to end, the core command and exit-code
-reference, and what the tool deliberately does not do. Synthetic runs covered
+Synthetic runs covered
 `calibrate.py inputs`, `holdout`, `approve` and `check`; `grade.py profile`,
 `brief`, `next`, `record prepare`, `review`, `status`, `verify` and
 `consistency`; plus `redact.py` and `rehydrate.py`. The lifecycle output shown comes from that synthetic work. The
